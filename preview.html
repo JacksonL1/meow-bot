@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>clawd-starter · 状态与帧序列</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 40px 32px;
+        background: #faf9f5;
+        color: #2c2c2a;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      h1 {
+        font-size: 18px;
+        font-weight: 500;
+        margin: 0 0 6px;
+      }
+      p.sub {
+        margin: 0 0 28px;
+        font-size: 13px;
+        color: #5f5e5a;
+        line-height: 1.6;
+      }
+      code {
+        font-family: ui-monospace, Consolas, monospace;
+        font-size: 12px;
+        background: #f1efe8;
+        padding: 1px 4px;
+        border-radius: 4px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(184px, 1fr));
+        gap: 16px;
+      }
+      .card {
+        border: 1px solid rgba(0, 0, 0, 0.12);
+        border-radius: 12px;
+        padding: 12px;
+        background: #fff;
+      }
+      .art {
+        height: 158px;
+        display: grid;
+        place-items: center;
+        position: relative;
+      }
+      .art svg {
+        display: none;
+        width: 150px;
+        height: 150px;
+      }
+      .art svg.on {
+        display: block;
+      }
+      .name {
+        font-size: 13px;
+        font-weight: 500;
+        margin-top: 8px;
+      }
+      .ev {
+        font-size: 12px;
+        color: #5f5e5a;
+        margin-top: 3px;
+        font-family: ui-monospace, Consolas, monospace;
+      }
+      .tag {
+        display: inline-block;
+        font-size: 11px;
+        padding: 1px 6px;
+        border-radius: 999px;
+        background: #e6f1fb;
+        color: #0c447c;
+        margin-left: 6px;
+        font-weight: 400;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>状态 → 帧序列</h1>
+    <p class="sub">
+      每张卡片都在真的播：帧数少的靠眼球追踪补活气，帧数多的靠轮播。<br />
+      权威映射表在 <code>docs/guides/state-mapping.md</code>；S7 之后这份数据会从
+      <code>visuals.js</code> 搬进 <code>theme.json</code>，结构不变。
+    </p>
+    <div class="grid" id="grid"></div>
+
+    <script src="./src/visuals.js"></script>
+    <script>
+      const META = [
+        ["sleeping", "睡着", "60s 无事件"],
+        ["idle", "发呆", "无会话 / 25s 无事件"],
+        ["thinking", "思考", "UserPromptSubmit"],
+        ["working", "干活", "PreToolUse / PostToolUse"],
+        ["attention", "干完了", "Stop"],
+        ["notification", "要你批权限", "PermissionRequest"],
+        ["error", "出错", "PostToolUseFailure"],
+      ];
+
+      const tpl = document.createElement("template");
+      const node = (markup) => {
+        tpl.innerHTML = markup.trim();
+        return tpl.content.firstElementChild;
+      };
+
+      const grid = document.getElementById("grid");
+
+      for (const [key, label, ev] of META) {
+        const def = window.VISUAL_STATES[key];
+        const card = document.createElement("div");
+        card.className = "card";
+
+        const art = document.createElement("div");
+        art.className = "art";
+        const nodes = def.frames.map((m) => node(m));
+        nodes[0].classList.add("on");
+        art.append(...nodes);
+
+        let i = 0;
+        if (nodes.length > 1) {
+          setInterval(() => {
+            nodes[i].classList.remove("on");
+            i = (i + 1) % nodes.length;
+            nodes[i].classList.add("on");
+          }, 1000 / (def.fps || 8));
+        }
+
+        const meta = document.createElement("div");
+        meta.className = "name";
+        meta.textContent = label;
+        const badge = document.createElement("span");
+        badge.className = "tag";
+        badge.textContent = `${def.frames.length} 帧 · ${def.fps}fps${def.eyeTracking ? " · 跟眼" : ""}`;
+        meta.appendChild(badge);
+
+        const evEl = document.createElement("div");
+        evEl.className = "ev";
+        evEl.textContent = `${key} · ${ev}`;
+
+        card.append(art, meta, evEl);
+        grid.appendChild(card);
+      }
+    </script>
+  </body>
+</html>

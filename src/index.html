@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>clawd-starter</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        user-select: none;
+        cursor: default;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      #stage {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        cursor: grab;
+      }
+      #stage:active {
+        cursor: grabbing;
+      }
+      #pet {
+        position: relative;
+        width: 176px;
+        height: 176px;
+      }
+      /* 双图层交叉淡入：新图层先画好再淡入，旧图层同时淡出，
+         中间不会出现"空白一帧"——这是单图层换图做不到的 */
+      .layer {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        opacity: 0;
+        transition: opacity 160ms ease-out;
+      }
+      .layer.show {
+        opacity: 1;
+      }
+      /* 同一图层里塞着该状态的所有帧，只显示当前那一帧 */
+      .layer svg {
+        display: none;
+        width: 176px;
+        height: 176px;
+      }
+      .layer svg.on {
+        display: block;
+      }
+      #hint {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 6px;
+        text-align: center;
+        font-size: 11px;
+        color: #5f5e5a;
+        opacity: 0;
+        transition: opacity 200ms;
+        pointer-events: none;
+      }
+      body:hover #hint {
+        opacity: 0.75;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="stage">
+      <div id="pet">
+        <div class="layer" id="layerA"></div>
+        <div class="layer" id="layerB"></div>
+      </div>
+    </div>
+    <div id="hint">拖动我 · 右键退出</div>
+    <script src="./visuals.js"></script>
+    <script src="./renderer.js"></script>
+  </body>
+</html>
