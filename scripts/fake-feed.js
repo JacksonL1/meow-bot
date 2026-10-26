@@ -10,11 +10,9 @@
 // 原项目不用这么麻烦，它自带 bash test-demo.sh / test-oneshot-gate.sh。
 // ============================================================
 
-const fs = require("node:fs");
-const path = require("node:path");
-
-const ROOT = path.resolve(__dirname, "..");
-const PORT_FILE = path.join(ROOT, ".clawd-port");
+// 端点与 token 都从 userData 的端点文件读（SEC-02）。
+// 读不到说明桌宠没开——这里直接退出，行为与真 hook 保持一致。
+const { readPortFile } = require("../src/port-file");
 
 const STATE_EVENT = {
   idle: "SessionStart",
@@ -25,16 +23,17 @@ const STATE_EVENT = {
   notification: "PermissionRequest",
 };
 
-function readPort() {
-  if (!fs.existsSync(PORT_FILE)) {
-    console.error(`找不到 ${PORT_FILE}`);
+function readEndpoint() {
+  try {
+    return readPortFile();
+  } catch (err) {
+    console.error(`读不到端点文件：${err.message}`);
     console.error("先把桌宠跑起来：npm start");
     process.exit(1);
   }
-  return fs.readFileSync(PORT_FILE, "utf8").trim();
 }
 
-async function post(port, event, extra = {}) {
+async function post(port, token, event, extra = {}) {
   const body = {
     agent: "fake",
     session_id: extra.session_id || "demo-session",
@@ -44,17 +43,24 @@ async function post(port, event, extra = {}) {
   };
   const res = await fetch(`http://127.0.0.1:${port}/state`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      "x-clawd-token": token,
+    },
     body: JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    console.log(`  ${event.padEnd(18)} → HTTP ${res.status} ${data.error || ""}`);
+    return;
+  }
   console.log(`  ${event.padEnd(18)} → visual: ${data.visual}`);
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function main() {
-  const port = readPort();
+  const { port, token } = readEndpoint();
   const arg = process.argv[2];
 
   // 形态一：--hold <state> <seconds>
@@ -69,7 +75,7 @@ async function main() {
     console.log(`保持 ${state} 共 ${seconds}s（每 2s 重发一次 ${event}）`);
     const until = Date.now() + seconds * 1000;
     while (Date.now() < until) {
-      await post(port, event);
+      await post(port, token, event);
       await sleep(2000);
     }
     return;
@@ -77,7 +83,7 @@ async function main() {
 
   // 形态二：单个事件
   if (arg) {
-    await post(port, arg);
+    await post(port, token, arg);
     return;
   }
 
@@ -97,7 +103,7 @@ async function main() {
   for (const [event, delay, note] of script) {
     await sleep(delay);
     console.log(`· ${note}`);
-    await post(port, event);
+    await post(port, token, event);
   }
   console.log("\n剧本结束。等 25 秒它会开始发呆，60 秒会睡着。");
 }

@@ -21,19 +21,55 @@ let framer = null;
 // 状态切换
 // ------------------------------------------------------------
 
+// SEC-05：把 SVG 字符串变成 DOM 之前，先按白名单洗一遍。
+// 现在 markup 是本地常量、风险为零；但 S7 的主题系统会让这里接受第三方文件，
+// 那时 <script>、on* 属性、javascript: 链接都是现成的 XSS 入口。
+const ALLOWED_TAGS = new Set([
+  "svg", "g", "defs", "title", "desc", "path", "rect", "circle", "ellipse",
+  "line", "polyline", "polygon", "text", "tspan",
+  "lineargradient", "radialgradient", "stop", "use",
+]);
+
+function sanitizeSvg(doc) {
+  const root = doc.documentElement;
+  if (!root || root.nodeName.toLowerCase() !== "svg") return null;
+
+  for (const el of [...root.querySelectorAll("*")]) {
+    if (!ALLOWED_TAGS.has(el.nodeName.toLowerCase())) {
+      el.remove();
+      continue;
+    }
+    for (const attr of [...el.attributes]) {
+      const name = attr.name.toLowerCase();
+      const value = attr.value;
+      const bad =
+        name.startsWith("on") ||
+        ((name === "href" || name === "xlink:href") && !value.trim().startsWith("#")) ||
+        /javascript:/i.test(value) ||
+        // url(#id) 是本地渐变引用，放行；url(http…)/url(data…) 会发外部请求，拦掉
+        /url\s*\(\s*['"]?(?!\s*#)/i.test(value);
+      if (bad) el.removeAttribute(attr.name);
+    }
+  }
+  return document.importNode(root, true);
+}
+
 function svgNode(markup) {
-  const tpl = document.createElement("template");
-  tpl.innerHTML = markup.trim();
-  return tpl.content.firstElementChild;
+  const doc = new DOMParser().parseFromString(String(markup).trim(), "image/svg+xml");
+  if (doc.querySelector("parsererror")) return null; // 格式都不对，别硬塞进 DOM
+  return sanitizeSvg(doc);
 }
 
 function buildFrames(state) {
   const def = window.VISUAL_STATES[state] || window.VISUAL_STATES.idle;
-  const nodes = def.frames.map((markup) => {
-    const node = svgNode(markup);
-    node.classList.add("frame");
-    return node;
-  });
+  const nodes = def.frames
+    .map((markup) => svgNode(markup))
+    .filter((node) => {
+      if (!node) return false;
+      node.classList.add("frame");
+      return true;
+    });
+  if (!nodes.length) return null;
   nodes[0].classList.add("on");
   return { nodes, def };
 }
@@ -46,7 +82,9 @@ function setState(state) {
   const nextLayer = layers[nextIndex];
 
   // 1) 先把新状态的所有帧画进"看不见"的那一层
-  const { nodes, def } = buildFrames(state);
+  const built = buildFrames(state);
+  if (!built) return; // 洗不出可用节点就当没收到，保持当前画面
+  const { nodes, def } = built;
   nextLayer.replaceChildren(...nodes);
   frames = nodes;
   frameIndex = 0;
@@ -171,6 +209,7 @@ window.clawd.onState((snapshot) => setState(snapshot.visual || "idle"));
 
 window.petDebug = {
   setState,
+  svg: svgNode, // 在 DevTools 里试清洗规则：petDebug.svg('<svg ...><script>..</script></svg>')
   gaze: (g) => {
     gazeTarget = g;
     if (!gazeRaf) gazeRaf = requestAnimationFrame(stepGaze);

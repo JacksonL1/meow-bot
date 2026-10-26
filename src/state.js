@@ -48,6 +48,53 @@ const IDLE_AFTER_MS = 25_000; // 这么久没动静 → 回 idle 发呆
 const SLEEP_AFTER_MS = 60_000; // 这么久没动静 → 睡着
 const TICK_MS = 250;
 
+// SEC-04：请求来自网络侧，任何字段都不能直接进内存结构。
+const MAX_SESSION_ID = 64;
+const MAX_SESSIONS = 100;
+const MAX_EVENT_LEN = 64;
+
+function sanitizeSessionId(raw) {
+  if (typeof raw !== "string") return "default";
+  // 只留可见 ASCII，砍掉控制字符，限长 64
+  const id = raw.replace(/[^\x20-\x7E]/g, "").slice(0, MAX_SESSION_ID);
+  return id || "default";
+}
+
+function sanitizeEvent(raw) {
+  return typeof raw === "string" ? raw.slice(0, MAX_EVENT_LEN) : "Unknown";
+}
+
+// SEC-09：分层处理，不要一刀切。
+//   存储层：保留完整路径（清洗控制字符、限长 1024）——S6 的「跳转终端」需要它
+//   快照层：只输出最后一段目录名——快照会进渲染进程、进看板、上屏幕
+// 只留 basename 会顺手砍掉 S6 的功能，那不是修复，是砍功能。
+const MAX_CWD_STORE = 1024;
+const MAX_CWD_PUBLIC = 200;
+
+function sanitizeCwd(raw) {
+  if (typeof raw !== "string" || !raw) return undefined;
+  return raw.replace(/[\x00-\x1F\x7F]/g, "").slice(0, MAX_CWD_STORE) || undefined;
+}
+
+function publicCwd(full) {
+  if (!full) return null;
+  const base = full.split(/[\\/]/).filter(Boolean).pop() || "";
+  return base.slice(0, MAX_CWD_PUBLIC) || null;
+}
+
+// 超出上限时淘汰最久没动静的那条，保证内存有界
+function evictOldest(sessions) {
+  let oldestId = null;
+  let oldestAt = Infinity;
+  for (const s of sessions.values()) {
+    if (s.lastAt < oldestAt) {
+      oldestAt = s.lastAt;
+      oldestId = s.id;
+    }
+  }
+  if (oldestId !== null) sessions.delete(oldestId);
+}
+
 function createStore({ onChange } = {}) {
   /** @type {Map<string, {id:string,state:string,stateSince:number,lastAt:number,cwd?:string}>} */
   const sessions = new Map();
@@ -64,7 +111,7 @@ function createStore({ onChange } = {}) {
       sessions: [...sessions.values()].map((s) => ({
         id: s.id,
         state: s.state,
-        cwd: s.cwd || null,
+        cwd: publicCwd(s.cwd),
         idleMs: Date.now() - s.lastAt,
       })),
     };
@@ -80,8 +127,11 @@ function createStore({ onChange } = {}) {
   }
 
   function apply(payload) {
-    const id = String(payload.session_id || "default");
-    const event = payload.event || "Unknown";
+    if (!payload || typeof payload !== "object") return snapshot();
+
+    const id = sanitizeSessionId(payload.session_id);
+    const event = sanitizeEvent(payload.event);
+    const cwd = sanitizeCwd(payload.cwd);
     const now = Date.now();
 
     if (event === "SessionEnd") {
@@ -92,11 +142,12 @@ function createStore({ onChange } = {}) {
 
     let s = sessions.get(id);
     if (!s) {
-      s = { id, state: "idle", stateSince: now, lastAt: now, cwd: payload.cwd };
+      s = { id, state: "idle", stateSince: now, lastAt: now, cwd };
       sessions.set(id, s);
+      if (sessions.size > MAX_SESSIONS) evictOldest(sessions);
     }
     s.lastAt = now;
-    if (payload.cwd) s.cwd = payload.cwd;
+    if (cwd) s.cwd = cwd;
 
     const target = EVENT_STATE[event];
     if (target && target !== s.state) {

@@ -14,10 +14,19 @@
 //   2. -webkit-app-region: drag 会让该区域收不到 mousemove → 自己实现拖拽
 // ============================================================
 
-const { app, BrowserWindow, ipcMain, screen } = require("electron");
+const { app, BrowserWindow, ipcMain, screen, powerMonitor } = require("electron");
+const crypto = require("node:crypto");
+const fs = require("node:fs");
 const path = require("node:path");
 const { startServer } = require("./server");
 const { createStore } = require("./state");
+const { portFilePath } = require("./port-file");
+
+// SEC-10：单实例锁。第二个实例直接退出，避免两个进程抢同一个端点文件。
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+  return;
+}
 
 const WIN_W = 240;
 const WIN_H = 240;
@@ -50,6 +59,11 @@ function createWindow() {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
+      // SEC-06：把安全基线写成显式配置，不依赖 Electron 的默认值。
+      // 默认值会随版本变，而这三项一旦被无声削弱，隔离就没了。
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
       backgroundThrottling: false,
     },
   });
@@ -74,11 +88,11 @@ function broadcast(snapshot) {
 app.whenReady().then(() => {
   const store = createStore({ onChange: broadcast });
 
-  // 端口文件：打包后写 userData，开发时写项目根目录（方便 fake-feed 找到）
-  const portFile = app.isPackaged
-    ? path.join(app.getPath("userData"), "clawd-starter.port")
-    : path.join(app.getAppPath(), ".clawd-port");
-  const server = startServer({ store, portFile });
+  // SEC-02 / SEC-10：端点统一写 userData，内容是 { port, token }，权限 0600。
+  // 不再写项目根目录——那里可能被同步盘带走，也可能被别的项目误读。
+  const portFile = portFilePath();
+  const token = crypto.randomBytes(32).toString("hex");
+  const server = startServer({ store, portFile, token });
 
   createWindow();
 
@@ -132,6 +146,22 @@ app.whenReady().then(() => {
 
   ipcMain.on("app:quit", () => app.quit());
 
+  // SEC-07：锁屏 / 休眠时先把窗口收起来。
+  // 'screen-saver' 是最高常规层级，不收起来会浮在锁屏界面之上——
+  // 等 S5 气泡显示"正在执行什么命令"时，这就成了别人能看见的信息泄露。
+  powerMonitor.on("lock-screen", () => {
+    if (win && !win.isDestroyed()) win.hide();
+  });
+  powerMonitor.on("unlock-screen", () => {
+    if (win && !win.isDestroyed()) win.showInactive();
+  });
+  powerMonitor.on("suspend", () => {
+    if (win && !win.isDestroyed()) win.hide();
+  });
+  powerMonitor.on("resume", () => {
+    if (win && !win.isDestroyed()) win.showInactive();
+  });
+
   // 首帧推送：避免桌宠启动后一直呆在初识状态
   setTimeout(() => broadcast(store.snapshot()), 300);
 
@@ -139,6 +169,11 @@ app.whenReady().then(() => {
     clearInterval(gazeTimer);
     store.dispose();
     server.close();
+    // 正常退出时删掉端点文件：否则 hook 会拿着旧端口去连，连不上再静默退出。
+    // 崩溃时删不掉也没关系，hook 对 ECONNREFUSED 同样是静默的。
+    try {
+      fs.unlinkSync(portFile);
+    } catch {}
   });
 });
 

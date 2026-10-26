@@ -1,0 +1,64 @@
+#!/usr/bin/env node
+"use strict";
+// 台账巡检：找出「代码里有、但 FILE_MAP 没记」和「台账记了、但文件已不存在」的条目。
+// 只报告，不改文件。用法： node docs/ledger/scripts/check-filemap.js
+
+const fs = require("node:fs");
+const path = require("node:path");
+
+const ROOT = path.resolve(__dirname, "../../..");
+const MAP_FILE = path.join(ROOT, "docs/ledger/FILE_MAP.md");
+const SKIP_DIRS = new Set(["node_modules", ".git", ".idea", "dist", "docs"]);
+const SKIP_FILES = new Set([".DS_Store", "Thumbs.db"]);
+
+function walk(dir, acc = []) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name.startsWith(".") && entry.name !== ".clawd-port" && entry.name !== ".gitignore") continue;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (SKIP_DIRS.has(entry.name)) continue;
+      walk(full, acc);
+    } else if (!SKIP_FILES.has(entry.name)) {
+      acc.push(path.relative(ROOT, full).split(path.sep).join("/"));
+    }
+  }
+  return acc;
+}
+
+function main() {
+  if (!fs.existsSync(MAP_FILE)) {
+    console.error(`找不到 ${MAP_FILE}`);
+    process.exit(1);
+  }
+  const md = fs.readFileSync(MAP_FILE, "utf8");
+  const recorded = new Set();
+  for (const m of md.matchAll(/\|\s*`([^`]+)`\s*\|/g)) {
+    const p = m[1];
+    if (p.endsWith("*") || p.endsWith("/")) continue; // 通配/目录条目不参与比对
+    recorded.add(p);
+  }
+
+  const actual = walk(ROOT);
+
+  const missing = actual.filter((f) => !recorded.has(f));
+  const stale = [...recorded].filter((f) => !actual.includes(f));
+
+  console.log(`项目根：${ROOT}`);
+  console.log(`实际文件 ${actual.length} 个，台账记录 ${recorded.size} 条\n`);
+
+  if (missing.length) {
+    console.log(`[!] 有 ${missing.length} 个文件没进台账：`);
+    missing.forEach((f) => console.log(`    ${f}`));
+    console.log("");
+  }
+  if (stale.length) {
+    console.log(`[!] 台账里有 ${stale.length} 条已不存在（删了或改名了）：`);
+    stale.forEach((f) => console.log(`    ${f}`));
+    console.log("");
+  }
+  if (!missing.length && !stale.length) {
+    console.log("[ok] 台账与文件系统一致。");
+  }
+}
+
+main();

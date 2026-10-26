@@ -2,3 +2,7 @@ node_modules/
 .clawd-port
 dist/
 /.idea
+docs/ledger/.last-check.json
+
+# 显卡驱动按进程 CWD 写的着色器日志：启动 Electron 时会落在仓库根目录
+NVIDIA Corporation/
