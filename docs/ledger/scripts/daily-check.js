@@ -135,12 +135,23 @@ function main() {
   if (fs.existsSync(MAP_FILE)) {
     const md = fs.readFileSync(MAP_FILE, "utf8");
     const recorded = new Set();
+    const prefixes = []; // 形如 `themes/**`：整目录登记，不逐帧列
     for (const m of md.matchAll(/\|\s*`([^`]+)`\s*\|/g)) {
       const p = m[1];
+      if (p.endsWith("/**")) {
+        prefixes.push(p.slice(0, -2)); // 保留结尾的 "/"
+        continue;
+      }
       if (p.endsWith("*") || p.endsWith("/")) continue;
       recorded.add(p);
     }
-    mapMissing = files.filter((f) => !recorded.has(f));
+    // 与 check-filemap.js 保持同一套判定：主题资产有几十个 SVG 帧，
+    // 逐帧登记只会让台账变成文件列表，所以允许 `themes/**` 覆盖其下所有文件。
+    // 这里曾经只写了 endsWith("*") → continue，把前缀条目当成"通配项"丢掉了，
+    // 结果两个脚本对同一条台账给出相反结论（一个 [ok]，一个报漏记 43 个）。
+    mapMissing = files.filter(
+      (f) => !recorded.has(f) && !prefixes.some((pre) => f.startsWith(pre))
+    );
     if (mapMissing.length) issues.push(`FILE_MAP 漏记 ${mapMissing.length} 个文件`);
   }
 

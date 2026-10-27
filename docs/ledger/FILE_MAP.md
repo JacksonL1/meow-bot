@@ -1,6 +1,6 @@
 # 文件地图 — clawd-starter
 
-> 20 个源文件（15 个 `src/` + 2 个 `hooks/` + 3 个 `scripts/`）全部通读过，职责为实际行为，不是从文件名推测。
+> 22 个源文件（15 个 `src/` + 2 个 `hooks/` + 5 个 `scripts/`）全部通读过，职责为实际行为，不是从文件名推测。
 > 配了巡检脚本 `node docs/ledger/scripts/check-filemap.js`，可发现「代码里有、台账没记」的文件；它只报告，不改本文件。
 
 ## 目录结构
@@ -9,10 +9,12 @@
 clawd-starter/
 ├── src/                 Electron 主进程 + 预加载 + 渲染层（全部核心代码）
 │                        三个窗口：桌宠（index.html）/ 权限气泡（bubble.html）/ 会话看板（dashboard.html）
+├── themes/              主题包：<id>/theme.json + assets/*.svg（S7）
 ├── hooks/               agent hook 适配器 + 安装脚本（S4 / S5）
-├── scripts/             调试工具 + 回归闸门 + 截图工具
+├── scripts/             调试工具 + 回归闸门 + 截图 + 主题打包/迁移
 ├── docs/ledger/         开发台账（本项目文档）
 ├── preview.html         静态预览页，浏览器直接打开
+├── preview-bundle.js    由 themes/ 生成，只给预览页吃
 ├── README.md            项目说明与踩坑
 ├── package.json         依赖（只有 electron）
 └── （无运行时文件落盘）
@@ -24,7 +26,7 @@ clawd-starter/
 
 | 文件 | 阶段 | 职责 | 备注 |
 |---|---|---|---|
-| `src/main.js` | S1 / S5 / S6 | Electron 主进程：单实例锁、建透明置顶窗口、绑定拖拽与点击穿透 IPC、100ms 采样全局光标算 gaze、锁屏/休眠隐藏窗口、退出时清理；S5 起再管气泡窗口（懒创建 / 定位 / 握手 / 高度回传）；S6 再管看板窗口（懒创建 / toggle / 贴着桌宠定位）与 `dashboard:snapshot` / `dashboard:copy-path` 两个 IPC | 406 行。三个窗口参数刻意不同 + `powerMonitor` + **`bubble:ready` 握手**是关键 |
+| `src/main.js` | S1 / S5 / S6 / S7 | Electron 主进程：单实例锁、建透明置顶窗口、绑定拖拽与点击穿透 IPC、100ms 采样全局光标算 gaze、锁屏/休眠隐藏窗口、退出时清理；S5 起再管气泡窗口（懒创建 / 定位 / 握手 / 高度回传）；S6 再管看板窗口（懒创建 / toggle / 贴着桌宠定位）与 `dashboard:snapshot` / `dashboard:copy-path`；S7 在建窗口**之前**先定主题，并接 `theme:get` / `theme:list` / `theme:set` 三个 IPC | 480 行。三个窗口参数刻意不同 + `powerMonitor` + **`bubble:ready` 握手** + **主题必须先于 createWindow**（渲染层一加载就来拉） |
 | `src/permission.js` | S5 | 权限裁决台：`POST /permission` 进来后挂起响应，所有结局（allow / deny / 超时 / 关闭 / 退出 / 对端断开）收敛到唯一出口 `settle()`，保证恰好响应一次；入参全限长 | 134 行。三条红线写在文件头：不做决定就 204、不二次响应、只认 allow/deny |
 | `src/bubble.html` | S5 | 气泡页面：CSP `default-src 'none'`、圆角卡片、工具名 / 命令 / 来源三行、两个按钮、回落说明 | 「允许」故意不做成主色——防止养成盲批习惯 |
 | `src/bubble-renderer.js` | S5 | 气泡渲染层：`textContent` 写入（命令是 agent 给的字符串，绝不当 HTML 解析）、点完立刻置灰防连点、**每次 render 先恢复按钮可用**、量高度回传主进程、Esc = 不表态 | 74 行。恢复正常按钮那两行是修 bug 加的，别删 |
@@ -35,13 +37,15 @@ clawd-starter/
 | `src/server.js` | S2 / S5 | 本地 HTTP 服务：`/state` 与 `/health` 走四道锁（Host / Origin / Token / Content-Type）；`/permission` **不校 token**（调用方是 Claude Code，带不上）但过 Host / Origin / Content-Type 三道 | `/permission` 比 `/state` 更开放，这是 HTTP hook 架构的固有属性，见 SECURITY.md |
 | `src/port-file.js` | S2 | 端点文件唯一真相：按平台算 userData 路径、写 `{port, token}`（0600）、读回并校验格式 | 59 行。`fake-feed.js` 与主进程共用，避免两边路径漂移 |
 | `src/state.js` | S2 / S6 | 状态机心脏：`EVENT_STATE` 事件映射、`PRIORITY` 优先级仲裁、oneshot 定时回落、25s 发呆 / 60s 入睡、250ms 统一 tick；入参清洗（session_id 64 字符、会话上限 100）。**SEC-09 两层在这里分开**：`sanitizeCwd()` 存完整路径（限 1024），`publicCwd()` 只出最后一段目录名（限 200）；`snapshot()` 用后者，`fullCwd(id)` 是完整路径的唯一读口 | 217 行。原项目 4098 行里抽出的骨架。**只留 basename 会顺手砍掉 S6 的「复制路径」——那不是修复，是砍功能** |
-| `src/renderer.js` | S3 / S6 | 渲染层：SVG 白名单清洗（`DOMParser`，剥 `on*`/外部 href/`javascript:`）、状态切换重建 DOM、双图层交叉淡入、按 fps 切帧、瞳孔位移插值、命中判定切穿透；S6 加**双击 `#pet` 开关看板**（单击必须留给拖拽） | 232 行。`window.petDebug` 调试入口（含 `svg()` 试清洗、`state()` 查当前状态） |
-| `src/visuals.js` | S3 | 视觉数据：**布偶猫**形象，7 个状态共 19 帧的 SVG 帧序列、fps、眼球可动标记；`ragdoll()` 一个函数带全部参数（eyes/fur/point/tail/puff/blush），overlay 挂件（思考气泡/火花/闪光/铃铛/zzz）与形象解耦 | 334 行。换形象必须守住 4 条契约，见文件头注释 |
-| `src/preload.js` | S1 / S6 | 主窗口上下文桥：向渲染层暴露 **7** 个动作（onState / onGaze / dragStart / dragEnd / setIgnoreMouse / toggleDashboard / quit） | 15 行。安全边界，不要加 `ipcRenderer`。动作数被回归钉死了（6 → 7 是 S6 加的），多一个少一个都会红 |
-| `src/index.html` | S1 | 窗口页面：CSP meta、透明背景样式、双图层容器、加载 visuals.js 与 renderer.js | 88 行。CSP 为 `default-src 'none'` + 白名单 |
+| `src/renderer.js` | S3 / S6 / S7 | 渲染层：SVG 白名单清洗（`DOMParser`，剥 `on*`/外部 href/`javascript:`/非本地 `url()`）、状态切换重建 DOM、双图层交叉淡入、按 fps 切帧、瞳孔位移插值、命中判定切穿透；S6 加双击 `#pet` 开关看板；S7 从主题构建帧序列（`applyTheme`）、白名单扩到 clipPath/mask/filter + 9 个 fe 图元、`stdDeviation` 钳到 40 | 319 行。**白名单现在是唯一的出口管控**——`filter`/`clip-path`/`mask` 的值天生就是 `url()`。`petDebug` 里有 `theme()` / `builds()` / `stateLog()` 三个排查入口 |
+| `src/theme.js` | S7 | 主题加载器（主进程）：扫 `themes/`、校验 `theme.json`（schemaVersion / 状态名 / fps 范围）、校验资产名与真实路径（双保险防穿越）、限长限量（单文件 256KB / 主题 4MB / 单状态 12 帧）、缺状态用 idle 补齐、全坏时给内置兜底画面。**只做文件与格式校验，不做内容清洗**（清洗需要 DOM，在渲染层） | 325 行。分层理由写在文件头：主进程管"能不能读"，渲染层管"能不能进 DOM" |
+| `src/preload.js` | S1 / S6 / S7 | 主窗口上下文桥：向渲染层暴露 **9** 个动作（onState / onGaze / dragStart / dragEnd / setIgnoreMouse / toggleDashboard / getTheme / onTheme / quit） | 19 行。安全边界，不要加 `ipcRenderer`。动作数被回归钉死了（6 → 7 → 9），多一个少一个都会红 |
+| `src/index.html` | S1 / S7 | 窗口页面：CSP meta、透明背景样式、双图层容器。**S7 起不再引 `visuals.js`**，只加载 `renderer.js`——帧数据走 IPC | 88 行。CSP 为 `default-src 'none'` + 白名单 |
 | `scripts/fake-feed.js` | S2 | 假数据源：从端点文件读 port+token 后 POST 事件，支持完整剧本 / 单事件 / `--hold` 保持状态 | S4 之后只用于离线调试，真事件由 hook 送 |
-| `scripts/verify-electron.js` | S4-前 / S5 / S6 | 回归闸门：同时开主进程 inspector(9229) 与渲染进程 CDP(9222)，跑 **64 项断言**——窗口属性、透明、IPC 接线、DOM、帧轮播、gaze、瞳孔唯一性、HTTP 四道锁、权限六段（拒绝/允许/超时/跨源/非 JSON/坏 body）、看板七段、单实例锁、退出收尾、端点清理 | 零第三方依赖（用 Node 内置 `WebSocket`）。`npm run verify:electron`。三条坑：**主进程 inspector 连上后必须先发 `Runtime.enable`**、清理要用 `taskkill /T /F` 杀进程树、要用 `--user-data-dir` 自隔离否则和用户开着的桌宠抢单实例锁 |
-| `scripts/preview-shot.js` | S3 / S6 | 把 `preview.html` 渲染成 `docs/ragdoll-states.png`（七状态对照图），改完形象后用来目视确认「没改坏」 | 193 行，零第三方依赖。`finally` 里 `taskkill /T /F`——不然 GPU 子进程逃逸，下次启动报 `Unable to move the cache` |
+| `scripts/verify-electron.js` | S4-前 / S5 / S6 / S7 | 回归闸门：同时开主进程 inspector(9229) 与渲染进程 CDP(9222)，跑 **92 项断言**——窗口属性、透明、IPC 接线、DOM、帧轮播、gaze、瞳孔唯一性、HTTP 四道锁、权限六段、看板七段、SVG 白名单、主题加载与拒绝路径、单实例锁、退出收尾、端点清理 | 零第三方依赖（用 Node 内置 `WebSocket`）。`npm run verify:electron`。坑：**主进程 inspector 连上后必须先发 `Runtime.enable`**、清理要 `taskkill /T /F` 杀进程树、要用 `--user-data-dir` 自隔离、**动手改状态前要等启动推送静默** |
+| `scripts/preview-shot.js` | S3 / S7 | 把 `preview.html` 渲染成 `docs/<theme>-states.png`（七状态对照图），改完形象后用来目视确认「没改坏」。会先自动重建预览包，再按 `--theme=` 截对应主题 | 193 行，零第三方依赖。`finally` 里 `taskkill /T /F`——不然 GPU 子进程逃逸，下次启动报 `Unable to move the cache` |
+| `scripts/build-preview-bundle.js` | S7 | 把 `themes/` 打成 `preview-bundle.js`。preview.html 是 `file://` 打开的静态页，`fetch` 读不到本地文件，只能打包 | 只给预览用；桌宠运行时不读它，所以包过期不会影响实际形象 |
+| `scripts/migrate-visuals-to-theme.js` | S7 | **一次性**迁移脚本：把 `visuals.js` 里的帧字符串拆成 `themes/<id>/assets/*.svg` + `theme.json`。两个主题都是它跑出来的（ragdoll 取自 `src/visuals.js`，crab 取自 `git show 85c094a`） | 手抄 19 帧必然出错，且抄完没法证明"和原来一样"。**不要在日常流程里跑**，会覆盖手改过的主题 |
 | `hooks/clawd-hook.js` | S4 | Claude Code hook 适配器：读端点文件 → 读 stdin（2s 硬超时 / 1MB 上限）→ 只取 `session_id/event/cwd/tool_name` → POST（1.5s 超时）→ 永远 `exit(0)` | 111 行。三条铁律：不阻塞、不打日志、不抛异常。桌宠没开就走 `readPortFile` 的 catch 直接返回 |
 | `hooks/install.js` | S4 / S5 | 多 agent 安装器。`AGENTS` 表驱动 `--agent claude\|codebuddy\|workbuddy`，往对应 `settings.json` 的 `hooks` 段增量合并：观察型 command hook（按 agent 决定是否写 `async: true, timeout: 5`）+ 权限条目（只有 `permission: "http"` 的 agent 才装；WorkBuddy 原生处理权限，装的是死配置）。marker 只认自己的条目，备份 + 临时文件 rename 原子写，支持 `--uninstall` / `--dry-run` / `--file` | 观察型 hook 不能拖住 agent，权限 hook 反过来必须拖住——**两种语义相反，不要统一** |
 
@@ -49,8 +53,10 @@ clawd-starter/
 
 | 文件 | 职责 | 备注 |
 |---|---|---|
-| `preview.html` | 静态预览页，浏览器打开可一次看完所有状态的 SVG 与帧序列 | 不参与运行，纯设计对照用 |
-| `docs/ragdoll-states.png` | 布偶猫七状态预览截图，用于设计留档与"改坏了没"的目视对照 | 2026-10-27 形象改造时截的 |
+| `preview.html` | 静态预览页，浏览器打开可一次看完某个主题所有状态的 SVG 与帧序列；顶部有主题下拉框，支持 `?theme=crab` | 不参与运行，纯设计对照用 |
+| `preview-bundle.js` | `themes/` 的打包产物（约 125KB），由 `npm run build:preview` 生成。preview.html 通过它读数据 | 生成物，**不要手改**；它过期只影响预览，不影响桌宠 |
+| `themes/**` | 主题资产：`<id>/theme.json` + `<id>/assets/*.svg`。现有 `ragdoll`（默认）、`crab`、`_template`（下划线开头 = 不参与主题列表） | 整目录登记，不逐帧列。契约与字段说明见 `themes/README.md` |
+| `docs/ragdoll-states.png` / `docs/crab-states.png` | 两套主题的七状态对照图，用于设计留档与"改坏了没"的目视对照 | `npm run preview:states` / `node scripts/preview-shot.js --theme=crab` |
 | `README.md` | 项目说明、已验证能力清单、故意的简化对照表、12 条踩坑记录 | 踩坑部分是同类项目最有价值的参考 |
 | `package.json` | 只有 `electron ~45.0.0` 一个依赖，`npm start` → `electron .` | 用 `~` 不用 `^`：补丁自动进（安全修复），minor 要人过一遍再升 |
 | `package-lock.json` | 依赖锁定，实际安装 45.0.0 | `~45.0.0` 允许 45.0.x 补丁，挡住 45.1+ |
@@ -106,7 +112,6 @@ Claude Code 要执行工具
 Claude Code 会一直等到 hook 超时。详见 `SECURITY.md`「退出时必须给挂起的请求一个答复」。
 
 看板是**第三条流**，方向和其他两条相反——是渲染进程主动来要，不是推：
-
 ```text
 用户双击桌宠（renderer 认落在 #pet 上的 dblclick）
         │  IPC "dashboard:toggle"
@@ -131,6 +136,37 @@ Claude Code 会一直等到 hook 超时。详见 `SECURITY.md`「退出时必须
 
 为什么要轮询而不是推送：`idleMs` 本来就随时间变，即使没人发事件也得刷新。推的话还要维护
 一套「什么时候该推」，而轮询一个本地 IPC 的代价近似为零。
+
+主题是**第四条流**，它在状态流之前发生，而且分成主进程/渲染层两段校验：
+
+```text
+启动
+  │
+  ▼
+ theme.js resolveTheme()：环境变量 → 命令行 → 上次选的 → 内置默认(ragdoll)
+  │  ① 只认 readdir 出来的真实目录名（外部传什么都不拼进路径）
+  │  ② theme.json 字段校验（schemaVersion / 状态名 / fps 范围）
+  │  ③ 资产名白名单正则 + 解析后仍在 assets/ 内（双保险防穿越）
+  │  ④ 单文件 256KB / 主题 4MB / 单状态 12 帧
+  ▼
+ currentTheme（含全部帧字符串）──► createWindow()
+                                       │
+                    渲染层 getTheme() ◄─┘   （拉，不是推）
+                                       │
+                                       ▼
+                    applyTheme()：换成新的帧数据，强制重画当前状态
+                                       │
+                                       ▼
+                    sanitizeSvg()：② 内容闸门在渲染层
+                       · 标签白名单
+                       · on* / 非本地 href / javascript: 属性
+                       · 任何非 url(#id) 的 url()
+                       · stdDeviation 钳到 40
+```
+
+**为什么校验分两段**：主进程没有 DOM，做不了标签级清洗；渲染层不该碰文件系统。
+两段串联，任一段单独失效都不至于直接变成 XSS。
+**为什么主题是拉不是推**：S5 的第一个权限气泡就是「推早了被静默丢弃」，同一个坑不踩第二次。
 
 > 桌宠没开时：`readPortFile()` 抛错 → hook 在 catch 里直接返回 → `exit(0)`，无输出、无重试。
 > 端点文件残留但进程已死（崩溃场景）：POST 得到 `ECONNREFUSED` → `.catch(() => null)` → `exit(0)`。实测 241ms。

@@ -81,12 +81,17 @@
     <h1>状态 → 帧序列</h1>
     <p class="sub">
       每张卡片都在真的播：帧数少的靠眼球追踪补活气，帧数多的靠轮播。<br />
-      事件→状态的权威映射在 <code>src/state.js</code> 的 <code>EVENT_STATE</code>；S7 之后这份数据会从
-      <code>visuals.js</code> 搬进 <code>theme.json</code>，结构不变。
+      事件→状态的权威映射在 <code>src/state.js</code> 的 <code>EVENT_STATE</code>；
+      画面数据来自 <code>themes/&lt;id&gt;/theme.json</code>，换主题不动一行代码。
+    </p>
+    <p class="sub" id="picker">
+      主题：<select id="themeSel"></select> <span id="themeDesc"></span>
     </p>
     <div class="grid" id="grid"></div>
 
-    <script src="./src/visuals.js"></script>
+    <!-- 这个包由 scripts/build-preview-bundle.js 从 themes/ 生成。
+         浏览器直接打开本页时 fetch 会被 file:// 同源策略拦掉，所以只能打包。 -->
+    <script src="./preview-bundle.js"></script>
     <script>
       const META = [
         ["sleeping", "睡着", "60s 无事件"],
@@ -105,41 +110,81 @@
       };
 
       const grid = document.getElementById("grid");
+      const sel = document.getElementById("themeSel");
+      const desc = document.getElementById("themeDesc");
 
-      for (const [key, label, ev] of META) {
-        const def = window.VISUAL_STATES[key];
-        const card = document.createElement("div");
-        card.className = "card";
+      let timers = [];
+      const stopTimers = () => {
+        timers.forEach(clearInterval);
+        timers = [];
+      };
 
-        const art = document.createElement("div");
-        art.className = "art";
-        const nodes = def.frames.map((m) => node(m));
-        nodes[0].classList.add("on");
-        art.append(...nodes);
+      function renderTheme(themes, id) {
+        stopTimers();
+        grid.replaceChildren();
+        const theme = themes[id];
+        if (!theme) return;
+        desc.textContent = theme.description || "";
 
-        let i = 0;
-        if (nodes.length > 1) {
-          setInterval(() => {
-            nodes[i].classList.remove("on");
-            i = (i + 1) % nodes.length;
-            nodes[i].classList.add("on");
-          }, 1000 / (def.fps || 8));
+        for (const [key, label, ev] of META) {
+          const def = theme.states[key];
+          if (!def) continue;
+
+          const card = document.createElement("div");
+          card.className = "card";
+
+          const art = document.createElement("div");
+          art.className = "art";
+          const nodes = def.frames.map((m) => node(m)).filter(Boolean);
+          if (!nodes.length) continue;
+          nodes[0].classList.add("on");
+          art.append(...nodes);
+
+          let i = 0;
+          if (nodes.length > 1) {
+            timers.push(
+              setInterval(() => {
+                nodes[i].classList.remove("on");
+                i = (i + 1) % nodes.length;
+                nodes[i].classList.add("on");
+              }, 1000 / (def.fps || 8))
+            );
+          }
+
+          const meta = document.createElement("div");
+          meta.className = "name";
+          meta.textContent = label;
+          const badge = document.createElement("span");
+          badge.className = "tag";
+          badge.textContent = `${def.frames.length} 帧 · ${def.fps}fps${def.eyeTracking ? " · 跟眼" : ""}`;
+          meta.appendChild(badge);
+
+          const evEl = document.createElement("div");
+          evEl.className = "ev";
+          evEl.textContent = `${key} · ${ev}`;
+
+          card.append(art, meta, evEl);
+          grid.appendChild(card);
         }
+      }
 
-        const meta = document.createElement("div");
-        meta.className = "name";
-        meta.textContent = label;
-        const badge = document.createElement("span");
-        badge.className = "tag";
-        badge.textContent = `${def.frames.length} 帧 · ${def.fps}fps${def.eyeTracking ? " · 跟眼" : ""}`;
-        meta.appendChild(badge);
+      const themes = window.CLAWD_THEMES || {};
+      const ids = Object.keys(themes);
 
-        const evEl = document.createElement("div");
-        evEl.className = "ev";
-        evEl.textContent = `${key} · ${ev}`;
-
-        card.append(art, meta, evEl);
-        grid.appendChild(card);
+      if (!ids.length) {
+        grid.textContent = "没有主题。先跑 npm run build:preview。";
+      } else {
+        for (const id of ids) {
+          const opt = document.createElement("option");
+          opt.value = id;
+          opt.textContent = `${themes[id].name || id}（${id}）`;
+          sel.appendChild(opt);
+        }
+        // 地址栏 ?theme=crab 可以直连某个主题，截图脚本就是这么指定主题的
+        const want = new URLSearchParams(location.search).get("theme");
+        sel.value = ids.includes(want) ? want : ids.includes("ragdoll") ? "ragdoll" : ids[0];
+        sel.addEventListener("change", () => renderTheme(themes, sel.value));
+        renderTheme(themes, sel.value);
       }
     </script>
   </body>

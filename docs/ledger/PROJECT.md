@@ -4,7 +4,7 @@
 
 | 项 | 内容 |
 |---|---|
-| 状态 | ACTIVE（S1–S6 完成） |
+| 状态 | ACTIVE（S1–S7 完成） |
 | 路径 | `E:\JacksonLee\project\clawd-starter` |
 | 技术栈 | Electron 45.0.0（`nodeIntegration: false` + `contextIsolation: true` + `sandbox: true`）、Node 原生 `http` + `fs`、渲染层纯手写 SVG 无框架、无构建工具 |
 | 入口 | `src/main.js`（主进程） |
@@ -12,8 +12,8 @@
 | 端口 | **固定 23333**（与主仓库一致），只绑 `127.0.0.1`。为什么不能随机：权限 HTTP hook 的 url 是安装时写死进 `settings.json` 的，端口漂移就等于 hook 指向死端口。被占用时退回随机端口并显式 warn，但必须重跑 `install:hooks` |
 | 端点文件 | `%APPDATA%\clawd-starter\clawd-starter.port`，内容 `{port, token}`，权限 0600 |
 | 依赖服务 | 无。不连任何外部服务，只在本机开一个 HTTP 端口接收事件 |
-| 版本控制 | git，**4 次提交**：`first commit` / `安全加固`（10-26）、`给小螃蟹添加申请用户权限的bubble`（S5）、`形象换成布偶猫，接入wodkbuddy或codebuddy`（10-27）。**S6 看板 + 一只眼不动的修复尚未提交** |
-| 体积 | 20 个源文件，约 3950 行（`src/` 2270 + `hooks/` 427 + `scripts/` 1255） |
+| 版本控制 | git，**5 次提交**（截至 `修改一下形象，添加会话看板窗口`）。**S7 主题系统 + 这批台账改动尚未提交** |
+| 体积 | 22 个源文件，约 4600 行（`src/` 2518 + `hooks/` 427 + `scripts/` 1658），另有 `themes/` 下 39 个 SVG 资产 |
 
 ## 它解决什么问题
 
@@ -25,6 +25,8 @@ S5 之后多了一条链路：Claude Code 要执行工具时，桌宠会弹出�
 
 S6 把隐藏状态摊开了：状态机里一直有一张多会话仲裁表，但用户只看到桌宠演「最吵的那一条」。双击桌宠弹出看板，能看到每条会话各自在干什么、闲了多久、在哪个项目里。
 
+S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一堆 SVG，双击看板底部就能换。**但换的必须是"能通过白名单的东西"**——这一步的难点不是加载文件，是决定"第三方文件里哪些标签允许进 DOM"。
+
 ## 阶段路线
 
 | 阶段 | 内容 | 状态 | 安全状况 |
@@ -35,7 +37,7 @@ S6 把隐藏状态摊开了：状态机里一直有一张多会话仲裁表，�
 | S4 | 接真 hook：解析 stdin JSON、往 `~/.claude/settings.json` 增量合并 8 个观察型事件 | 已完成 | 补了预判漏项：观察型 hook 必须 `async` |
 | S5 | 权限气泡：`type:"http"` 阻塞回包，让桌宠替用户批准确认 | 已完成 | 五条要求全部落地；`/permission` 不校 token 是架构固有属性 |
 | S6 | 多会话看板：双击桌宠弹出窗口，把内存里那张仲裁表摊开成人能看的列表 | 已完成 | SEC-09 分层兑现：存储层留完整路径、快照层只出 basename、完整路径只在显式点击时单条释放 |
-| S7 | 主题系统：`themes/<name>/theme.json` + 资产目录，替换写死的 `visuals.js` | 未开始 | 预判 XSS 入口；**白名单必须先于加载器** |
+| S7 | 主题系统：`themes/<id>/theme.json` + `assets/*.svg`，**删掉写死的 `visuals.js`** | 已完成 | 白名单先于加载器；放行 3 个标签 + 9 个图元，拒 5 类；校验分主进程（文件/格式）与渲染层（内容）两段 |
 
 安全问题全部记录在 [SECURITY.md](./SECURITY.md)，每阶段开工前先看对应小节。
 
@@ -49,11 +51,11 @@ S6 把隐藏状态摊开了：状态机里一直有一张多会话仲裁表，�
 | 权限裁决 | 挂起请求、等待决定、唯一出口 `settle()` 保证恰好响应一次 | `src/permission.js` |
 | 权限气泡 | 卡片 UI、两个按钮、Esc 不表态、量高度回传 | `src/bubble.html` + `bubble-renderer.js` + `bubble-preload.js` |
 | 会话看板 | 独立窗口、双击开关、1s 轮询快照、按「最吵的排前面」排序、演示模式、复制路径 | `src/dashboard.html` + `dashboard-renderer.js` + `dashboard-preload.js` |
-| 渲染 | 双图层交叉淡入、帧轮播、瞳孔位移插值 | `src/renderer.js` |
-| 视觉数据 | **布偶猫**形象，7 个状态 19 帧的 SVG 帧序列与 fps，纯数据无逻辑 | `src/visuals.js` |
-| 进程间桥 | 只暴露具体动作，不泄漏 `ipcRenderer` | `src/preload.js`（主窗口 7 个）+ `src/dashboard-preload.js`（看板 2 个）|
-| 调试 | 假数据源，三种用法（完整剧本 / 单事件 / 保持某状态）；形象截图工具 | `scripts/fake-feed.js`、`scripts/preview-shot.js` |
-| 回归闸门 | 主进程 inspector + 渲染进程 CDP，64 项断言 | `scripts/verify-electron.js` |
+| 渲染 | 双图层交叉淡入、帧轮播、瞳孔位移插值、SVG 白名单清洗 | `src/renderer.js` |
+| 主题 | 扫目录、校验 schema 与资产、缺状态补齐、全坏兜底（主进程）；换主题 = 换帧数据 + 重画 | `src/theme.js` + `themes/<id>/theme.json` |
+| 进程间桥 | 只暴露具体动作，不泄漏 `ipcRenderer` | `src/preload.js`（主窗口 9 个）+ `src/dashboard-preload.js`（看板 5 个）|
+| 调试 | 假数据源，三种用法（完整剧本 / 单事件 / 保持某状态）；形象对照截图；主题打包 | `scripts/fake-feed.js`、`preview-shot.js`、`build-preview-bundle.js` |
+| 回归闸门 | 主进程 inspector + 渲染进程 CDP，92 项断言 | `scripts/verify-electron.js` |
 
 ## 已知限制
 
@@ -66,8 +68,12 @@ S6 把隐藏状态摊开了：状态机里一直有一张多会话仲裁表，�
 - 气泡只支持鼠标点 + Esc，没有键盘 Tab/Enter；看板也没有键盘导航，也没有远程审批
 - **不能和主仓库 `clawd-on-desk` 同时运行**：都用 23333，且 hook URL 是安装时写死的
 - 命中判定用 `#pet` 的 176×176 包围盒，不是真实 alpha 遮罩——四个角上的透明区会误判为「可点击」
-- 看板的「复制路径」在回归里只能验返回值为 true/false，**剪贴板内容无法自动验证**（本环境 `clipboard.readText()` 恒为空），需手工点一次
+- 看板的「复制路径」在回归里验的是返回值 + 剪贴板内容（实测能拿到完整路径）；但**环境不具备时**（某些会话读不到剪贴板）会降级成一条警告，不做假断言
 - 看板不能跳转终端——`fullCwd()` 已经留好了，只是没做动作按钮
+- **主题只支持 SVG**。GIF / APNG / WebP 要写图片解码器，没做（主仓库有，用的是动画解码 + 资产缓存）
+- **主题不能用 `<style>` 做 CSS 动画**，只能靠帧序列。这是刻意让渡：`<style>` 里能写 `@import`、能覆盖整页
+- 状态时长（25s 发呆 / 60s 入睡）仍写死在 `state.js`，没进 `theme.json`
+- 没有在线主题目录，主题只能手工放进 `themes/`。换来的是供应链攻击面为零
 
 ## 硬约束（改代码前先看）
 
@@ -80,3 +86,6 @@ S6 把隐藏状态摊开了：状态机里一直有一张多会话仲裁表，�
 7. **观察型 hook `async: true`，裁决型 hook 绝不写 `async`**——两者语义相反，不要统一。
 8. **一帧 SVG 里只允许存在一个 `<g class="pupils">`**。渲染层是 `querySelector(...).setAttribute()`，它只改第一个匹配，所以两只眼的瞳孔必须收在同一个组里——各包一层就会出现「只有一只眼跟着你转」。这条 bug 真发生过，回归里有永久断言。
 9. **`dashboard-preload.js` 不许加「取完整 cwd」的接口**。完整路径只能在用户显式点「复制路径」时由主进程单条释放（SEC-09 分层）。快照层永远只出 basename。
+10. **主题的白名单顺序不许反**：先定 `ALLOWED_TAGS`，再写加载器。反过来写，等主题加载不出来时才放宽白名单，动机就变成"让它能跑"而不是"这样安全"。
+11. **`url()` 目标校验只能收紧不能放松**。放行 `filter` / `clip-path` / `mask` 之后，这条是唯一的出口管控——它们的值天生就是 `url()`。任何"顺手也允许相对路径"的改动，等于把主题变成 SSRF 探针。
+12. **主题必须在 `createWindow()` 之前定好**。渲染层一加载就 `invoke("theme:get")`，晚一步第一帧就是空白——而桌宠没有任务栏入口，空白窗口用户不知道怎么关。

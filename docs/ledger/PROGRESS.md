@@ -4,7 +4,11 @@
 
 ## 当前目标
 
-S1–S6 全部完成，回归 **64/64**。**下一步 S7 主题系统**，开工前先读 `SECURITY.md` 的 S7 预判小节——那一节的核心结论是「白名单先于加载器」，顺序反了就是 XSS 直通车。
+S1–S7 全部完成，回归 **92/92**（重复运行稳定）。**内核到此为止**，接下来是产品化方向，不是学习骨架了：
+
+- 真实 agent 会话验证（本机无 `claude` CLI，WorkBuddy / CodeBuddy 也没实测过 hook 是否真触发）——这是**唯一还没补的最大缺口**
+- 主题再做就超出"骨架"范围了：需要图片解码器（GIF/APNG）、缩略图、在线目录，那是产品
+- 若继续做内核，自然的下一步是「一个主题里放多套表情变体」和「状态时长写进 theme.json」（现在 25s/60s 还写死在 `state.js`）
 
 ## 进行中
 
@@ -12,19 +16,49 @@ S1–S6 全部完成，回归 **64/64**。**下一步 S7 主题系统**，开工
 
 ## 待办
 
-### S7
+### 已验证但未覆盖真实环境的部分
 
-- [ ] S7 主题系统：`themes/<name>/theme.json` + 资产目录，替换写死的 `visuals.js`
-- [ ] S7 前置：`renderer.js` 的 `ALLOWED_TAGS` 目前**没有** `clipPath` / `mask` / `filter`，接外部主题前先决定要不要放行（放行 = 滤镜可被用来做视觉欺骗与信息外带，不放行 = 主题表达能力受限）
-
-### 未验证清单（跨阶段累积，别当成已完成）
-
-- [ ] **真实 agent 会话一次都没跑过**——本机无 `claude` CLI，也无 WorkBuddy/CodeBuddy 的 hook 实测。这是贯穿 S4/S5/S6 的最大缺口
-- [ ] 剪贴板内容（`dashboard:copy-path` 返回值在回归里只能验 true/false，`clipboard.readText()` 在本环境始终为空，需手工点一次确认）
+- [ ] **真实 agent 会话一次都没跑过**——本机无 `claude` CLI，也无 WorkBuddy/CodeBuddy 的 hook 实测。这是贯穿 S4–S7 的最大缺口
 - [ ] WorkBuddy 是否真的支持 hooks（官方文档无 hooks 章节，`hooks/install.js --agent workbuddy` 生成的是按 CodeBuddy 契约推的）
 - [ ] WorkBuddy 安装待用户在自己终端执行：`npm run install:hooks:workbuddy`（沙箱写不了 `~/.workbuddy/settings.json`）
 
+### 已知的能力让渡（不是 bug，是选择）
+
+- [ ] 主题只支持 SVG。GIF / APNG / WebP 要写解码器，没做
+- [ ] 主题不能用 `<style>` 做 CSS 动画（只能用帧序列）。换来的是「主题文件里没有可执行的样式入口」
+- [ ] 没有在线主题目录，主题只能手工放进 `themes/`。换来的是供应链攻击面为零
+- [ ] 状态时长（25s 发呆 / 60s 入睡）仍写死在 `state.js`，没进 `theme.json`
+
 ## 已完成
+
+### S7 主题系统（2026-10-27）
+
+S3 之后形象是写死的 19 帧 SVG。S7 把它拆成 `themes/<id>/theme.json` + `assets/*.svg`，**`src/visuals.js` 整个删掉**——不是"改成从文件读"，是"不再有那个文件"。
+
+**动手顺序刻意反过来**：先写白名单定案（`SECURITY.md`「S7 白名单定案」），再写加载器。反过来的话，等第一个主题加载不出来时才去放宽白名单，那时候放宽的动机已经变成"让这个主题能跑起来"。
+
+- [x] `src/theme.js`（325 行）：扫目录、校验 schema、读资产、缺状态补齐、全坏给兜底
+- [x] `themes/ragdoll/`：默认主题，19 帧从原 `visuals.js` 用脚本拆出来，不是手抄
+- [x] `themes/crab/`：原版螃蟹，从 `git show 85c094a:src/visuals.js` 取。**第二个主题的意义是证明"能换形象"，不是"能换配置"**
+- [x] `themes/_template/`：脚手架。下划线开头 → `ID_RE` 不匹配 → 不会出现在主题列表里，零特殊分支
+- [x] `themes/README.md`：三条硬契约（viewBox / 唯一 pupils 组 / 白名单标签）+ 资产规则
+- [x] 渲染层 `applyTheme()`：换主题 = 换一份帧数据 + 强制重画当前状态，不重开窗口
+- [x] 主题是**拉**回来的（`getTheme` invoke），不是推的——S5 的第一个气泡就是"推早了被静默丢弃"
+- [x] 看板底部加主题下拉框，切换立即生效；加载失败的主题也会列出来（禁用 + 说明），因为作者改完 `theme.json` 第一件事就是来看这里
+- [x] 偏好写 `%APPDATA%\clawd-starter\clawd-starter.theme`，重启还是上次那个；`--theme=` 与 `CLAWD_THEME` 可临时覆盖
+- [x] 内置兜底画面（灰色「?」）：主题全坏时窗口不会变成一片空白。桌宠没有任务栏入口，空白等于"一个看得见进程、找不到退出按钮"
+- [x] `preview.html` 加主题选择器；`scripts/build-preview-bundle.js` 从 themes/ 打包（file:// 下 fetch 读不到本地文件）
+- [x] `scripts/migrate-visuals-to-theme.js`：一次性迁移脚本，保留是为了说明 themes/ 怎么来的
+
+**白名单的定案**（完整理由见 SECURITY.md）：
+
+| 处置 | 内容 |
+|---|---|
+| 放行 | `clipPath` `mask` `filter` |
+| 逐个放行 | `feGaussianBlur` `feOffset` `feDropShadow` `feColorMatrix` `feBlend` `feComposite` `feFlood` `feMerge` `feMergeNode`（**不用 `fe*` 通配**） |
+| 拒 | `feImage`（唯一用途是从 href 拉外部图）、`feTurbulence` / `feDisplacementMap`（CPU 炸弹）、`style` 标签、`foreignObject`、`animate` / `set`（运行时改 href） |
+
+加了这三个标签之后，`url()` 目标校验从"锦上添花"变成**唯一的出口管控**——`filter` / `clip-path` / `mask` 的值天生就是 `url()`。另外补了一条 `stdDeviation ≤ 40`，因为 Chrome 对超大模糊半径是同步算的。
 
 ### S6 多会话看板（2026-10-27）
 
@@ -254,6 +288,45 @@ spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"]);
 
 **一次险些误杀**：为了跑回归我先 `taskkill /IM electron.exe`，靠 `Get-CimInstance Win32_Process` 查命令行才确认其中一个 PID 是**用户自己开着的桌宠**。教训是——**别按镜像名杀进程，按 PID + 命令行确认后再杀**，尤其这个项目自己就叫 electron。
 
+## S7 联调实测数据
+
+回归从 64 项扩到 **92 项**，重复运行都是 92/92（其中主题与白名单相关 26 项）。
+
+| 断言 | 实测 |
+|---|---|
+| 主题已加载到渲染层 / 默认是 ragdoll | `id=ragdoll` |
+| 帧数完整 | 19 帧（7 状态），换主题后仍是 19 |
+| 白名单剥 script / style / foreignObject | 清洗后标签 = `filter,clippath,rect,rect,rect` |
+| 白名单剥 feImage / feTurbulence | 同上，两个图元都不见了 |
+| 放行 clipPath / filter | 同上，都在 |
+| `on*` 属性被剥 | `onclick=false` |
+| `url(http…)` 被剥 | `fill=null` |
+| `url(#c)` 保留 | `clip-path="url(#c)"` |
+| stdDeviation 钳制 | 输入 9999 → `40` |
+| 看板列出的主题都能加载 | `ok=crab,ragdoll 坏的=0` |
+| 看板切主题后立刻生效 | `id=crab`，帧数仍 19 |
+| 加载器拒绝路径 | schemaVersion 错 / `../escape.svg` / 资产不存在 / 非法 JSON / 没有 idle / id 含 `../../` —— 六类全拒 |
+| 全坏时兜底 | `id=__fallback__`，7 状态齐全，原因字符串带出来 |
+
+### 这轮测出来并修掉的四个真问题
+
+1. **默认主题变成了"名字最小的主题"**。`resolveTheme` 没有显式默认，就退化成按字母序取第一个可用的 → `crab` 成了默认。加 `DEFAULT_THEME_ID = "ragdoll"` 进候选人末尾。
+2. **剪贴板断言把自己的证据覆盖掉了**。上一版是「先写 `PROBE-OK` 探针，再读」——探针能跑通时读到永远是 `PROBE-OK`。改成**先读真值**，不等才做能力探测（并把原值写回去）。这一改也**推翻了上一轮的错误结论**：所谓「本环境访问不到剪贴板」是假的，现在实测能拿到 `E:\work\proj-alpha`。
+3. **启动时连推两次 idle**。状态机 tick 的 250ms 周期已经把 `lastVisual` 从 null 推成 idle 并 emit 过，300ms 的「首帧保险」又推一遍同样的东西。加 `pushedAnyState` 只在没推过时才补。
+4. **透明检测被别的窗口干扰**。原方法是「窗口矩形内侧 vs 外侧」比色，只要有个窗口压在同一位置（比如用户自己开着的那只桌宠），"外侧"采到的就是别人的像素。改成**同一区域拍两次：显示一次、隐藏一次**，背景变量被消掉。四角差值从 `[8,0,3,27]` 变成 `[0,0,0,0]`。
+
+### 测试稳定性这次是硬指标
+
+第 3 个问题一开始表现为**间歇性失败**：4 次跑有 2 次挂在「换状态时切换图层」。第一反应是渲染层的 bug，实际是**测试和状态机的两条时间线交叉**——测试在启动推送落地前就改了状态，半秒后主进程把 idle 推回来。
+
+定位靠的是新加的 `petDebug.stateLog()`（最近 20 次推送的时间线），一次就读出 `[{t:197,visual:"idle"},{t:309,visual:"idle"}]`——两次 idle，112ms 间隔。没有这个记录，只能靠猜。
+
+修法有两条，都做了：
+- **应用侧**：去掉重复推送（问题 3）
+- **测试侧**：动手改状态前先等推送静默 400ms，并加断言「换一次状态只重建一次」
+
+后者是永久性防线：重建次数翻倍就意味着有东西在重复触发，而画面上**完全看不出来**。
+
 ## 安全状态
 
 | 阶段 | P0 | P1 | P2 | P3 | 结论 |
@@ -265,6 +338,7 @@ spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"]);
 | S4 接 hook | 0 | 0 | 0 | 0 | 预判点全部落地：备份 + 原子写 + marker 只动自己 + 不落盘 + 静默退出。**补了一条预判里没写的：观察型 hook 必须 `async: true`**，否则每次事件阻塞 agent ~200ms |
 | S5 权限回包 | 0 | 0 | 0 | 1 | 五条要求全部落地并各有断言（见 SECURITY.md「S5 落地核对」）。`/permission` 不校 token 是 HTTP hook 架构的固有属性，风险收敛到 Host/Origin/Content-Type + UI 不盲批。**P3 遗留**：本机进程仍可伪造气泡诱骗点击，但增量风险有限（见威胁模型） |
 | S6 会话看板 | 0 | 0 | 0 | 0 | SEC-09 在这里才真正兑现：**存储层留完整 cwd，快照层只出 basename，完整路径只在用户显式点「复制路径」时由主进程单条释放**。preload 没有「取完整 cwd」的接口，伪造 id 拿不到。看板自己也是一个新窗口，`sandbox: true` + CSP `default-src 'none'` + 全部 `textContent` 写入；锁屏/休眠时和桌宠一起 hide |
+| S7 主题系统 | 0 | 0 | 0 | 0 | SEC-05 从"就位"变成"真的在挡东西"：白名单收窄到 3 个新标签 + 9 个 filt 图元，拒 feImage / feTurbulence / style / foreignObject / animate。`url()` 目标校验升级为唯一出口管控，`stdDeviation` 钳到 40。**校验分两段**：主进程管文件与格式（路径双保险防穿越），渲染层管内容。**没有下载器**，主题只能手工放进 `themes/`——供应链攻击面为零 |
 
 下一阶段开工前，先看 [SECURITY.md](./SECURITY.md) 里该阶段的预判小节。
 
@@ -272,6 +346,15 @@ spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"]);
 
 | 日期 | 类型 | 内容 |
 |---|---|---|
+| 2026-10-27 | 功能 | 完成 S7：`src/theme.js` + `themes/` 三个主题包，**删掉 `src/visuals.js`**。帧数据从"写死在 JS 里"变成"从磁盘读，经 IPC 送进渲染层"。回归 64 → **92 项** |
+| 2026-10-27 | 安全 | S7 白名单定案：放行 `clipPath`/`mask`/`filter` + 9 个逐个列举的 fe 图元；拒 `feImage`（外部取图）、`feTurbulence`/`feDisplacementMap`（CPU 炸弹）、`style` 标签、`foreignObject`、`animate`/`set`。**先定白名单再写加载器**，顺序不许反 |
+| 2026-10-27 | 安全 | 放行滤镜后补 `stdDeviation ≤ 40`：Chrome 对超大模糊半径是同步计算的，`9999` 就是一次卡死 |
+| 2026-10-27 | 修复 | 默认主题退化成"字母序第一个"（`crab` 抢了 `ragdoll` 的位置）→ 加显式 `DEFAULT_THEME_ID` |
+| 2026-10-27 | 修复 | 剪贴板断言**先写探针再读**，等于自己覆盖证据；改成先读真值、不等才探测。**并推翻了上一轮"本环境访问不到剪贴板"的结论**——现在实测能拿到完整路径 |
+| 2026-10-27 | 修复 | 启动时连推两次同值 idle（tick 已 emit + 300ms 首帧保险），表现为"刚切到 working 又弹回 idle"。加 `pushedAnyState` |
+| 2026-10-27 | 工具 | 透明检测改法：从"窗口内外比色"改成"同区域显示/隐藏两次拍照"。原方法只要屏幕上有别的窗口压在同一位置就假失败（差值 `[8,0,3,27]`），新方法四角差 `[0,0,0,0]` |
+| 2026-10-27 | 工具 | `petDebug` 补 `theme()` / `builds()` / `stateLog()`：分别回答"现在哪个主题"、"这次切换重建了几次"、"最近谁推了什么状态"。第三个直接定位了上面那个间歇失败 |
+| 2026-10-27 | 工具 | `check-filemap.js` 支持 `themes/**` 这种整目录条目：几十个 SVG 帧逐条登记只会让台账变成文件列表 |
 | 2026-10-27 | 修复 | **一只眼睛不跟随鼠标**。`visuals.js` 的 `open` 分支里左右眼各套了一个 `<g class="pupils">`，而渲染层是 `querySelector("svg.on .pupils")` —— **只返回第一个匹配**，所以只有左眼转，右眼钉死。合并成单个 pupils 组，并加永久断言「每帧最多一个 `.pupils` 组」+「瞳孔层里两只眼都在」 |
 | 2026-10-27 | 功能 | 完成 S6：`dashboard.html` + `dashboard-renderer.js` + `dashboard-preload.js`，双击桌宠开关看板；`state.js` 加 `fullCwd()`；SEC-09 拆成存储层/快照层。回归 55 → **64 项** |
 | 2026-10-27 | 安全 | S6 兑现 SEC-09 分层。S2 当时「cwd 只留 basename」其实是砍功能——看板的「复制路径」必须有完整路径。改成：存储层留完整（限长 1024），快照层只出 basename（限长 200），完整路径只在用户显式点击时单条释放 |

@@ -19,7 +19,14 @@ const path = require("node:path");
 
 const ROOT = path.resolve(__dirname, "..");
 const PORT = 9333;
-const OUT = process.argv[2] ? path.resolve(process.argv[2]) : path.join(ROOT, "docs", "ragdoll-states.png");
+
+// S7：可以指定主题。不给就是 ragdoll（默认主题），输出名也跟着主题走，
+// 这样加一个主题就多一张对照图，不会互相覆盖。
+const ARGV = process.argv.slice(2);
+const THEME_FLAG = ARGV.find((a) => a.startsWith("--theme="));
+const THEME = THEME_FLAG ? THEME_FLAG.slice("--theme=".length) : "ragdoll";
+const OUT_ARG = ARGV.find((a) => !a.startsWith("--"));
+const OUT = OUT_ARG ? path.resolve(OUT_ARG) : path.join(ROOT, "docs", `${THEME}-states.png`);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -108,10 +115,11 @@ function makeTempApp() {
   fs.writeFileSync(
     path.join(dir, "main.js"),
     `const { app, BrowserWindow } = require("electron");
-const path = require("path");
+const { pathToFileURL } = require("url");
 app.whenReady().then(() => {
   const w = new BrowserWindow({ width: 1020, height: 640, show: false, backgroundColor: "#faf9f5" });
-  w.loadFile(process.env.CLAWD_PREVIEW_FILE);
+  // 用 loadURL 而不是 loadFile，只为了能带 ?theme= 参数
+  w.loadURL(pathToFileURL(process.env.CLAWD_PREVIEW_FILE).href + "?theme=" + encodeURIComponent(process.env.CLAWD_PREVIEW_THEME));
 });
 `
   );
@@ -119,9 +127,21 @@ app.whenReady().then(() => {
 }
 
 (async () => {
+  // 先把 themes/ 打成 preview-bundle.js。放在这里而不是让用户记得手动跑：
+  // 截图脚本存在的意义就是"改完立刻看"，多一步手动操作就等于长期用过期数据。
+  const { build } = require("./build-preview-bundle");
+  const bundled = build();
+  if (!bundled.ids.includes(THEME)) {
+    throw new Error(`没有主题 ${THEME}（现有：${bundled.ids.join(", ") || "无"}）`);
+  }
+
   const electronBin = require("electron"); // 纯 Node 下返回可执行文件路径
   const tmpApp = makeTempApp();
-  const env = { ...process.env, CLAWD_PREVIEW_FILE: path.join(ROOT, "preview.html") };
+  const env = {
+    ...process.env,
+    CLAWD_PREVIEW_FILE: path.join(ROOT, "preview.html"),
+    CLAWD_PREVIEW_THEME: THEME,
+  };
   delete env.ELECTRON_RUN_AS_NODE;
 
   const child = spawn(electronBin, [`--remote-debugging-port=${PORT}`, tmpApp], {

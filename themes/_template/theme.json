@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "name": "我的主题",
+  "author": "你的名字",
+  "version": "1.0.0",
+  "description": "复制整个 _template 目录到 themes/your-theme-id/ 再改。目录名只能用小写字母、数字、- 和 _。",
+  "_comment": "states 里只有 idle 是必填的，缺的状态会自动用 idle 的画面兜住。资产放 assets/，只支持 .svg，文件名只能含字母数字 . _ -，必须以 .svg 结尾。",
+  "states": {
+    "idle": { "fps": 2, "eyeTracking": true, "frames": ["idle-1.svg"] }
+  }
+}

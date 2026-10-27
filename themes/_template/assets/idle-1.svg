@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <!-- 主题作者看到的第一个样例。约定：每帧必须自带 viewBox="0 0 200 200"。 -->
+  <ellipse cx="100" cy="168" rx="46" ry="8" fill="#000000" opacity="0.08"/>
+  <g transform="translate(0 0)">
+    <rect x="64" y="76" width="72" height="72" rx="24" fill="#FAF6F0" stroke="#967866" stroke-width="6"/>
+    <g class="pupils">
+      <circle cx="86" cy="106" r="7" fill="#1A2E40"/>
+      <circle cx="114" cy="106" r="7" fill="#1A2E40"/>
+    </g>
+  </g>
+</svg>

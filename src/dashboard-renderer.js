@@ -18,7 +18,7 @@ const el = {
   demo: document.getElementById("demo"),
 };
 
-// 状态 → 中文名 + 徽标配色类。名字必须和 visuals.js / state.js 对得上。
+// 状态 → 中文名 + 徽标配色类。名字必须和 theme.json / state.js 对得上。
 const STATE_META = {
   idle: { label: "发呆", cls: "b-idle" },
   thinking: { label: "思考", cls: "b-thinking" },
@@ -154,3 +154,58 @@ setInterval(tick, 1000);
 
 // 调试入口：DevTools 里 dashboardDebug.render(...) 手动灌一份快照
 window.dashboardDebug = { render, state: () => ({ demoMode, rows: rows.size }) };
+
+// ------------------------------------------------------------
+// S7：主题切换
+//
+// 列表由主进程给，所以下拉框里能点到的每一项都是真的读得出来的。
+// 加载失败的主题也会出现在列表里（禁用 + 显示原因）——
+// 让它可见比让它消失好：作者改了 theme.json 之后，第一件事就是来看这里why没生效。
+// ------------------------------------------------------------
+
+const themeSel = document.getElementById("themeSel");
+let currentThemeId = null;
+
+async function loadThemes() {
+  let data;
+  try {
+    data = await window.dashboard.listThemes();
+  } catch {
+    return;
+  }
+  if (!data) return;
+
+  currentThemeId = data.current;
+  themeSel.replaceChildren();
+  for (const t of data.themes) {
+    const opt = document.createElement("option");
+    opt.value = t.id;
+    opt.textContent = t.ok ? t.name || t.id : `${t.id}（加载失败）`;
+    opt.disabled = !t.ok;
+    if (t.ok && t.id === data.current) opt.selected = true;
+    themeSel.appendChild(opt);
+  }
+}
+
+themeSel.addEventListener("change", async () => {
+  let r;
+  try {
+    r = await window.dashboard.setTheme(themeSel.value);
+  } catch {
+    r = null;
+  }
+  if (!r || !r.ok) {
+    // 切失败就把选择退回去，别让下拉框显示一个屏幕上没发生的东西
+    themeSel.value = currentThemeId || themeSel.value;
+    return;
+  }
+  currentThemeId = r.id;
+});
+
+// 桌宠那边换了主题，这里跟着走（保持两处显示一致）
+window.dashboard.onTheme((t) => {
+  currentThemeId = t.id;
+  themeSel.value = t.id;
+});
+
+loadThemes();

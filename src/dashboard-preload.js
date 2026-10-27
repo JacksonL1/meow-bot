@@ -15,4 +15,9 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("dashboard", {
   getSnapshot: () => ipcRenderer.invoke("dashboard:snapshot"),
   copyPath: (sessionId) => ipcRenderer.invoke("dashboard:copy-path", sessionId),
+  // S7：主题。列表里只会有主进程真的从 themes/ 读出来的目录，
+  // 所以下拉框里能点到的每一项都是加载得起来的（失败项的 error 也会带过来）。
+  listThemes: () => ipcRenderer.invoke("theme:list"),
+  setTheme: (id) => ipcRenderer.invoke("theme:set", id),
+  onTheme: (cb) => ipcRenderer.on("theme", (_e, t) => cb(t)),
 });

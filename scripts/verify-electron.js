@@ -300,6 +300,23 @@ async function main() {
 
     // ---------- 1. 页面与 DOM ----------
     ok("页面加载完成", (await R.eval("document.readyState")) === "complete");
+
+    // S7：主题是渲染层**主动拉**回来的（invoke 一次），所以任何跟画面有关的断言
+    // 都必须先等它到。不等就会变成"有时候过有时候不过"——这类 flaky 断言
+    // 比没有断言更糟，因为它教人忽略红色。
+    let themeLoaded = false;
+    let themeInfo = null;
+    for (let i = 0; i < 60; i++) {
+      themeInfo = await R.eval("window.petDebug && window.petDebug.theme ? window.petDebug.theme() : null");
+      if (themeInfo && themeInfo.id) {
+        themeLoaded = true;
+        break;
+      }
+      await sleep(100);
+    }
+    ok("主题已加载到渲染层", themeLoaded, `id=${themeInfo && themeInfo.id}`);
+    ok("默认主题是 ragdoll", themeInfo && themeInfo.id === "ragdoll", `id=${themeInfo && themeInfo.id}`);
+
     ok(
       "三个容器都在（#stage/#pet/#layerA/B）",
       await R.eval(
@@ -309,13 +326,20 @@ async function main() {
     ok("首帧已上屏（.layer.show 内有 svg）", !!(await R.eval("!!document.querySelector('.layer.show svg.on')")));
     ok("7 个状态全部注册", (await R.eval("window.petDebug && window.petDebug.states().length")) === 7);
 
+    // 帧总数是"主题真的被完整读进来"的证据：7 个状态 19 帧。
+    // 随便少一帧就说明某个资产没读到——而画面上只是"少了一帧"，看不出来。
+    const totalFrames = await R.eval(
+      "Object.values(window.VISUAL_STATES).reduce((n, s) => n + s.frames.length, 0)"
+    );
+    ok("主题帧数完整（7 状态 19 帧）", totalFrames === 19, `帧数=${totalFrames}`);
+
     // ---------- 2. 渲染进程隔离（SEC-06） ----------
     ok("contextIsolation 生效：渲染层拿不到 require", (await R.eval("typeof window.require")) === "undefined");
     ok("contextIsolation 生效：渲染层拿不到 process", (await R.eval("typeof window.process")) === "undefined");
     ok("preload 没有泄漏 ipcRenderer", (await R.eval("typeof window.ipcRenderer")) === "undefined");
-    // 动作数是安全闸门：S6 加了 toggleDashboard，所以从 6 变 7。
+    // 动作数是安全闸门：S6 加了 toggleDashboard（6→7），S7 加了 getTheme / onTheme（7→9）。
     // 以后每次加 IPC 都要顺手改这里，改的时候问自己一句"这个动作真的需要吗"。
-    ok("preload 只暴露 7 个具名动作", (await R.eval("Object.keys(window.clawd||{}).length")) === 7);
+    ok("preload 只暴露 9 个具名动作", (await R.eval("Object.keys(window.clawd||{}).length")) === 9);
 
     // ---------- 3. 状态切换 ----------
     // 必须先等主进程把首次状态推下来（main.js 里是启动后 300ms 的一次 broadcast）。
@@ -328,17 +352,65 @@ async function main() {
     }
     ok("收到了主进程的初始状态", !!bootState, `初始=${bootState}`);
 
+    // 等主进程的启动推送彻底静默再动手。
+    // 状态机的 tick 是 250ms 一轮，第一个周期就会把 lastVisual 从 null 推成 idle。
+    // 测试要是在这之前改状态，两边就会抢——表现是"刚切到 working，半秒后弹回 idle"，
+    // 看起来像渲染层的 bug，其实是两条时间线交叉。这类 flaky 比没有断言更糟。
+    let quiet = false;
+    let pushCount = -1;
+    let quietSince = Date.now();
+    for (let i = 0; i < 40; i++) {
+      const n = await R.eval("window.petDebug.stateLog().length");
+      if (n !== pushCount) {
+        pushCount = n;
+        quietSince = Date.now();
+      } else if (Date.now() - quietSince >= 400) {
+        quiet = true;
+        break;
+      }
+      await sleep(100);
+    }
+    ok("主进程的启动推送已静默（后续操作不会被它截胡）", quiet, `收到 ${pushCount} 次推送`);
+
+    // 从确定的起点开始：先确保渲染层在 idle 且画面已上屏。
+    let atIdle = false;
+    for (let i = 0; i < 20; i++) {
+      const st = await R.eval("window.petDebug.state()");
+      const hasSvg = await R.eval("!!document.querySelector('.layer.show svg.on')");
+      if (st === "idle" && hasSvg) {
+        atIdle = true;
+        break;
+      }
+      await R.eval("window.petDebug.setState('idle')");
+      await sleep(60);
+    }
+    ok("渲染层能稳定停在 idle（后续比较的基准）", atIdle);
+
     const beforeLayer = await R.eval("document.querySelector('.layer.show')?.id");
+    const beforeBuilds = await R.eval("window.petDebug.builds()");
     await R.eval("window.petDebug.setState('working')");
+
+    // 轮询等它落定，而不是立刻读一次——交叉淡入本身有 160ms 过渡，
+    // 单点采样会把"正在换"读成"没换"。
     let nowState = null;
-    for (let i = 0; i < 10; i++) {
+    let afterLayer = beforeLayer;
+    for (let i = 0; i < 20; i++) {
       nowState = await R.eval("window.petDebug.state()");
-      if (nowState === "working") break;
+      afterLayer = await R.eval("document.querySelector('.layer.show')?.id");
+      if (nowState === "working" && afterLayer && afterLayer !== beforeLayer) break;
       await sleep(50);
     }
-    const afterLayer = await R.eval("document.querySelector('.layer.show')?.id");
     ok("setState 生效", nowState === "working", `state=${nowState}`);
     ok("换状态时切换图层（交叉淡入的前提）", beforeLayer !== afterLayer, `${beforeLayer} → ${afterLayer}`);
+
+    // 换一次状态只该重建一次。多了就说明有东西在重复触发——
+    // 画面看不出区别（结果一样），但它是竞态的信号，而这轮真撞上过。
+    const afterBuilds = await R.eval("window.petDebug.builds()");
+    ok("换一次状态只重建一次", afterBuilds - beforeBuilds === 1, `重建 ${afterBuilds - beforeBuilds} 次`);
+    if (afterBuilds - beforeBuilds !== 1) {
+      // 失败时把推送时间线打出来，否则只能猜"是谁把状态推回去了"
+      console.log("      [dbg] 状态推送记录：", JSON.stringify(await R.eval("window.petDebug.stateLog()")));
+    }
     // 旧层的清空挂在 220ms 的 setTimeout 上（等淡出结束），所以要轮询等它，不能立刻断言
     let cleared = false;
     for (let i = 0; i < 20; i++) {
@@ -430,63 +502,70 @@ async function main() {
         );
       }
 
-      // 窗口是否真的透明——这是 S1 三件套里唯一没法从 DOM 或属性读出来的。
-      // 办法：抓一小块屏幕，比较"窗口矩形内侧紧邻边界"与"外侧紧邻边界"的像素。
-      // 透明的话，这两组看到的是同一层桌面，差值应该接近 0。
-      // 取 10px 相邻对而不是窗口内外两大片区域，是为了抵消壁纸渐变/暗角的影响。
+      // 窗口是否真的透明——S1 三件套里唯一没法从 DOM 或属性读出来的东西。
+      //
+      // 做法：**同一块区域拍两次**，一次窗口显示、一次隐藏，逐点比较。
+      // 为什么不用「窗口内侧 vs 外侧」那种相邻比色：窗口外面是什么完全不受控，
+      // 只要有个别的窗口（哪怕是自己另一只桌宠）压在同一个位置，
+      // 「外侧」采到的就是别人的像素，差值立刻不为 0——测得再准也是假失败。
+      // 消失/出现对比法把背景变量消掉了：两次拍的是同一块桌面。
+      //
+      // 采样点取窗口四角（窗口 240×240，宠物本体只占中间 176×176，
+      // 所以四角一定是空的）。要是角落也被画了东西，说明形象画超界了，
+      // 那本身就是问题，让它失败是对的。
       const transparency = await M.eval(`(async () => {
         const { desktopCapturer, screen, BrowserWindow } = require('electron');
-        const win = BrowserWindow.getAllWindows()[0];
+        const win = BrowserWindow.getAllWindows().find(
+          (w) => w.isVisible() && !String(w.webContents.getURL()).includes('dashboard')
+        );
+        if (!win) return 'no-window';
         const b = win.getBounds();
         const d = screen.getDisplayNearestPoint({ x: b.x, y: b.y });
-        const pad = 40;
-        const crop = {
-          x: Math.max(d.bounds.x, b.x - pad),
-          y: Math.max(d.bounds.y, b.y - pad),
-          width: Math.min(d.bounds.x + d.bounds.width, b.x + b.width + pad) - Math.max(d.bounds.x, b.x - pad),
-          height: Math.min(d.bounds.y + d.bounds.height, b.y + b.height + pad) - Math.max(d.bounds.y, b.y - pad),
+        const grab = async () => {
+          const srcs = await desktopCapturer.getSources({
+            types: ['screen'],
+            thumbnailSize: { width: d.bounds.width, height: d.bounds.height },
+          });
+          if (!srcs.length) return null;
+          return srcs[0].thumbnail.crop({ x: b.x, y: b.y, width: b.width, height: b.height });
         };
-        if (crop.width < 120 || crop.height < 120) return 'crop-too-small';
-        const srcs = await desktopCapturer.getSources({
-          types: ['screen'],
-          thumbnailSize: { width: d.bounds.width, height: d.bounds.height },
-        });
-        if (!srcs.length) return 'no-source';
-        const img = srcs[0].thumbnail.crop(crop);
-        const size = img.getSize();
-        const buf = img.toBitmap();
-        const px = (x, y) => { const i = (y * size.width + x) * 4; return [buf[i+2], buf[i+1], buf[i]]; };
-        // 窗口在 crop 内的偏移
-        const ox = b.x - crop.x, oy = b.y - crop.y;
-        const cross = [
-          [[ox-10, oy+120], [ox-20, oy+120]],
-          [[ox+b.width+9, oy+120], [ox+b.width+19, oy+120]],
-          [[ox+120, oy-10], [ox+120, oy-20]],
-          [[ox+120, oy+b.height+9], [ox+120, oy+b.height+19]],
+        const shown = await grab();
+        win.hide();
+        await new Promise((r) => setTimeout(r, 320));
+        const hidden = await grab();
+        win.showInactive();
+        if (!shown || !hidden) return 'no-source';
+        const size = shown.getSize();
+        const sizeHidden = hidden.getSize();
+        if (size.width !== sizeHidden.width || size.height !== sizeHidden.height) return 'size-mismatch';
+        const A = shown.toBitmap();
+        const B = hidden.toBitmap();
+        const at = (buf, x, y) => { const i = (y * size.width + x) * 4; return [buf[i + 2], buf[i + 1], buf[i]]; };
+        const pad = 10;
+        const pts = [
+          [pad, pad],
+          [size.width - 1 - pad, pad],
+          [pad, size.height - 1 - pad],
+          [size.width - 1 - pad, size.height - 1 - pad],
         ];
-        // 四条边各算一次差值。只取"最大值"会被背景里一条恰好压在窗口边框上的
-        // 硬边（别的窗口边框、滚动条）误伤；不透明的窗口是四条边全不一致。
-        const diffs = [];
-        for (const [inside, outside] of cross) {
-          if (inside[0] < 0 || outside[0] < 0) return 'crop-too-small';
-          if (inside[0] >= size.width || outside[0] >= size.width) return 'crop-too-small';
-          if (inside[1] >= size.height || outside[1] >= size.height) return 'crop-too-small';
-          const a = px(inside[0], inside[1]);
-          const c = px(outside[0], outside[1]);
-          diffs.push(Math.max(Math.abs(a[0]-c[0]), Math.abs(a[1]-c[1]), Math.abs(a[2]-c[2])));
-        }
-        return diffs;
+        return pts.map(([x, y]) => {
+          const a = at(A, x, y);
+          const c = at(B, x, y);
+          return Math.max(Math.abs(a[0] - c[0]), Math.abs(a[1] - c[1]), Math.abs(a[2] - c[2]));
+        });
       })()`);
       if (Array.isArray(transparency)) {
-        const good = transparency.filter((d) => d <= 3).length;
+        const good = transparency.filter((d) => d <= 2).length;
         ok(
-          "窗口真透明（窗内空白与窗外桌面同色）",
-          good >= 3,
-          `四条边差值=[${transparency.join(", ")}]，达标 ${good}/4`
+          "窗口真透明（显示与隐藏时四角像素一致）",
+          good === 4,
+          `四角差值=[${transparency.join(", ")}]，达标 ${good}/4`
         );
       } else {
         console.log(`跳过  窗口透明检查（${transparency}，需要可见桌面）`);
       }
+      // 隐藏/显示过一轮，确认窗口回到可见状态——后面还有断言依赖它
+      ok("透明检测后窗口仍可见", !!(await M.eval("require('electron').BrowserWindow.getAllWindows().some(w => w.isVisible())")));
     }
 
     // ---------- 7. HTTP 通路（真 hook 走的路） ----------
@@ -803,20 +882,55 @@ async function main() {
           `真实=${copied} 伪造=${fake}`
         );
 
-        // 剪贴板内容**无法在沙箱里验证**：这里连"自己写 PROBE 再读回"都拿到空串，
-        // 说明进程访问不到 Windows 剪贴板，不是我们的写入逻辑有问题。
-        // 所以只记一条警告，不做断言 —— 假装断言通过比不测更糟。
+        // 剪贴板内容要**先读再诊断**。上一版写反了：先写一个 PROBE-OK 探针
+        // 再读，等于把自己的证据覆盖掉了——探针能跑通时，读到的永远是 PROBE-OK。
+        // 现在：先读真值；不等才做一次"能不能读写"的能力探测（并且把原值写回去）。
         if (M) {
-          const probe = await M.eval(
-            "(() => { const c = require('electron').clipboard; c.writeText('PROBE-OK'); return c.readText(); })()"
-          );
-          if (probe === "PROBE-OK") {
-            const clip = await M.eval("require('electron').clipboard.readText()");
-            ok("剪贴板拿到的是完整路径", clip === "E:\\work\\proj-alpha", `剪贴板=${JSON.stringify(clip)}`);
+          const clip = await M.eval("require('electron').clipboard.readText()");
+          if (clip === "E:\\work\\proj-alpha") {
+            ok("剪贴板拿到的是完整路径", true, `剪贴板=${JSON.stringify(clip)}`);
           } else {
-            console.log("      [warn] 本环境访问不到 Windows 剪贴板，跳过内容校验（需手工点一次验证）");
+            const probe = await M.eval(
+              "(() => { const c = require('electron').clipboard; const before = c.readText();" +
+                " c.writeText('PROBE-OK'); const after = c.readText();" +
+                " try { c.writeText(before); } catch {} return after; })()"
+            );
+            if (probe === "PROBE-OK") {
+              // 剪贴板可读写，那这个不一致就是真 bug，不能当成环境问题放过
+              ok("剪贴板拿到的是完整路径", false, `剪贴板=${JSON.stringify(clip)}`);
+            } else {
+              console.log("      [warn] 本环境访问不到 Windows 剪贴板，跳过内容校验（需手工点一次验证）");
+            }
           }
         }
+
+        // S7：看板里的主题下拉框。列表由主进程给，所以能点到的每一项都真的加载得起来。
+        const themeList = await D.eval(
+          "window.dashboard.listThemes().then(d => ({ current: d.current, ok: d.themes.filter(t=>t.ok).map(t=>t.id).join(','), bad: d.themes.filter(t=>!t.ok).length }))"
+        );
+        ok(
+          "看板列出了主题（且都加载成功）",
+          !!themeList && themeList.ok === "crab,ragdoll" && themeList.bad === 0,
+          `ok=${themeList && themeList.ok} 坏的=${themeList && themeList.bad}`
+        );
+
+        const switched = await D.eval("window.dashboard.setTheme('crab')");
+        let afterThemeId = null;
+        for (let i = 0; i < 20; i++) {
+          afterThemeId = await R.eval("window.petDebug.theme().id");
+          if (afterThemeId === "crab") break;
+          await sleep(100);
+        }
+        ok("看板切主题后桌宠立刻换形象", switched && switched.ok === true && afterThemeId === "crab", `id=${afterThemeId}`);
+
+        const crabFrames = await R.eval(
+          "Object.values(window.VISUAL_STATES).reduce((n, s) => n + s.frames.length, 0)"
+        );
+        ok("换主题后帧数依然完整（19）", crabFrames === 19, `帧数=${crabFrames}`);
+
+        // 切回默认，别给下一次运行留一个"上次选了螃蟹"的偏好
+        await D.eval("window.dashboard.setTheme('ragdoll')");
+        await sleep(200);
 
         // 再双击一次 = 收起
         await R.eval("window.clawd.toggleDashboard()");
@@ -829,6 +943,122 @@ async function main() {
         }
         D.close();
       }
+    }
+
+    // ---------- 7.8 SVG 白名单（S7） ----------
+    // 主题是第三方文件，所以"清洗器有没有真的在干活"必须被断言，而不是读代码确认。
+    // 一段把所有已知入口都塞进去的 SVG：能过的必须过，该剥的必须剥。
+    const EVIL = [
+      '<svg xmlns="http://www.w3.org/2000/svg">',
+      "<script>alert(1)</script>",
+      "<style>*{display:none}</style>",
+      "<foreignObject><body>x</body></foreignObject>",
+      '<filter id="f"><feImage href="http://evil/x.png"/><feTurbulence baseFrequency="1"/></filter>',
+      '<clipPath id="c"><rect width="5" height="5"/></clipPath>',
+      '<rect id="r" width="10" height="10" onclick="x()" fill="url(http://evil/x)"/>',
+      '<rect id="ok" width="5" height="5" clip-path="url(#c)"/>',
+      "</svg>",
+    ].join("");
+
+    const cleanReport = await R.eval(`(() => {
+      const n = window.petDebug.svg(${JSON.stringify(EVIL)});
+      if (!n) return { error: "清洗后为 null" };
+      const tags = [...n.querySelectorAll("*")].map((e) => e.nodeName.toLowerCase());
+      const r = n.querySelector("#r");
+      return {
+        tags: tags.join(","),
+        rOnclick: r ? r.hasAttribute("onclick") : null,
+        rFill: r ? r.getAttribute("fill") : null,
+        okClip: n.querySelector("#ok") ? n.querySelector("#ok").getAttribute("clip-path") : null,
+      };
+    })()`);
+
+    ok(
+      "白名单剥掉了 script / style / foreignObject",
+      !/script|style|foreignobject/.test(cleanReport.tags || "script"),
+      `标签=${cleanReport.tags}`
+    );
+    ok(
+      "白名单剥掉了 feImage / feTurbulence（外部取图与 CPU 炸弹）",
+      !/feimage|feturbulence/.test(cleanReport.tags || "feimage"),
+      `标签=${cleanReport.tags}`
+    );
+    ok(
+      "放行了 clipPath / filter（主题需要柔和边缘）",
+      /clippath/.test(cleanReport.tags || "") && /filter/.test(cleanReport.tags || ""),
+      `标签=${cleanReport.tags}`
+    );
+    ok("on* 属性被剥", cleanReport.rOnclick === false, `onclick=${cleanReport.rOnclick}`);
+    ok("url(http…) 被剥（只准 url(#id)）", cleanReport.rFill === null, `fill=${JSON.stringify(cleanReport.rFill)}`);
+    ok("url(#c) 被保留", cleanReport.okClip === "url(#c)", `clip-path=${JSON.stringify(cleanReport.okClip)}`);
+
+    // 放行滤镜之后才存在的风险：stdDeviation 是同步计算的，一个 9999 就卡死
+    const deviation = await R.eval(`(() => {
+      const n = window.petDebug.svg('<svg xmlns="http://www.w3.org/2000/svg"><filter id="f"><feGaussianBlur stdDeviation="9999"/></filter></svg>');
+      if (!n) return "null";
+      const el = [...n.querySelectorAll("*")].find((e) => e.nodeName.toLowerCase() === "fegaussianblur");
+      return el ? el.getAttribute("stdDeviation") : "missing";
+    })()`);
+    ok("stdDeviation 被钳到 40", deviation === "40", `stdDeviation=${deviation}`);
+
+    // ---------- 7.9 加载器的拒绝路径（S7） ----------
+    // 这一段在本进程里跑（不是 Electron 里）：拿 CLAWD_THEMES_DIR 指向一个临时目录，
+    // 塞几个"故意坏掉"的主题，逐个确认被拒。用环境变量而不是往仓库里塞垃圾。
+    {
+      const themeFixture = path.join(TMP_ROOT, "themes-fixture");
+      const mk = (id, json, assets = {}) => {
+        const d = path.join(themeFixture, id);
+        fs.mkdirSync(path.join(d, "assets"), { recursive: true });
+        fs.writeFileSync(path.join(d, "theme.json"), typeof json === "string" ? json : JSON.stringify(json, null, 2));
+        for (const [name, body] of Object.entries(assets)) {
+          fs.writeFileSync(path.join(d, "assets", name), body);
+        }
+      };
+      const good = { schemaVersion: 1, states: { idle: { fps: 2, frames: ["idle-1.svg"] } } };
+      const SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect width="1" height="1"/></svg>';
+
+      mk("bad-schema", { schemaVersion: 2, states: { idle: { frames: ["idle-1.svg"] } } }, { "idle-1.svg": SVG });
+      mk("bad-traversal", { schemaVersion: 1, states: { idle: { frames: ["../escape.svg"] } } });
+      mk("bad-missing", { schemaVersion: 1, states: { idle: { frames: ["nope.svg"] } } });
+      mk("bad-json", "{ this is not json", {});
+      mk("no-idle", { schemaVersion: 1, states: { working: { frames: ["idle-1.svg"] } } }, { "idle-1.svg": SVG });
+      mk("good", good, { "idle-1.svg": SVG });
+
+      const savedDir = process.env.CLAWD_THEMES_DIR;
+      process.env.CLAWD_THEMES_DIR = themeFixture;
+      delete require.cache[require.resolve("../src/theme")];
+      const T = require("../src/theme");
+
+      ok("加载器认得合法主题", T.loadTheme("good").ok === true);
+      ok("拒 schemaVersion 不对的主题", T.loadTheme("bad-schema").ok === false);
+      ok(
+        "拒路径穿越的资产名（../escape.svg）",
+        T.loadTheme("bad-traversal").ok === false && /资产名不合法/.test(T.loadTheme("bad-traversal").error),
+        T.loadTheme("bad-traversal").error
+      );
+      ok("拒不存在的资产", T.loadTheme("bad-missing").ok === false);
+      ok("拒非法 JSON", T.loadTheme("bad-json").ok === false);
+      ok("拒没有 idle 的主题", T.loadTheme("no-idle").ok === false);
+      ok(
+        "拒目录名不合法的 id（../../etc）",
+        T.loadTheme("../../etc").ok === false && /id 不合法/.test(T.loadTheme("../../etc").error)
+      );
+      // 全坏掉的时候必须给兜底，否则窗口是一片空白——用户连退出的按钮都看不到。
+      // 注意这里要换成一个**空目录**再测：夹具目录里有个 good 主题，
+      // 直接在当前夹具上断言兜底，测的其实是"fallback 会不会被 good 顶掉"（它当然会）。
+      const emptyDir = path.join(TMP_ROOT, "themes-empty");
+      fs.mkdirSync(emptyDir, { recursive: true });
+      process.env.CLAWD_THEMES_DIR = emptyDir;
+      delete require.cache[require.resolve("../src/theme")];
+      const T2 = require("../src/theme");
+      const fb = T2.resolveTheme(["definitely-not-here"]);
+      ok("全部主题不可用时退到内置兜底画面", fb.theme.id === "__fallback__", `id=${fb.theme.id}`);
+      ok("兜底画面也是 7 个状态齐全", Object.keys(fb.theme.states).length === 7);
+      ok("兜底原因会被带出来（不是静默失败）", typeof fb.error === "string" && fb.error.length > 0);
+
+      if (savedDir === undefined) delete process.env.CLAWD_THEMES_DIR;
+      else process.env.CLAWD_THEMES_DIR = savedDir;
+      delete require.cache[require.resolve("../src/theme")];
     }
 
     // ---------- 8. 单实例锁（SEC-10） ----------

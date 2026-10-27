@@ -32,15 +32,23 @@ function main() {
   }
   const md = fs.readFileSync(MAP_FILE, "utf8");
   const recorded = new Set();
+  const prefixes = []; // 形如 `themes/**`：整目录登记，不逐帧列
   for (const m of md.matchAll(/\|\s*`([^`]+)`\s*\|/g)) {
     const p = m[1];
+    if (p.endsWith("/**")) {
+      prefixes.push(p.slice(0, -2)); // 保留结尾的 "/"
+      continue;
+    }
     if (p.endsWith("*") || p.endsWith("/")) continue; // 通配/目录条目不参与比对
     recorded.add(p);
   }
 
   const actual = walk(ROOT);
 
-  const missing = actual.filter((f) => !recorded.has(f));
+  // 主题资产有几十个 SVG 帧，逐帧登记只会让台账变成文件列表。
+  // 所以允许 `themes/**` 这种整目录条目覆盖它下面的所有文件。
+  const covered = (f) => recorded.has(f) || prefixes.some((pre) => f.startsWith(pre));
+  const missing = actual.filter((f) => !covered(f));
   // 存在性必须直接问文件系统，不能拿 walk 的结果反查：
   // docs/ 在 SKIP_DIRS 里（台账本身不参与"是否漏记"的比对），
   // 但它下面的资产（比如 docs/ragdoll-states.png）是应该能被台账引用的。

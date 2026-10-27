@@ -22,6 +22,7 @@ const { startServer } = require("./server");
 const { createStore } = require("./state");
 const { createPermissionCenter } = require("./permission");
 const { portFilePath } = require("./port-file");
+const themes = require("./theme");
 
 // SEC-10：单实例锁。第二个实例直接退出，避免两个进程抢同一个端点文件。
 if (!app.requestSingleInstanceLock()) {
@@ -41,6 +42,45 @@ let lastGaze = { x: 0, y: 0 };
 // 和气泡一样懒创建，但语义完全不同：气泡是"要你立刻做决定"，看板是"你自己想看"。
 // 所以它不置顶、不抢焦点、关掉就是关掉（不记忆位置也无所谓，Windows 会记住）。
 let dashboard = null;
+
+// ---- S7：主题 ----
+// 加载完成后的主题对象（含全部帧）。渲染层启动时来"拉"一次，切换时再"推"。
+// 不在这里做任何 SVG 清洗：清洗需要 DOM，主进程没有。
+let currentTheme = null;
+
+const DEFAULT_THEME_ID = "ragdoll";
+
+function pickThemeCandidates() {
+  // 优先级：环境变量（回归用）→ 命令行 → 上次选的 → 内置默认。
+  // 最后那个不能省：没有它，resolveTheme 会按字母序取第一个可用的主题，
+  // 于是"默认主题"变成了"名字最小的主题"——加一个 aaa 主题就把默认换了。
+  const out = [];
+  if (process.env.CLAWD_THEME) out.push(process.env.CLAWD_THEME);
+  const flag = process.argv.find((a) => a.startsWith("--theme="));
+  if (flag) out.push(flag.slice("--theme=".length));
+  const pref = themes.readPreference();
+  if (pref) out.push(pref);
+  out.push(DEFAULT_THEME_ID);
+  return out;
+}
+
+function pushTheme() {
+  if (!currentTheme) return;
+  if (win && !win.isDestroyed()) win.webContents.send("theme", currentTheme);
+  // 看板只需要 id 与名字，几百 KB 的帧数据没必要再送一份
+  if (dashboard && !dashboard.isDestroyed()) {
+    dashboard.webContents.send("theme", { id: currentTheme.id, name: currentTheme.name });
+  }
+}
+
+function applyTheme(id, { remember = true } = {}) {
+  const r = themes.loadTheme(id);
+  if (!r.ok) return { ok: false, error: r.error };
+  currentTheme = r.theme;
+  if (remember) themes.writePreference(id);
+  pushTheme();
+  return { ok: true, id, name: r.theme.name };
+}
 
 // ---- S5：权限气泡 ----
 let bubble = null; // 懒创建：真有人来请求时才建窗口
@@ -99,8 +139,15 @@ function createWindow() {
   win.on("move", positionBubble);
 }
 
+// 记住"推过没有"，给下面 300ms 的首帧保险用。
+// 不记的话启动时会连推两次同样的 idle：tick 的第一个 250ms 周期已经把
+// lastVisual 从 null 变成 idle 并 emit 过一次，300ms 的保险再推一遍是多余的。
+let pushedAnyState = false;
+
 function broadcast(snapshot) {
-  if (win && !win.isDestroyed()) win.webContents.send("state", snapshot);
+  if (!win || win.isDestroyed()) return;
+  pushedAnyState = true;
+  win.webContents.send("state", snapshot);
 }
 
 // ------------------------------------------------------------
@@ -279,6 +326,15 @@ app.whenReady().then(() => {
   const token = crypto.randomBytes(32).toString("hex");
   const server = startServer({ store, portFile, token, permissions });
 
+  // S7：先定主题再建窗口。顺序很重要——渲染层一加载就会 invoke("theme:get")，
+  // 那时 currentTheme 必须已经有值，否则第一帧是空白，用户看到的是一个"没画东西"的窗口。
+  const resolved = themes.resolveTheme(pickThemeCandidates());
+  currentTheme = resolved.theme;
+  if (resolved.error) {
+    // 不崩、不弹窗：主题坏了就用兜底，把原因留在控制台
+    console.warn("[theme] 有主题没加载成功：", resolved.error);
+  }
+
   createWindow();
 
   // ---- 拖拽：不用 app-region，改成主进程轮询全局光标 ----
@@ -366,6 +422,19 @@ app.whenReady().then(() => {
     return true;
   });
 
+  // ---- S7：主题 ----
+  // 渲染层启动时拉一次（避免"推早了被丢"），切换时走 theme:set 再推回去。
+  ipcMain.handle("theme:get", () => currentTheme);
+
+  ipcMain.handle("theme:list", () => ({
+    current: currentTheme ? currentTheme.id : null,
+    themes: themes.listThemes(),
+  }));
+
+  // id 来自渲染层，但 loadTheme 只认 readdir 出来的真实目录名，
+  // 拼不出越权路径；路径合法性与资产白名单也在 theme.js 里统一把关。
+  ipcMain.handle("theme:set", (_e, id) => applyTheme(id));
+
   // SEC-07：锁屏 / 休眠时先把窗口收起来。
   // 'screen-saver' 是最高常规层级，不收起来会浮在锁屏界面之上——
   // S5 之后气泡里会显示"正在执行什么命令"，那就成了别人能看见的信息泄露。
@@ -384,8 +453,13 @@ app.whenReady().then(() => {
   powerMonitor.on("suspend", hideAll);
   powerMonitor.on("resume", showAll);
 
-  // 首帧推送：避免桌宠启动后一直呆在初识状态
-  setTimeout(() => broadcast(store.snapshot()), 300);
+  // 首帧推送：避免桌宠启动后一直呆在初识状态。
+  // 但如果 tick 已经推过一次（大多数情况都是），这一次就是重复的——
+  // 重复推送本身无害，可它会让"启动期间的画面"变成两次重建，
+  // 联动调试时非常难理解（表现为"状态莫名弹回 idle"）。
+  setTimeout(() => {
+    if (!pushedAnyState) broadcast(store.snapshot());
+  }, 300);
 
   app.on("before-quit", () => {
     clearInterval(gazeTimer);

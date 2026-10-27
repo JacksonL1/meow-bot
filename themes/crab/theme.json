@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "name": "螃蟹",
+  "author": "clawd-starter",
+  "version": "1.0.0",
+  "description": "原版小螃蟹。拿来证明主题系统真的能换形象，而不只是换配置。",
+  "_comment": "由 scripts/migrate-visuals-to-theme.js 生成。states 里每个状态可含多帧，按 fps 轮播。资产只支持 SVG，每帧内必须自带 viewBox（约定 0 0 200 200）。",
+  "states": {
+    "idle": {
+      "fps": 2,
+      "eyeTracking": true,
+      "frames": [
+        "idle-1.svg"
+      ]
+    },
+    "thinking": {
+      "fps": 6,
+      "eyeTracking": true,
+      "frames": [
+        "thinking-1.svg",
+        "thinking-2.svg",
+        "thinking-3.svg"
+      ]
+    },
+    "working": {
+      "fps": 8,
+      "eyeTracking": true,
+      "frames": [
+        "working-1.svg",
+        "working-2.svg",
+        "working-3.svg",
+        "working-4.svg"
+      ]
+    },
+    "attention": {
+      "fps": 3,
+      "eyeTracking": false,
+      "frames": [
+        "attention-1.svg",
+        "attention-2.svg"
+      ]
+    },
+    "error": {
+      "fps": 3,
+      "eyeTracking": false,
+      "frames": [
+        "error-1.svg",
+        "error-2.svg"
+      ]
+    },
+    "notification": {
+      "fps": 6,
+      "eyeTracking": true,
+      "frames": [
+        "notification-1.svg",
+        "notification-2.svg",
+        "notification-3.svg",
+        "notification-4.svg"
+      ]
+    },
+    "sleeping": {
+      "fps": 3,
+      "eyeTracking": false,
+      "frames": [
+        "sleeping-1.svg",
+        "sleeping-2.svg",
+        "sleeping-3.svg"
+      ]
+    }
+  }
+}

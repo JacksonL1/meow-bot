@@ -1,6 +1,6 @@
 # clawd-starter
 
-从零重搭 Clawd 桌宠的 **S1–S6** 骨架：一个能自己出现在桌面上、能被真实 agent 事件驱动、**还能替你回答权限确认**、并且能一眼看到所有会话在干什么的透明窗口。
+从零重搭 Clawd 桌宠的 **S1–S7** 骨架：一个能自己出现在桌面上、能被真实 agent 事件驱动、**还能替你回答权限确认**、能一眼看到所有会话在干什么、形象还能换主题的透明窗口。
 
 目标不是"做一个好看的桌宠"，而是**把核心数据链路跑通**——之后每一阶段都是往这条链路上加东西，而不是推倒重来。
 
@@ -8,6 +8,7 @@
 事件流：agent 事件 → hook（短命进程，async）→ 本地 HTTP → 状态机 → IPC → 动画
 裁决流：agent 要执行工具 → HTTP hook（阻塞）→ 气泡等你点 → 同一个 socket 回 200/204
 看板流：双击桌宠 → 独立窗口 → 1s 轮询快照 → 列表（cwd 只有 basename）
+主题流：启动 → 读 themes/<id>/ → 校验 → IPC → 渲染层换帧数据（白名单在这里才生效）
 ```
 
 ## 跑起来
@@ -51,6 +52,11 @@ curl -X POST http://127.0.0.1:<port>/state \
 渲染层另有两道：SVG 字符串走 `DOMParser` + 标签白名单；气泡里的命令用 `textContent` 写入，
 agent 给的字符串永远不会被当 HTML 解析。看板同理——目录名、会话 id 全部 `textContent`。
 
+**S7 之后主题也是不可信输入**，所以白名单收紧了：放行 `clipPath`/`mask`/`filter` + 9 个逐个列举的
+`fe` 图元，拒绝 `feImage`（外部取图）、`feTurbulence`/`feDisplacementMap`（CPU 炸弹）、`style` 标签、
+`foreignObject`、`animate`/`set`。**所有 `url()` 只准指向 `#本地id`**——放行滤镜之后这条是唯一的出口管控。
+完整理由见 `docs/ledger/SECURITY.md`「S7 白名单定案」。
+
 **cwd 是分层处理的（SEC-09）**：存储层留完整路径（「复制路径」要用），快照层只出最后一段目录名。
 快照会进渲染进程、进看板、上屏幕，完整路径不会。唯一的例外是用户显式点「复制路径」——
 主进程单条释放给剪贴板，`dashboard-preload.js` 里根本没有「取完整 cwd」这种接口。
@@ -65,7 +71,17 @@ node scripts/fake-feed.js                     # 完整剧本： thinking → wor
 node scripts/fake-feed.js Stop                # 单个事件
 node scripts/fake-feed.js --hold working 10   # 保持某个状态 10 秒
 
-npm run verify:electron                       # 64 项回归：窗口/透明/IPC/DOM/gaze/HTTP/权限/看板/单实例/退出
+npm run verify:electron                       # 92 项回归：窗口/透明/IPC/DOM/gaze/HTTP/权限/看板/主题/单实例/退出
+
+npm run preview:states                        # 七状态对照图 → docs/ragdoll-states.png
+node scripts/preview-shot.js --theme=crab     # 换主题 → docs/crab-states.png
+npm run build:preview                         # 改完 themes/ 后更新 preview.html 的数据包
+```
+
+主题也能从命令行指定，优先级是 `CLAWD_THEME` 环境变量 → `--theme=` → 上次在看板里选的 → `ragdoll`：
+
+```bash
+npm start -- --theme=crab
 ```
 
 `verify:electron` 同时开两个调试端口：`--inspect=9229` 看主进程（窗口属性、IPC 接线），
@@ -87,7 +103,7 @@ npm run verify:electron                       # 64 项回归：窗口/透明/IPC
 - `POST /state` 接收器，固定端口 23333 + 端点文件发现（端口与 token 一起写 userData）
 - 接口四道锁 + 渲染层 SVG 白名单（见下方「安全边界」）
 - 单会话状态机：事件 → 状态 → 优先级仲裁 → oneshot 播完自动退回 → 闲置发呆 / 睡着
-- 状态 → 帧序列的映射表（`src/visuals.js`），每个状态可含多帧，按 fps 轮播
+- **主题系统（S7）**：形象不再是代码，而是 `themes/<id>/theme.json` + 一堆 SVG。`ragdoll`（默认）和 `crab` 两个内置主题，双击看板底部就能换
 - **形象是布偶猫**：奶油白长毛 + 深棕重点色 + 蓝宝石竖瞳；七个状态的尾巴姿势各不相同
   （垂 / 甩 / 竖 / 绕 / 炸），error 会炸毛并让毛色泛红。截图见 `docs/ragdoll-states.png`
 - **眼球追踪**：主进程读全局光标 → 归一化成 gaze → 渲染层插值移动瞳孔
@@ -105,7 +121,7 @@ npm run verify:electron                       # 64 项回归：窗口/透明/IPC
 
 | 这里 | 原项目 | 为什么先简化 |
 |---|---|---|
-| `visuals.js` 里写死 SVG | `themes/<name>/theme.json` + 资产目录 | 主题系统是 S7，先把"状态→画面"跑通 |
+| 主题只支持 SVG | 支持 GIF/APNG/WebP + 资产缓存 | 图片解码器是另一个工程，先把"主题能加载、能校验"跑通 |
 | 事件名以 Claude Code 为基准 | 30+ agent 各自的适配器 | 安装器已能装三家（`--agent`），但事件映射表还没按 agent 分叉 |
 | `Map` 内存里存会话 | 加上持久化、恢复租约、历史记录 | 掉电恢复是产品需求，不是学习需求 |
 | 看板 1s 轮询 | 事件驱动的推送 + 增量 diff | `idleMs` 天然随时间变，轮询省掉一整套"何时该推"的判断 |
@@ -238,6 +254,31 @@ spawn(electron, [".", "--user-data-dir=" + path.join(TMP, "userdata"), ...]);
 权限请求全都点不动，只能等超时。所以 `render()` 开头无条件 `disabled = false`，
 回归里也专门断言了「第二次请求时按钮已恢复可用」。
 
+**改了 `themes/` 但预览页没变**
+
+`preview.html` 是浏览器直接打开的静态页，`file://` 下 `fetch` 读不到本地文件，所以它吃的是
+`preview-bundle.js`（由 `themes/` 打出来的包）。改完主题必须 `npm run build:preview`。
+
+桌宠运行时**不走这个包**（它走 IPC 直接读文件），所以包过期只影响预览，不影响实际形象——
+这也意味着"预览没变但桌宠变了"是可能发生的，别拿预览页当唯一真相。
+
+**没有指定主题时，默认主题变成了"名字最小的那个"**
+
+`resolveTheme` 只负责"返回第一个能加载的候选人"。如果候选人列表里没有内置默认，
+它会退化成按 `readdir` 排序取第一个——加一个 `aaa` 主题就把默认形象换掉了。
+所以 `pickThemeCandidates()` 末尾必须显式 `push(DEFAULT_THEME_ID)`。
+
+这类 bug 的特征是：**单个组件都对，组合起来不对**。单测 `resolveTheme` 永远发现不了它。
+
+**断言不要去改被测对象**
+
+剪贴板那条原来是这么写的：先 `writeText('PROBE-OK')` 探一下能不能读写，通了再 `readText()` 断言内容。
+结果探针直接**覆盖掉了前一步刚写进去的路径**，断言读到的永远是 `PROBE-OK`。
+
+正确顺序是：先读真值 → 不相等才做能力探测（并且把原值写回去）。
+顺带纠正一个错误结论：上一轮我以为"这个环境访问不到剪贴板"，其实是这个探针把证据抹掉了。
+**测试代码和业务代码一样会骗人。**
+
 ## S4 已完成：接真 hook
 
 三个阶段都跑通了：
@@ -321,20 +362,59 @@ HTTP hook——Claude Code 直接 POST 我们的端点，**HTTP 响应就是决�
 （伪造 id 拿到 false 就是证据），但本环境 `clipboard.readText()` 恒为空，连「自己写个探针再读回」
 都拿不到——手工双击点一次才能确认粘出来的是完整路径。
 
-## 下一步：S7 主题系统
+## S7 已完成：主题系统
 
-把写死的 `visuals.js` 换成 `themes/<name>/theme.json` + 资产目录。
+形象从代码里搬了出来。原来 19 帧 SVG 拼在 `src/visuals.js` 里，现在是一个目录：
 
-开工前必须先在 `SECURITY.md` 里定一件事：`renderer.js` 的 `ALLOWED_TAGS` 现在**没有** `clipPath` / `mask` / `filter`。
-接外部主题时，放行它们等于让主题文件能做视觉欺骗（把 UI 伪装成系统弹窗）和信息外带（滤镜 URI 引用外部资源）；
-不放行，主题的表达能力就受限。**顺序必须是「先定白名单，再做加载器」**——反过来写，加载器写完才发现白名单要放宽，
-那时候放宽的动机已经变成「让这个主题能跑起来」，而不是「这样安全」。
+```text
+themes/ragdoll/
+├── theme.json          状态 → 帧文件、fps、要不要跟眼球
+└── assets/*.svg        19 个文件，一帧一个
+```
+
+**`src/visuals.js` 被删掉了**，不是"改成从文件读"——那个文件不存在了。加载链是：
+主进程读 `themes/` → 校验 → IPC → 渲染层换帧数据。主题是**拉**回来的（`getTheme`），
+不是推的，因为 S5 的第一个权限气泡就是"推早了被静默丢弃"。
+
+有两个内置主题：`ragdoll`（默认）和 `crab`（原版螃蟹，从 git 历史里取回来的）。
+第二个主题的意义是**证明这套东西能换形象**，而不只是能换几个参数。双击看板底部就能切。
+`themes/_template/` 是脚手架，下划线开头所以不会出现在主题列表里。
+
+### 真正的难点不是加载，是决定"什么能进 DOM"
+
+主题文件是不可信输入。动手前先在 `SECURITY.md` 里定了白名单，然后才写加载器——顺序反过来的话，
+等第一个主题加载不出来时才去放宽白名单，那时候放宽的动机已经变成"让它能跑起来"，而不是"这样安全"。
+
+| 处置 | 内容 | 为什么 |
+|---|---|---|
+| 放行 | `clipPath` `mask` `filter` | 没有它们只能画硬边，做不出柔和阴影 |
+| 逐个放行 | 9 个 `fe` 图元（模糊/投影/调色/叠加） | **不用 `fe*` 通配**，多一个都要人过一遍 |
+| 拒 | `feImage` | 唯一用途就是从 `href` 拉外部图片 |
+| 拒 | `feTurbulence` `feDisplacementMap` | CPU 炸弹：每帧重算 2D 湍流场 |
+| 拒 | `style` 标签 | 能写 `@import`、能覆盖整页。代价是主题不能用 CSS 动画 |
+| 拒 | `foreignObject` `animate` `set` | HTML 注入；SMIL 能在运行时改 `href` 绕过静态校验 |
+
+**加了这三个标签之后，`url()` 目标校验从"锦上添花"变成唯一的出口管控**——它们的值天生就是 `url()`。
+所以那条「url 只准指向 # 本地 id」的正则现在删不得，也放松不得。另外补了一条 `stdDeviation ≤ 40`：
+Chrome 对超大模糊半径是同步算的，一个 `9999` 就是一次卡死。
+
+### 两个让"主题坏了"不变灾难的设计
+
+- **全坏时给内置兜底画面**（灰色「?」）。桌宠是 `skipTaskbar` + 透明无边框的窗口，
+  加载失败导致空白的话，用户看到的是一个**看得见进程、找不到窗口、不知道点哪里退出**的东西——比报错难处理得多。
+- **失败是整个主题拒绝，不是部分加载**。半个主题的表现是"看着有点怪"，作者根本不会发现。
+
+回归 92/92，其中主题与白名单 26 项。`npm run preview:states` 出对照图（`--theme=crab` 换主题），
+`npm run build:preview` 更新预览页的数据包。
 
 ## 对照阅读
 
 - `docs/ledger/PROGRESS.md` —— 每个阶段做了什么、实测数据、哪些没验
 - `src/state.js` —— 只看 `resolveDominantSessionState` 和 `updateVisualState` 附近，外加 SEC-09 的 `sanitizeCwd` / `publicCwd` / `fullCwd` 三个函数
+- `src/theme.js` —— 325 行，重点看 `readAsset()` 为什么"正则 + 真实路径"双保险，以及 `resolveTheme()` 为什么必须有兜底
+- `src/renderer.js` —— 白名单那段（`ALLOWED_TAGS` + `clampStdDeviation`）是 S7 的安全核心
 - `src/permission.js` —— 134 行，重点看 `settle()` 为什么必须是唯一出口
 - `src/dashboard-renderer.js` —— 156 行，看「行节点复用 + insertBefore 调序」怎么避免每秒重建
 - `hooks/clawd-hook.js` —— 看它如何"读了就 POST，然后立刻退出"
 - `hooks/install.js` —— 看观察型（async）和裁决型（阻塞）hook 的区别怎么落进 JSON，以及三家 agent 的差异表
+- `themes/README.md` —— 想自己做一个主题时看这个（三条硬契约 + 资产规则）

@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <g transform="translate(0 0)">
+    <ellipse cx="100" cy="180" rx="46" ry="8" fill="#2C2C2A" opacity="0.10"/>
+    <g fill="none" stroke="#993C1D" stroke-width="4" stroke-linecap="round">
+      <path d="M64 152 L52 172"/><path d="M78 158 L72 178"/><path d="M92 162 L90 180"/>
+      <path d="M136 152 L148 172"/><path d="M122 158 L128 178"/><path d="M108 162 L110 180"/>
+    </g>
+    <ellipse cx="40" cy="128" rx="18" ry="13" fill="#C65432" stroke="#993C1D" stroke-width="3.5" transform="rotate(-18 40 128)"/>
+    <ellipse cx="160" cy="128" rx="18" ry="13" fill="#C65432" stroke="#993C1D" stroke-width="3.5" transform="rotate(18 160 128)"/>
+    <ellipse cx="100" cy="126" rx="54" ry="42" fill="#C65432" stroke="#993C1D" stroke-width="3.5"/>
+    <ellipse cx="100" cy="144" rx="32" ry="19" fill="#F0997B" opacity="0.6"/>
+    <path d="M92 141 q8 8 16 0" fill="none" stroke="#4A1B0C" stroke-width="3.5" stroke-linecap="round" opacity="0.8"/>
+    
+      <path d="M70 114 h24" fill="none" stroke="#2C2C2A" stroke-width="4.5" stroke-linecap="round"/>
+      <path d="M106 114 h24" fill="none" stroke="#2C2C2A" stroke-width="4.5" stroke-linecap="round"/>
+  </g>
+  <g fill="#5F5E5A" font-family="system-ui, sans-serif" font-weight="500" opacity="0.72">
+    <text x="146" y="73" font-size="18">z</text>
+    <text x="161" y="55" font-size="14">z</text>
+  </g>
+</svg>

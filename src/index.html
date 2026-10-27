@@ -82,7 +82,8 @@
       </div>
     </div>
     <div id="hint">拖动我 · 双击看会话 · 右键退出</div>
-    <script src="./visuals.js"></script>
+    <!-- S7：不再有 visuals.js。帧数据由主进程从 themes/ 读出来，
+         经 preload 的 getTheme() 送进来。 -->
     <script src="./renderer.js"></script>
   </body>
 </html>

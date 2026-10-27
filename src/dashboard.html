@@ -189,7 +189,22 @@
         color: var(--muted);
         font-size: 11px;
         display: flex;
+        align-items: center;
         gap: 12px;
+      }
+      footer .grow {
+        flex: 1;
+      }
+      /* S7：主题切换。它不是"设置项"，是"我现在想看哪个形象"，
+         所以放在底部这种随手可及的位置，而不是藏进菜单。 */
+      footer select {
+        font: inherit;
+        color: var(--text);
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 2px 6px;
+        max-width: 140px;
       }
     </style>
   </head>
@@ -213,8 +228,8 @@
     </main>
 
     <footer>
+      <label class="grow" title="换形象，立即生效">形象 <select id="themeSel"></select></label>
       <span>双击桌宠打开/收起</span>
-      <span>数据只在内存，退出即清</span>
     </footer>
 
     <script src="./dashboard-renderer.js"></script>
