@@ -102,7 +102,7 @@
 - **位置**：`src/state.js:95,99`、`state.js:67`
 - **问题**：`payload.cwd` 不做长度/格式校验就进 snapshot，并随状态推送。
 - **影响**：S6 多会话看板一定会显示 cwd，届时完整磁盘路径（含用户名、项目名）会出现在桌面上。
-- **修复**：只保留 `path.basename(cwd)`，或做 `~/...` 缩写；长度限制 200。
+- **修复**：~~只保留 `path.basename(cwd)`~~ → **S6 时修正为分层**（见下方「S6 落地核对」）：存储层留完整路径，快照层只出 basename。原方案按字段一刀切，会把看板的「复制路径」功能一起砍掉——那不是修复，是砍功能。
 
 ### SEC-10 端口文件写在项目根目录
 
@@ -128,7 +128,7 @@
 | SEC-06 | ✅ 已修 | `webPreferences` 显式写 `sandbox: true`、`webSecurity: true`、`allowRunningInsecureContent: false` | 启动、IPC、拖拽、穿透全部正常 |
 | SEC-07 | 🟡 部分修 | `powerMonitor` 监听 `lock-screen`/`suspend` 隐藏窗口，`unlock-screen`/`resume` 恢复；气泡内容脱敏留到 S5 | 仅逻辑实现，未做真机锁屏/投屏回归 |
 | SEC-08 | ✅ 已修（10-27） | 升到 `electron@45.0.0`，`~` 版本范围。见下一节 | `npm audit` → 0 漏洞；回归 37/37 |
-| SEC-09 | ✅ 已修 | `src/state.js`：`cwd` 只保留最后一段目录名，限 200 字符 | 传 `C:\Users\Think\secret-folder\my-proj`，快照里只剩 `my-proj` |
+| SEC-09 | ✅ 已修（10-27 修正） | `src/state.js`：`cwd` 只保留最后一段目录名，限 200 字符。**S6 时修正为分层**：存储层留完整（限 1024），快照层只出 basename，完整路径只在显式点击时单条释放 | 传 `C:\Users\Think\secret-folder\my-proj`，快照里只剩 `my-proj`；看板 DOM 里查不到盘符 |
 | SEC-10 | ✅ 已修 | 端点文件统一写 `userData`（`src/port-file.js` 统一算路径，`fake-feed.js` 复用同一份逻辑）；`app.requestSingleInstanceLock()` 单实例锁 | 文件落在 `%APPDATA%\clawd-starter\clawd-starter.port`；第二个实例直接退出 |
 
 **顺带产出**：新增 `src/port-file.js`（端点文件读写，唯一真相），`scripts/fake-feed.js` 改为读 JSON 端点并带 token。
@@ -291,10 +291,61 @@
 
 ---
 
-## S6 / S7 预判
+## S6 会话看板：落地核对（2026-10-27，回归 64/64）
 
-- **S6 多会话看板**：`cwd` 脱敏（见 SEC-09）；提供「演示模式」隐藏项目名，避免投屏/直播泄露。
-- **S7 主题系统**：主题包是不可信输入。加载前做 SVG 白名单（见 SEC-05）、禁止主题携带 `<script>`/`<foreignObject>`/外链资源；主题目录建议校验来源（本地手工放置，不做自动下载）。
+预判只有两条（cwd 脱敏 + 演示模式），落地时实际涉及面更大——因为看板**新增了一个窗口和两条 IPC**。
+
+### SEC-09 的正确解法是分层，不是砍字段
+
+| 层 | 函数 | 存/出什么 | 能到哪 |
+|---|---|---|---|
+| 存储层 | `sanitizeCwd()` | 完整路径，剥控制字符，限 1024 | 只在主进程内存 `sessions` Map |
+| 快照层 | `publicCwd()` | 最后一段目录名，限 200 | IPC → 渲染进程 → 看板 DOM → 屏幕/投屏/截图 |
+| 释放口 | `fullCwd(id)` | 完整路径，按 id 单条取 | 只被 `dashboard:copy-path` 调用，结果进剪贴板 |
+
+**断言**（回归 7.7 段）：
+
+- [x] 快照里 `proj-alpha` 在、`E:` 不在：`basename=true 盘符=false`（直接查 `document.body.textContent`）
+- [x] 伪造 id `'../../etc/passwd'` 调 `copyPath` 返回 `false`——`fullCwd` 只查 Map，不做路径拼接，所以路径穿越在此不成立
+- [x] `dashboard-preload.js` 里**不存在**「取完整 cwd」的接口，渲染层想拿也没有通道
+
+### 演示模式：只掩盖显示，不掩盖数据
+
+它防的是「投屏/直播时把客户项目名漏出去」，所以只隐藏目录名，状态与时长照旧——把看板变成废纸是过度设计。
+
+**这是一条必须写清楚的边界**：演示模式存在渲染层的 `localStorage` 里，主进程不知道它开着。也就是说**快照里仍然有 basename**，只是不显示。真要彻底隐藏，得在宿主侧不采集，那是另一件事（也更彻底）。当前设计的选择是：项目名属于"低敏感但容易社死"的信息，不值得为它改动数据链路。
+
+### 新窗口的安全基线
+
+看板是第二个带 `preload` 的窗口，所以把主窗口那套基线逐条对照过：
+
+| 项 | 看板 | 与主窗口一致？ |
+|---|---|---|
+| `contextIsolation: true` | ✓ | 一致 |
+| `nodeIntegration: false` | ✓ | 一致 |
+| `sandbox: true` | ✓ | 一致 |
+| `webSecurity: true` | ✓ | 一致 |
+| CSP | `default-src 'none'` | 一致 |
+| preload 暴露面 | 2 个动作（`getSnapshot` / `copyPath`），无 `ipcRenderer` | 一致（主窗口 7 个） |
+| 外部字符串进 DOM | 全部 `textContent` | 一致 |
+
+**刻意不一致的三个窗口参数**（`frame` / `transparent` / `alwaysOnTop`）是体验选择，不是安全项——看板是"用户主动要看"的窗口，所以有边框、不透明、不置顶。而它**比桌宠泄露得多**（一整张项目列表），所以 `hideAll()` 在锁屏/休眠时必须把它一起 `hide()`。
+
+### 遗留
+
+- **P3**：`dashboardDebug` 挂在 `window` 上（DevTools 可手动灌快照）。和 `petDebug` 同一性质——只在能开 DevTools 的前提下可用，且灌进去的数据不会外发。保留是为了联调。
+- **未验**：剪贴板内容。`copyPath` 返回 true/false 已验，但本环境 `clipboard.readText()` 恒为空（连自写探针都读不到），需手工确认。
+
+---
+
+## S7 主题系统：预判
+
+- 主题包是**不可信输入**（可能来自第三方分享）。加载前必须过 SVG 白名单（见 SEC-05），禁止 `<script>` / `<foreignObject>` / 外链资源。
+- **`ALLOWED_TAGS` 现在没有 `clipPath` / `mask` / `filter`**。接主题前要先决定：
+  - 放行 → 主题能做发光、柔和阴影、裁切，但也能做**视觉欺骗**（把界面伪装成系统弹窗诱导点击）和**信息外带**（`filter: url(...)` 引用外部资源）。
+  - 不放行 → 表达力受限，但攻击面小得多。
+- **顺序不能反**：先定白名单，再做加载器。反过来写，等加载器写完才发现白名单要放宽，那时候放宽的动机已经变成"让这个主题能跑起来"，而不是"这样安全"。
+- 主题目录建议校验来源（本地手工放置，不做自动下载）。
 
 ---
 

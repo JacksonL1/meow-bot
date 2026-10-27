@@ -199,7 +199,19 @@ function createStore({ onChange } = {}) {
   const timer = setInterval(tick, TICK_MS);
   if (typeof timer.unref === "function") timer.unref();
 
-  return { apply, snapshot, tick, dispose: () => clearInterval(timer) };
+  return {
+    apply,
+    snapshot,
+    tick,
+    // SEC-09 的兑现点：完整 cwd 永远不进快照、不进渲染层。
+    // 只有"用户对某一条会话显式做了动作"（点复制路径）时，
+    // 由主进程按 id 取出这一条，直接塞进剪贴板。
+    fullCwd: (id) => {
+      const s = sessions.get(id);
+      return s ? s.cwd : undefined;
+    },
+    dispose: () => clearInterval(timer),
+  };
 }
 
 module.exports = { createStore, PRIORITY, ONESHOT, EVENT_STATE };

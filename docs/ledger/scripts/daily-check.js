@@ -25,10 +25,10 @@ function tryRun(cmd, args, timeout = 60000, useShell = false) {
       timeout,
       shell: useShell,
       stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
+    }).trimEnd(); // 只能裁右边！见下方 status 解析处的注释
   } catch (e) {
     // npm audit 有漏洞时退出码非 0，但 stdout 里仍有完整 JSON，不能丢
-    const out = e && e.stdout ? String(e.stdout).trim() : "";
+    const out = e && e.stdout ? String(e.stdout).trimEnd() : "";
     return out || null;
   }
 }
@@ -90,17 +90,26 @@ function main() {
   }
 
   // ---- 2. 工作区（排除台账自身，否则每天都会被自己弄脏）----
+  //
+  // 这里踩过一个很难看的坑：porcelain 每行是「两个状态位 + 一个空格 + 路径」，
+  // 而第一行以空格开头（未暂存的修改是 ` M file`）。如果对整段输出做 trim()，
+  // 首行开头的空格会被吃掉，`M file` 再 slice(3) 就把文件名的第一个字母也切走了——
+  // 实测出现过 `README.md` 变成 `EADME.md` 被写进基线。
+  // 所以 tryRun 只允许 trimEnd()，这里再兜一层：第 3 个字符不是空格时退回正则。
+  const porcelainPath = (l) =>
+    (l[2] === " " ? l.slice(3) : l.replace(/^.{1,2}\s+/, "")).trim().replace(/^"|"$/g, "");
+
   const statusRaw = tryRun("git", ["status", "--porcelain"]) || "";
   const dirty = statusRaw
     .split("\n")
     .map((l) => l.replace(/\s+$/, ""))
     .filter((l) => l.trim())
     .filter((l) => {
-      const p = l.slice(3).trim().replace(/^"|"$/g, "");
+      const p = porcelainPath(l);
       return !p.startsWith("docs/");
     });
   // 工作区「现状」不等于「变化」：只有相对上次基线增减时才计入
-  const dirtyPaths = dirty.map((l) => l.slice(3).trim().replace(/^"|"$/g, ""));
+  const dirtyPaths = dirty.map(porcelainPath);
   if (!firstRun) {
     const prevDirty = new Set(prev.dirtyPaths || []);
     const added = dirtyPaths.filter((p) => !prevDirty.has(p));

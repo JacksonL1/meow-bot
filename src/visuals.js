@@ -1,178 +1,182 @@
 "use strict";
 // ============================================================
-// S3  状态 → 帧序列 的映射表（形象：布偶猫）
+// S3  状态 → 帧序列 的映射表（形象：四肢着地趴伏姿势的萌系布偶猫）
 //
-// 每个状态是一个 { fps, eyeTracking, frames[] }：
-//   frames      同一状态的若干张图，按 fps 轮播 = 动画
-//   eyeTracking 只有"睁眼"的帧才有 .pupils 节点，能跟鼠标转
-//
-// 到 S7 这份数据会搬进 themes/<name>/theme.json，代码一行都不用改。
-//
-// ---- 换形象时必须守住的契约（渲染层就是这么读的）----
-//   1. 根节点必须是 viewBox="0 0 200 200" 的 <svg>，否则整套坐标系对不齐
+// ---- 换形象时必须守住的契约 ----
+//   1. viewBox="0 0 200 200" 的 <svg>
 //   2. 身体整体放进 <g transform="translate(dx dy)">，overlay 留在外面
-//      ——这样 error 的抖动只抖身体，气泡不会跟着抽搐
-//   3. eyeTracking 为 true 的帧必须含 <g class="pupils">，且组内用绝对坐标
-//      ——渲染层是直接往这个 g 上 setAttribute("transform") 的，
-//        自带的 transform 会被覆盖掉
-//   4. 只能用 renderer.js 的 ALLOWED_TAGS 白名单内的标签：
-//      svg/g/path/rect/circle/ellipse/line/polyline/polygon/text/gradient/stop
-//      **没有 clipPath / mask / filter**，所以形状全靠堆叠，
-//      蓬松感一律用「粗描边 + 圆角端点」做出来
+//   3. eyeTracking 为 true 的帧必须含 <g class="pupils"> (绝对坐标)
+//   4. 仅使用白名单内的标签
 // ============================================================
 
-// ---- 布偶猫配色 ----
-// 品种三要素：奶油白长毛 + 深棕重点色（耳/尾/爪）+ 蓝宝石眼。
-// 重点色刻意不做得太深，否则蓝眼睛会被压住看不见——蓝眼是这个形象的票房。
-const FUR = "#F7EFE4";        // 身体奶油白
-const FUR_HI = "#FFFBF4";     // 胸口领毛高光
-const POINT = "#9A7454";      // 重点色（seal 貂棕）
-const IRIS = "#5CB3E4";       // 布偶蓝眼
-const PUPIL = "#22415C";      // 瞳孔深蓝
-const NOSE = "#D98A82";       // 鼻尖粉
-const LINE = "#5A4436";       // 轮廓线
+const FUR = "#FAF6F0";        // 身体软糯奶白
+const FUR_HI = "#FFFFFF";     // 胸口毛领纯白高光
+const POINT = "#967866";      // 经典双色海豹重点色（暖绒棕）
+const POINT_DARK = "#7A5E4E"; // 重点色阴影
+const IRIS = "#51ABE8";       // 蓝宝石晶莹虹膜
+const IRIS_DARK = "#2B73B0";  // 虹膜深层暗影
+const PUPIL = "#1A2E40";      // 深海蓝黑瞳孔
+const NOSE = "#F2A7A7";       // 柔嫩水蜜桃粉鼻
+const LINE = "#524338";       // 柔和炭棕色轮廓线
 
 // ------------------------------------------------------------
-// 眼睛。布偶猫的关键在蓝虹膜 + 竖瞳，缺一个都不像。
+// 眼睛系统：温顺深邃的大眼
 // ------------------------------------------------------------
 function eyesSvg(kind) {
   if (kind === "open") {
-    // 虹膜 rx < ry 是猫眼的感觉；瞳孔做成竖椭圆（rx << ry）才像猫
-    // ——圆瞳会立刻变成狗或人。高光点跟着瞳孔一起放进 pupils，眼才活。
+    // 两只眼的虹膜先各画各的，但**瞳孔必须收进同一个 <g class="pupils">**。
+    // 渲染层是这样驱动的：
+    //   const pupils = el.querySelector("svg.on .pupils");
+    //   pupils.setAttribute("transform", `translate(dx dy)`);
+    // querySelector 只返回第一个匹配 —— 如果左右眼各包一个 pupils 组，
+    // 只有左眼会跟鼠标转，右眼永远定在原地（这个 bug 真发生过）。
     return `
-      <ellipse cx="82" cy="96" rx="13.5" ry="15.5" fill="${IRIS}" stroke="${LINE}" stroke-width="2"/>
-      <ellipse cx="118" cy="96" rx="13.5" ry="15.5" fill="${IRIS}" stroke="${LINE}" stroke-width="2"/>
+      <!-- 左眼 -->
+      <circle cx="74" cy="92" r="14" fill="${LINE}"/>
+      <circle cx="74" cy="92" r="12.5" fill="${IRIS_DARK}"/>
+      <circle cx="74" cy="92" r="10.5" fill="${IRIS}"/>
+
+      <!-- 右眼 -->
+      <circle cx="126" cy="92" r="14" fill="${LINE}"/>
+      <circle cx="126" cy="92" r="12.5" fill="${IRIS_DARK}"/>
+      <circle cx="126" cy="92" r="10.5" fill="${IRIS}"/>
+
+      <!-- 两眼共用的瞳孔层（全帧只允许存在一个） -->
       <g class="pupils">
-        <ellipse cx="82" cy="96" rx="5" ry="10.5" fill="${PUPIL}"/>
-        <ellipse cx="118" cy="96" rx="5" ry="10.5" fill="${PUPIL}"/>
-        <circle cx="77.5" cy="90" r="2.8" fill="#FFF" opacity="0.92"/>
-        <circle cx="113.5" cy="90" r="2.8" fill="#FFF" opacity="0.92"/>
+        <ellipse cx="74" cy="92" rx="5" ry="9" fill="${PUPIL}"/>
+        <circle cx="70.5" cy="87" r="3" fill="#FFFFFF"/>
+        <circle cx="77" cy="96" r="1.5" fill="#FFFFFF" opacity="0.85"/>
+        <ellipse cx="126" cy="92" rx="5" ry="9" fill="${PUPIL}"/>
+        <circle cx="122.5" cy="87" r="3" fill="#FFFFFF"/>
+        <circle cx="129" cy="96" r="1.5" fill="#FFFFFF" opacity="0.85"/>
       </g>`;
   }
   if (kind === "happy") {
-    // 笑弯的眼（^ ^），和布偶猫的圆脸最搭
     return `
-      <path d="M69 100 q13 -15 26 0" fill="none" stroke="${LINE}" stroke-width="5" stroke-linecap="round"/>
-      <path d="M105 100 q13 -15 26 0" fill="none" stroke="${LINE}" stroke-width="5" stroke-linecap="round"/>`;
+      <path d="M60 93 Q74 79 88 93" fill="none" stroke="${LINE}" stroke-width="4.5" stroke-linecap="round"/>
+      <path d="M112 93 Q126 79 140 93" fill="none" stroke="${LINE}" stroke-width="4.5" stroke-linecap="round"/>`;
   }
   if (kind === "shut") {
-    // 睡着：向下弯的弧比直线更像"闭着放松"
     return `
-      <path d="M69 96 q13 8 26 0" fill="none" stroke="${LINE}" stroke-width="4.5" stroke-linecap="round"/>
-      <path d="M105 96 q13 8 26 0" fill="none" stroke="${LINE}" stroke-width="4.5" stroke-linecap="round"/>`;
+      <path d="M61 90 Q74 101 87 90" fill="none" stroke="${LINE}" stroke-width="4" stroke-linecap="round"/>
+      <path d="M113 90 Q126 101 139 90" fill="none" stroke="${LINE}" stroke-width="4" stroke-linecap="round"/>`;
   }
-  // dead：X 眼（出错时的"当机"）
   return `
-    <path d="M73 88 l18 18 M91 88 l-18 18" fill="none" stroke="${LINE}" stroke-width="4.5" stroke-linecap="round"/>
-    <path d="M109 88 l18 18 M127 88 l-18 18" fill="none" stroke="${LINE}" stroke-width="4.5" stroke-linecap="round"/>`;
+    <path d="M65 84 L83 102 M83 84 L65 102" fill="none" stroke="${LINE}" stroke-width="4.5" stroke-linecap="round"/>
+    <path d="M117 84 L135 102 M135 84 L117 102" fill="none" stroke="${LINE}" stroke-width="4.5" stroke-linecap="round"/>`;
 }
 
-// ---- 尾巴姿势。猫的情绪有一半写在尾巴上，几个状态必须不一样 ----
+// ---- 四肢趴伏姿势下的尾巴形态 ----
 function tailD(kind) {
   switch (kind) {
-    case "up":    // attention：竖起来打招呼
-      return "M138 150 C158 156 172 134 168 110 C166 98 156 92 148 96";
-    case "curl":  // sleeping：绕回身侧把自己圈起来
-      return "M142 154 C172 162 190 146 180 126 C173 112 150 118 146 134";
-    case "swish": // working：甩到另一侧
-      return "M140 152 C168 152 186 160 190 146";
-    case "puff":  // error：炸毛，短而粗地竖起
-      return "M136 154 C156 152 168 140 166 124";
-    default:      // 常态：自然垂到身侧
-      return "M140 152 C166 162 190 146 186 124";
+    case "up":    return "M145 152 C165 155 185 130 178 105 C174 90 156 86 148 96";
+    case "curl":  return "M142 154 C172 162 192 144 182 120 C174 104 148 114 140 132";
+    case "swish": return "M145 152 C170 150 190 162 194 142";
+    case "puff":  return "M142 152 C165 148 180 132 175 110";
+    default:      return "M145 152 C170 160 192 142 184 120";
   }
 }
 
-// ---- 额头的重点色块 ----
-// 真猫的重点色是「脸中央往下 + 四肢末端」，这里简化成一顶"小帽子"，
-// 刻意避开眼睛周围——留出白净的眼区，蓝眼睛才跳得出来。
-function faceMask() {
+// ---- 【重塑】布偶猫灵魂：完美对称的双色倒V面具 ----
+function faceMask(pointColor = POINT) {
   return `
-    <path d="M100 52 C78 52 64 62 62 76 C60 86 66 92 74 94 L100 82 L126 94 C134 92 140 86 138 76 C136 62 122 52 100 52 Z"
-      fill="${POINT}" opacity="0.95"/>`;
+    <path d="M100 48
+             C125 48 142 55 146 72
+             C150 90 152 105 136 114
+             C130 117 124 105 118 95
+             C112 85 106 72 100 72
+             C94 72 88 85 82 95
+             C76 105 70 117 64 114
+             C48 105 50 90 54 72
+             C58 55 75 48 100 48 Z"
+      fill="${pointColor}"/>`;
 }
 
 // ------------------------------------------------------------
-// 身体主绘制
-//   dx / dy  整体位移（working 的颠、error 的抖）
-//   fur      身体色（error 时偏红）
-//   point    重点色（error 偏红棕、sleeping 偏暗）
-//   tail     尾巴姿势
-//   puff     是否炸毛（沿外轮廓扎出尖角）
-//   blush    是否加腮红（表示情绪好）
+// 角色主体：更加饱满、华丽的布偶长毛质感
 // ------------------------------------------------------------
 function ragdoll({
   eyes = "open",
   overlay = "",
   fur = FUR,
   point = POINT,
+  pointDark = POINT_DARK,
   tail = "rest",
   dx = 0,
   dy = 0,
   puff = false,
   blush = false,
 } = {}) {
-  // 炸毛：尖角必须扎在**外轮廓的外侧**（肩背 + 头顶）。
-  // 第一版扎在脖子两侧（x≈62/138, y≈100），渲染出来像长了一对小翅膀，
-  // 因为那个位置正好是头和身体的交界，读者会把它解释成"肢体"而不是"毛"。
   const puffSvg = puff
-    ? `<g fill="${point}" opacity="0.9">
-         <path d="M57 118 l-14 -4 l6 12 z"/>
-         <path d="M53 100 l-14 -7 l7 12 z"/>
-         <path d="M88 49 l4 -13 l7 12 z"/>
-         <path d="M112 49 l-4 -13 l-7 12 z"/>
-         <path d="M143 118 l14 -4 l-6 12 z"/>
-         <path d="M147 100 l14 -7 l-7 12 z"/>
+    ? `<g fill="${point}">
+         <path d="M48 114 L30 110 L40 124 Z"/>
+         <path d="M44 96 L28 90 L37 104 Z"/>
+         <path d="M80 44 L84 26 L93 42 Z"/>
+         <path d="M120 44 L116 26 L107 42 Z"/>
+         <path d="M152 114 L170 110 L160 124 Z"/>
+         <path d="M156 96 L172 90 L163 104 Z"/>
        </g>`
     : "";
 
-  // 腮红：只在需要"情绪好"的状态出现，是 attention 和 sleeping 拉开差距的关键
-  // ——两者都是"眼睛不再睁着"，光靠眼的弧度区分太弱。
   const blushSvg = blush
-    ? `<g fill="${NOSE}" opacity="0.5">
-         <ellipse cx="66" cy="110" rx="8.5" ry="5"/>
-         <ellipse cx="134" cy="110" rx="8.5" ry="5"/>
+    ? `<g fill="${NOSE}" opacity="0.6">
+         <ellipse cx="56" cy="102" rx="9" ry="5"/>
+         <ellipse cx="144" cy="102" rx="9" ry="5"/>
        </g>`
     : "";
 
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
   <g transform="translate(${dx} ${dy})">
-    <ellipse cx="100" cy="177" rx="50" ry="9" fill="${LINE}" opacity="0.10"/>
+    <!-- 地面阴影 -->
+    <ellipse cx="100" cy="172" rx="65" ry="8" fill="${LINE}" opacity="0.12"/>
 
-    <!-- 尾巴：粗描边而不是填充。既省坐标，圆头端点又自动得到蓬松感。 -->
-    <!-- 第二条压在下层做描边阴影，把尾巴从身体上分出来。 -->
-    <path d="${tailD(tail)}" fill="none" stroke="${LINE}" stroke-width="25" stroke-linecap="round" opacity="0.14"/>
-    <path d="${tailD(tail)}" fill="none" stroke="${point}" stroke-width="21" stroke-linecap="round"/>
+    <!-- 尾巴 (更粗更蓬松) -->
+    <path d="${tailD(tail)}" fill="none" stroke="${LINE}" stroke-width="28" stroke-linecap="round" stroke-linejoin="round" opacity="0.14"/>
+    <path d="${tailD(tail)}" fill="none" stroke="${point}" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="${tailD(tail)}" fill="none" stroke="${fur}" stroke-width="10" stroke-linecap="round" opacity="0.35"/>
 
     ${puffSvg}
 
-    <!-- 身体：坐姿梨形 -->
-    <ellipse cx="100" cy="137" rx="50" ry="37" fill="${fur}" stroke="${LINE}" stroke-width="3.5"/>
-    <!-- 胸口白领毛，布偶猫最有辨识度的一撮 -->
-    <ellipse cx="100" cy="148" rx="33" ry="24" fill="${FUR_HI}" opacity="0.85"/>
-    <!-- 前爪：白手套 -->
-    <ellipse cx="77" cy="167" rx="15" ry="9" fill="${FUR_HI}" stroke="${LINE}" stroke-width="3"/>
-    <ellipse cx="123" cy="167" rx="15" ry="9" fill="${FUR_HI}" stroke="${LINE}" stroke-width="3"/>
+    <!-- 身体后半部分 -->
+    <ellipse cx="100" cy="142" rx="54" ry="32" fill="${fur}" stroke="${LINE}" stroke-width="3.5"/>
 
-    <!-- 头 -->
-    <ellipse cx="100" cy="88" rx="47" ry="41" fill="${fur}" stroke="${LINE}" stroke-width="3.5"/>
-    <!-- 耳朵：外耳重点色 + 内耳透出粉色 -->
-    <path d="M62 62 L58 34 L86 52 Z" fill="${point}" stroke="${LINE}" stroke-width="3" stroke-linejoin="round"/>
-    <path d="M138 62 L142 34 L114 52 Z" fill="${point}" stroke="${LINE}" stroke-width="3" stroke-linejoin="round"/>
-    <path d="M66 58 L64 42 L80 52 Z" fill="${NOSE}" opacity="0.45"/>
-    <path d="M134 58 L136 42 L120 52 Z" fill="${NOSE}" opacity="0.45"/>
+    <!-- 奢华的胸口大毛领 (Ruff) - 放在头部后面凸显立体感 -->
+    <path d="M60 115 C45 130 55 155 75 160 C85 163 115 163 125 160 C145 155 155 130 140 115 C125 125 115 128 100 128 C85 128 75 125 60 115 Z" fill="${FUR_HI}" stroke="${LINE}" stroke-width="3.5" stroke-linejoin="round"/>
 
-    ${faceMask()}
+    <!-- 四只胖乎乎的白手套爪子 -->
+    <ellipse cx="68" cy="164" rx="12" ry="8" fill="${FUR_HI}" stroke="${LINE}" stroke-width="3"/>
+    <ellipse cx="132" cy="164" rx="12" ry="8" fill="${FUR_HI}" stroke="${LINE}" stroke-width="3"/>
+    <ellipse cx="152" cy="158" rx="10" ry="7" fill="${FUR_HI}" stroke="${LINE}" stroke-width="2.5"/>
+
+    <!-- 耳朵 (放在头部后面显得更自然) -->
+    <g stroke="${LINE}" stroke-width="3.5" stroke-linejoin="round">
+      <path d="M56 60 C42 30 62 18 78 38 C82 42 80 48 76 50 Z" fill="${pointDark}"/>
+      <path d="M144 60 C158 30 138 18 122 38 C118 42 120 48 124 50 Z" fill="${pointDark}"/>
+    </g>
+    <!-- 耳内粉色绒毛 -->
+    <path d="M60 55 C50 38 65 28 72 38 C75 42 70 48 65 52 Z" fill="${NOSE}" opacity="0.55"/>
+    <path d="M140 55 C150 38 135 28 128 38 C125 42 130 48 135 52 Z" fill="${NOSE}" opacity="0.55"/>
+
+    <!-- 头部底色与轮廓 (带毛刺边缘的包子脸颊) -->
+    <path d="M100 48 C125 48 142 55 146 72 C150 90 152 105 136 114 C125 120 112 122 100 122 C88 122 75 120 64 114 C48 105 50 90 54 72 C58 55 75 48 100 48 Z" fill="${fur}" stroke="${LINE}" stroke-width="3.5" stroke-linejoin="round"/>
+
+    <!-- 八字倒V面具 -->
+    ${faceMask(point)}
+
+    <!-- 眼睛 -->
     ${eyesSvg(eyes)}
+
+    <!-- 腮红 -->
     ${blushSvg}
 
-    <!-- 鼻子 + 嘴 + 胡须 -->
-    <path d="M100 108 l6 6 l-12 0 z" fill="${NOSE}" stroke="${LINE}" stroke-width="2" stroke-linejoin="round"/>
-    <path d="M100 114 q-7 8 -12 2" fill="none" stroke="${LINE}" stroke-width="2.6" stroke-linecap="round"/>
-    <path d="M100 114 q7 8 12 2" fill="none" stroke="${LINE}" stroke-width="2.6" stroke-linecap="round"/>
-    <g stroke="${LINE}" stroke-width="1.8" stroke-linecap="round" opacity="0.55">
-      <path d="M52 100 l-16 -3"/><path d="M52 106 l-16 3"/><path d="M53 112 l-15 7"/>
-      <path d="M148 100 l16 -3"/><path d="M148 106 l16 3"/><path d="M147 112 l15 7"/>
+    <!-- 鼻尖与精致小嘴 -->
+    <path d="M100 102 L104 96.5 C106 95 94 95 96 96.5 Z" fill="${NOSE}" stroke="${LINE}" stroke-width="1.8" stroke-linejoin="round"/>
+    <path d="M100 102 L100 106 M100 106 Q94 113 88 108 M100 106 Q106 113 112 108" fill="none" stroke="${LINE}" stroke-width="2.5" stroke-linecap="round"/>
+
+    <!-- 柔和胡须 -->
+    <g stroke="${LINE}" stroke-width="1.6" stroke-linecap="round" opacity="0.4">
+      <path d="M46 95 L22 91"/><path d="M44 101 L20 101"/><path d="M46 107 L24 112"/>
+      <path d="M154 95 L178 91"/><path d="M156 101 L180 101"/><path d="M154 107 L176 112"/>
     </g>
   </g>
   ${overlay}
@@ -180,10 +184,8 @@ function ragdoll({
 }
 
 // ------------------------------------------------------------
-// overlay：叠在身体之外的小挂件。它们用绝对坐标，不跟着身体抖。
-// 这一组与形象无关，换任何角色都能直接复用。
+// Overlay UI 挂件 (保持不变)
 // ------------------------------------------------------------
-
 function bubble(x, y, w, h, stroke, fill, inner) {
   return `
     <rect x="${x}" y="${y}" width="${w}" height="${h}" rx="12" fill="${fill}" stroke="${stroke}" stroke-width="2.5"/>
@@ -191,7 +193,6 @@ function bubble(x, y, w, h, stroke, fill, inner) {
     ${inner}`;
 }
 
-// 思考气泡：三个点轮流亮
 function thinkingBubble(active) {
   const dots = [137, 149, 161]
     .map((cx, i) => `<circle cx="${cx}" cy="68" r="4.5" fill="#378ADD" opacity="${i === active ? 1 : 0.28}"/>`)
@@ -199,7 +200,6 @@ function thinkingBubble(active) {
   return bubble(120, 48, 58, 40, "#378ADD", "#E6F1FB", dots);
 }
 
-// 打字火花：两张图交错
 function sparkPhase(phase) {
   const up = phase === 0;
   return `<g stroke="#BA7517" stroke-width="3" stroke-linecap="round" fill="none" opacity="${up ? 1 : 0.4}">
@@ -208,7 +208,6 @@ function sparkPhase(phase) {
   </g>`;
 }
 
-// 开心闪光：缩放做出"闪"的感觉
 function sparklePhase(phase) {
   const big = phase === 0;
   const s1 = big ? 1 : 0.55;
@@ -221,7 +220,6 @@ function sparklePhase(phase) {
   </g>`;
 }
 
-// 铃铛：绕顶点左右摆
 function bellPhase(phase) {
   const deg = [-10, 0, 10, 0][phase];
   return bubble(
@@ -239,7 +237,6 @@ function bellPhase(phase) {
   );
 }
 
-// zzz：往上飘 + 变淡
 function zzzPhase(phase) {
   const lift = phase * 5;
   const fade = 1 - phase * 0.28;
@@ -250,24 +247,19 @@ function zzzPhase(phase) {
 }
 
 // ------------------------------------------------------------
-// 七个状态。名字必须存在，renderer.js 靠白名单挡住任意字符串进 DOM。
+// 七种状态 (保持不变)
 // ------------------------------------------------------------
-
 const VISUAL_STATES = {
-  // 单帧：静止时的"活气"完全靠眼球追踪（蓝眼睛跟着鼠标转），不需要帧序列
   idle: {
     fps: 2,
     eyeTracking: true,
     frames: [ragdoll({ eyes: "open" })],
   },
-
   thinking: {
     fps: 6,
     eyeTracking: true,
     frames: [0, 1, 2].map((i) => ragdoll({ eyes: "open", overlay: thinkingBubble(i) })),
   },
-
-  // 四帧：身体上下轻颠 + 尾巴来回甩 + 火花交错 = 忙碌感
   working: {
     fps: 8,
     eyeTracking: true,
@@ -278,9 +270,6 @@ const VISUAL_STATES = {
       ragdoll({ eyes: "open", dy: -1, tail: "swish", overlay: sparkPhase(1) }),
     ],
   },
-
-  // 尾巴竖起来 + 腮红 = "有好事给你看"。腮红是必须的：
-  // 只靠 ^ ^ 的弧度和 sleeping 的闭眼弧太接近，扫一眼分不出来。
   attention: {
     fps: 3,
     eyeTracking: false,
@@ -288,16 +277,15 @@ const VISUAL_STATES = {
       ragdoll({ eyes: "happy", tail: "up", blush: true, overlay: sparklePhase(i) })
     ),
   },
-
-  // 炸毛 + 抖动 + 毛色泛红：整只猫看起来不对劲，一眼能看出来
   error: {
     fps: 3,
     eyeTracking: false,
     frames: [0, 2].map((dx) =>
       ragdoll({
         eyes: "dead",
-        fur: "#F0D2C8",
-        point: "#A5452C",
+        fur: "#FCE8E6",
+        point: "#C85A4A",
+        pointDark: "#9E3C2F",
         tail: "puff",
         puff: true,
         dx,
@@ -314,19 +302,16 @@ const VISUAL_STATES = {
       })
     ),
   },
-
   notification: {
     fps: 6,
     eyeTracking: true,
     frames: [0, 1, 2, 3].map((i) => ragdoll({ eyes: "open", overlay: bellPhase(i) })),
   },
-
-  // 尾巴绕回身侧 + 毛色压暗 = 睡熟了
   sleeping: {
     fps: 3,
     eyeTracking: false,
     frames: [0, 1, 2].map((i) =>
-      ragdoll({ eyes: "shut", fur: "#EFE4D4", point: "#7B5B41", tail: "curl", overlay: zzzPhase(i) })
+      ragdoll({ eyes: "shut", fur: "#F0E8DD", point: "#785C47", tail: "curl", overlay: zzzPhase(i) })
     ),
   },
 };

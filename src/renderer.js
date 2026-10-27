@@ -197,6 +197,16 @@ window.addEventListener("contextmenu", (e) => {
   window.clawd.quit();
 });
 
+// S6：双击桌宠开关会话看板。
+// 用 dblclick 而不是单击，是因为 pointerdown 已经被拖拽占用了——
+// 单击必须留给"按住拖走"，否则拖拽和"点开看板"会互相打架。
+stage.addEventListener("dblclick", (e) => {
+  // 只认落在宠物身上的双击，透明边距上的双击不该触发
+  const el = document.elementFromPoint(e.clientX, e.clientY);
+  if (!el || !el.closest("#pet")) return;
+  window.clawd.toggleDashboard();
+});
+
 // ------------------------------------------------------------
 // 启动 + 调试入口
 //

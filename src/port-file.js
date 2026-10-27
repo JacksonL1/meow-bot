@@ -34,6 +34,10 @@ function userDataDir() {
 }
 
 function portFilePath() {
+  // 测试 / 多实例隔离：回归脚本要在「用户自己正开着桌宠」的情况下也能跑。
+  // 不能隔离的话，单实例锁和固定端口 23333 都被占用，
+  // 表现是"主进程起来了、渲染进程永远不出现"，很容易误判成代码坏了。
+  if (process.env.CLAWD_PORT_FILE) return path.resolve(process.env.CLAWD_PORT_FILE);
   return path.join(userDataDir(), FILE_NAME);
 }
 

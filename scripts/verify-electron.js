@@ -25,6 +25,17 @@ const ROOT = path.join(__dirname, "..");
 const MAIN_PORT = 9229;
 const RENDERER_PORT = 9222;
 
+// ---------- 测试隔离 ----------
+// 两个隔离点，缺一不可：
+//   1. --user-data-dir：requestSingleInstanceLock() 是按 userData 分实例的，
+//      不隔离的话「用户自己正开着桌宠」会让被测进程直接 quit，
+//      外面只看得到"渲染进程 15s 内没起来"。
+//   2. CLAWD_PORT_FILE：端点文件默认写 %APPDATA%，隔离后不会覆盖用户正在用的那份，
+//      端口被占时服务会退回随机端口，这里照样能从临时文件读到真实端口。
+const TMP_ROOT = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "clawd-verify-"));
+const USER_DATA_DIR = path.join(TMP_ROOT, "userdata");
+process.env.CLAWD_PORT_FILE = path.join(TMP_ROOT, "clawd-starter.port");
+
 const ELECTRON_BIN = require("electron"); // 纯 Node 下 require('electron') 返回可执行文件路径
 const PORT_FILE = require("../src/port-file").portFilePath();
 
@@ -232,7 +243,12 @@ async function main() {
 
   const child = spawn(
     ELECTRON_BIN,
-    [`--inspect=${MAIN_PORT}`, `--remote-debugging-port=${RENDERER_PORT}`, "."],
+    [
+      `--inspect=${MAIN_PORT}`,
+      `--remote-debugging-port=${RENDERER_PORT}`,
+      `--user-data-dir=${USER_DATA_DIR}`,
+      ".",
+    ],
     { cwd: ROOT, env: childEnv, stdio: ["ignore", "pipe", "pipe"] }
   );
 
@@ -297,7 +313,9 @@ async function main() {
     ok("contextIsolation 生效：渲染层拿不到 require", (await R.eval("typeof window.require")) === "undefined");
     ok("contextIsolation 生效：渲染层拿不到 process", (await R.eval("typeof window.process")) === "undefined");
     ok("preload 没有泄漏 ipcRenderer", (await R.eval("typeof window.ipcRenderer")) === "undefined");
-    ok("preload 只暴露 6 个具名动作", (await R.eval("Object.keys(window.clawd||{}).length")) === 6);
+    // 动作数是安全闸门：S6 加了 toggleDashboard，所以从 6 变 7。
+    // 以后每次加 IPC 都要顺手改这里，改的时候问自己一句"这个动作真的需要吗"。
+    ok("preload 只暴露 7 个具名动作", (await R.eval("Object.keys(window.clawd||{}).length")) === 7);
 
     // ---------- 3. 状态切换 ----------
     // 必须先等主进程把首次状态推下来（main.js 里是启动后 300ms 的一次 broadcast）。
@@ -343,6 +361,22 @@ async function main() {
     ok("帧轮播在跑（观察到多个帧下标）", frameMoves >= 2, `不同帧 ${frameMoves}`);
 
     // ---------- 4. 眼球追踪 ----------
+    // 结构前提：渲染层用 querySelector(".pupils") 拿第一个就驱动，
+    // 所以**每帧最多只能有一个 .pupils 组**。左右眼各包一个组的话，
+    // 只有一只眼会动，另一只永远定住——画上去看着正常，动起来才发现。
+    const multiPupils = await R.eval(`(() => {
+      const V = window.VISUAL_STATES;
+      const bad = [];
+      for (const s of Object.keys(V)) {
+        V[s].frames.forEach((f, i) => {
+          const n = (f.match(/class="pupils"/g) || []).length;
+          if (n > 1) bad.push(s + '#' + i + ':' + n);
+        });
+      }
+      return bad.join(',');
+    })()`);
+    ok("每帧最多一个 .pupils 组（否则只有一只眼会动）", multiPupils === "", `违规帧：${multiPupils}`);
+
     await R.eval("window.petDebug.setState('idle')");
     await sleep(200);
     await R.eval("window.petDebug.gaze({x:1,y:-1})");
@@ -353,6 +387,12 @@ async function main() {
       await sleep(100);
     }
     ok("gaze 收敛到满幅位移", transform === "translate(3.60 -2.60)", `transform=${transform}`);
+
+    // 两只眼必须一起动：pupils 组里瞳孔的数量要够（眼睛画法变了也不会漏）
+    const pupilCount = await R.eval(
+      "document.querySelectorAll('.layer.show svg.on .pupils ellipse, .layer.show svg.on .pupils circle').length"
+    );
+    ok("瞳孔层里两只眼都在（≥2 个瞳孔）", pupilCount >= 2, `瞳孔节点 ${pupilCount}`);
 
     // 回中
     await R.eval("window.petDebug.gaze({x:0,y:0})");
@@ -668,8 +708,132 @@ async function main() {
       ok("数组 body 被拒（400）", bad.code === 400, `status=${bad.code}`);
     }
 
+    // ---------- 7.7 会话看板（S6） ----------
+    // 三件事：看板能开、列表跟着状态机走、SEC-09 的分层真的成立
+    // （快照里只有 basename，完整路径只在"点复制"那一刻由主进程释放）。
+    if (ep) {
+      const seed = (sessionId, cwd, event) =>
+        new Promise((resolve) => {
+          const body = JSON.stringify({ agent: "codebuddy", session_id: sessionId, event, cwd });
+          const req = require("node:http").request(
+            {
+              host: "127.0.0.1",
+              port: ep.port,
+              path: "/state",
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+                "content-length": Buffer.byteLength(body),
+                "x-clawd-token": ep.token,
+              },
+            },
+            (res) => {
+              res.resume();
+              res.on("end", resolve);
+            }
+          );
+          req.on("error", resolve);
+          req.end(body);
+        });
+
+      await seed("sess-alpha", "E:\\work\\proj-alpha", "PreToolUse");
+      await seed("sess-beta", "E:\\work\\proj-beta", "Stop");
+
+      // 走和双击同一条 IPC
+      await R.eval("window.clawd.toggleDashboard()");
+      const dTarget = await waitForUrl(RENDERER_PORT, "dashboard.html");
+      ok("双击桌宠能打开会话看板", !!dTarget);
+
+      if (dTarget) {
+        const D = await Cdp.connect(dTarget.webSocketDebuggerUrl);
+        await D.send("Runtime.enable");
+
+        let rows = 0;
+        for (let i = 0; i < 30; i++) {
+          rows = await D.eval("document.querySelectorAll('#list li').length");
+          if (rows >= 2) break;
+          await sleep(150);
+        }
+        ok("看板列出了会话（≥2 行）", rows >= 2, `行数=${rows}`);
+
+        const dirs = await D.eval(
+          "[...document.querySelectorAll('#list .dir')].map(e=>e.textContent).join('|')"
+        );
+        ok(
+          "目录只显示 basename",
+          String(dirs).includes("proj-alpha") && String(dirs).includes("proj-beta"),
+          `显示=${dirs}`
+        );
+
+        // SEC-09 的硬断言：basename 在、盘符不在。
+        // 完整路径一旦进 DOM，"复制路径"这个设计就没意义了。
+        const leak = await D.eval(
+          "JSON.stringify({ hasBase: document.body.textContent.includes('proj-alpha'), hasDrive: document.body.textContent.includes('E:') })"
+        );
+        const leakObj = JSON.parse(leak || "{}");
+        ok(
+          "完整路径没有泄露到看板 DOM（只有 basename）",
+          leakObj.hasBase === true && leakObj.hasDrive === false,
+          `basename=${leakObj.hasBase} 盘符=${leakObj.hasDrive}`
+        );
+
+        // 演示模式：只隐藏目录名，状态和时间照旧
+        await D.eval("(() => { const c = document.getElementById('demo'); c.checked = true; c.dispatchEvent(new Event('change')); return true; })()");
+        await sleep(350);
+        const demoDirs = await D.eval(
+          "[...document.querySelectorAll('#list .dir')].map(e=>e.textContent).join('|')"
+        );
+        ok(
+          "演示模式隐藏全部目录名",
+          String(demoDirs).split("|").every((t) => t === "项目已隐藏"),
+          `显示=${demoDirs}`
+        );
+
+        // 关掉演示模式，给下一次运行留干净状态
+        await D.eval("(() => { const c = document.getElementById('demo'); c.checked = false; c.dispatchEvent(new Event('change')); return true; })()");
+        await sleep(200);
+
+        // 唯一会离开主进程的完整路径：用户显式点"复制路径"
+        const copied = await D.eval("window.dashboard.copyPath('sess-alpha')");
+        // 伪造的 session id 不能骗出任何路径
+        const fake = await D.eval("window.dashboard.copyPath('../../etc/passwd')");
+        ok(
+          "复制路径只对真实会话生效（伪造 id 拿不到）",
+          copied === true && fake === false,
+          `真实=${copied} 伪造=${fake}`
+        );
+
+        // 剪贴板内容**无法在沙箱里验证**：这里连"自己写 PROBE 再读回"都拿到空串，
+        // 说明进程访问不到 Windows 剪贴板，不是我们的写入逻辑有问题。
+        // 所以只记一条警告，不做断言 —— 假装断言通过比不测更糟。
+        if (M) {
+          const probe = await M.eval(
+            "(() => { const c = require('electron').clipboard; c.writeText('PROBE-OK'); return c.readText(); })()"
+          );
+          if (probe === "PROBE-OK") {
+            const clip = await M.eval("require('electron').clipboard.readText()");
+            ok("剪贴板拿到的是完整路径", clip === "E:\\work\\proj-alpha", `剪贴板=${JSON.stringify(clip)}`);
+          } else {
+            console.log("      [warn] 本环境访问不到 Windows 剪贴板，跳过内容校验（需手工点一次验证）");
+          }
+        }
+
+        // 再双击一次 = 收起
+        await R.eval("window.clawd.toggleDashboard()");
+        await sleep(400);
+        if (M) {
+          const visible = await M.eval(
+            "require('electron').BrowserWindow.getAllWindows().some(w => String(w.webContents.getURL()).includes('dashboard.html') && w.isVisible())"
+          );
+          ok("再次双击能收起看板", visible === false, `可见=${visible}`);
+        }
+        D.close();
+      }
+    }
+
     // ---------- 8. 单实例锁（SEC-10） ----------
-    const second = spawn(ELECTRON_BIN, ["."], {
+    // 必须和被侧进程用同一个 user-data-dir，否则单实例锁根本不会触发
+    const second = spawn(ELECTRON_BIN, [`--user-data-dir=${USER_DATA_DIR}`, "."], {
       cwd: ROOT,
       env: cleanEnv(),
       stdio: "ignore",
@@ -758,8 +922,18 @@ async function main() {
     console.error(childOut.slice(-2000));
     fail++;
   } finally {
+    // 按进程树杀：electron 会派生 GPU / utility 子进程，只 kill 主进程会留下僵尸，
+    // 它们继续占着缓存目录，下次启动就报 "Unable to move the cache: 拒绝访问"。
     try {
-      child.kill();
+      if (process.platform === "win32") {
+        spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+      } else {
+        child.kill("SIGKILL");
+      }
+    } catch {}
+    // 清掉隔离用的临时 userData（第一次跑会下载/生成不少缓存文件）
+    try {
+      fs.rmSync(TMP_ROOT, { recursive: true, force: true });
     } catch {}
   }
 

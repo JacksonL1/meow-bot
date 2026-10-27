@@ -14,7 +14,7 @@
 //   2. -webkit-app-region: drag 会让该区域收不到 mousemove → 自己实现拖拽
 // ============================================================
 
-const { app, BrowserWindow, ipcMain, screen, powerMonitor } = require("electron");
+const { app, BrowserWindow, ipcMain, screen, powerMonitor, clipboard } = require("electron");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -36,6 +36,11 @@ const BUBBLE_W = 360;
 let win = null;
 let drag = null; // { cursorX, cursorY, winX, winY, timer }
 let lastGaze = { x: 0, y: 0 };
+
+// ---- S6：会话看板 ----
+// 和气泡一样懒创建，但语义完全不同：气泡是"要你立刻做决定"，看板是"你自己想看"。
+// 所以它不置顶、不抢焦点、关掉就是关掉（不记忆位置也无所谓，Windows 会记住）。
+let dashboard = null;
 
 // ---- S5：权限气泡 ----
 let bubble = null; // 懒创建：真有人来请求时才建窗口
@@ -183,6 +188,69 @@ function onBubbleReady() {
   if (entry && bubbleCurrent === entry.id) presentBubble(entry);
 }
 
+// ------------------------------------------------------------
+// S6：会话看板窗口
+// ------------------------------------------------------------
+
+function ensureDashboard() {
+  if (dashboard && !dashboard.isDestroyed()) return dashboard;
+
+  dashboard = new BrowserWindow({
+    width: 420,
+    height: 460,
+    minWidth: 340,
+    minHeight: 260,
+    show: false,
+    // 它是个"正常窗口"：有边框、不置顶、不透明。
+    // 和桌宠/气泡刻意不同——那两个是"突然出现在你屏幕上"，这个是你主动要看。
+    frame: true,
+    transparent: false,
+    backgroundColor: "#faf9f5",
+    alwaysOnTop: false,
+    title: "Clawd · 会话",
+    webPreferences: {
+      preload: path.join(__dirname, "dashboard-preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+    },
+  });
+
+  dashboard.loadFile(path.join(__dirname, "dashboard.html"));
+  dashboard.on("closed", () => {
+    dashboard = null;
+  });
+  return dashboard;
+}
+
+// 双击桌宠 = 开/关。做成 toggle 而不是"只开"，
+// 是因为桌宠没有任务栏入口，用户关掉看板后很难再找回来。
+function toggleDashboard() {
+  const d = ensureDashboard();
+  if (d.isVisible()) {
+    d.hide();
+    return;
+  }
+
+  // 贴着桌宠放，省得用户去任务栏找窗口
+  if (win && !win.isDestroyed()) {
+    const area = screen.getPrimaryDisplay().workArea;
+    const [px, py] = win.getPosition();
+    const [dw, dh] = d.getSize();
+    let x = px + WIN_W / 2 - dw / 2;
+    let y = py - dh - 12;
+    if (y < area.y) y = py + WIN_H + 12;
+    d.setPosition(
+      Math.round(clamp(x, area.x + 8, area.x + area.width - dw - 8)),
+      Math.round(clamp(y, area.y + 8, area.y + area.height - dh - 8))
+    );
+  }
+  d.show();
+  d.focus();
+}
+
 app.whenReady().then(() => {
   const store = createStore({ onChange: broadcast });
 
@@ -280,12 +348,32 @@ app.whenReady().then(() => {
 
   ipcMain.on("app:quit", () => app.quit());
 
+  // ---- S6：看板 ----
+  ipcMain.on("dashboard:toggle", toggleDashboard);
+
+  // 看板每秒自己来要一次快照。推送也能做，但 idleMs 本来就要随时间变，
+  // 轮询一个本地 IPC 比维护"何时该推"简单得多。
+  ipcMain.handle("dashboard:snapshot", () => store.snapshot());
+
+  // 唯一会离开主进程的完整路径：用户对某一条显式点了"复制路径"。
+  // id 是渲染层传来的，但 store 只按 Map 精确取，取不到就返回 false，
+  // 不存在"拼一个 id 骗出别的会话路径"的路径。
+  ipcMain.handle("dashboard:copy-path", (_e, id) => {
+    if (typeof id !== "string") return false;
+    const full = store.fullCwd(id);
+    if (!full) return false;
+    clipboard.writeText(full);
+    return true;
+  });
+
   // SEC-07：锁屏 / 休眠时先把窗口收起来。
   // 'screen-saver' 是最高常规层级，不收起来会浮在锁屏界面之上——
   // S5 之后气泡里会显示"正在执行什么命令"，那就成了别人能看见的信息泄露。
   const hideAll = () => {
     if (win && !win.isDestroyed()) win.hide();
     if (bubble && !bubble.isDestroyed()) bubble.hide();
+    // 看板会列出每个会话的项目目录名，锁屏时留在屏幕上就是信息泄露
+    if (dashboard && !dashboard.isDestroyed()) dashboard.hide();
   };
   const showAll = () => {
     if (win && !win.isDestroyed()) win.showInactive();

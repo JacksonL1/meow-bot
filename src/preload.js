@@ -10,4 +10,6 @@ contextBridge.exposeInMainWorld("clawd", {
   dragEnd: () => ipcRenderer.send("drag:end"),
   setIgnoreMouse: (ignore) => ipcRenderer.send("mouse:ignore", ignore),
   quit: () => ipcRenderer.send("app:quit"),
+  // S6：双击桌宠开关会话看板
+  toggleDashboard: () => ipcRenderer.send("dashboard:toggle"),
 });

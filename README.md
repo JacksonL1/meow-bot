@@ -1,12 +1,13 @@
 # clawd-starter
 
-从零重搭 Clawd 桌宠的 **S1–S5** 骨架：一个能自己出现在桌面上、能被真实 agent 事件驱动、**还能替你回答权限确认**的透明窗口。
+从零重搭 Clawd 桌宠的 **S1–S6** 骨架：一个能自己出现在桌面上、能被真实 agent 事件驱动、**还能替你回答权限确认**、并且能一眼看到所有会话在干什么的透明窗口。
 
 目标不是"做一个好看的桌宠"，而是**把核心数据链路跑通**——之后每一阶段都是往这条链路上加东西，而不是推倒重来。
 
 ```text
-事件流：Claude Code 事件 → hook（短命进程，async）→ 本地 HTTP → 状态机 → IPC → 动画
-裁决流：Claude Code 要执行工具 → HTTP hook（阻塞）→ 气泡等你点 → 同一个 socket 回 200/204
+事件流：agent 事件 → hook（短命进程，async）→ 本地 HTTP → 状态机 → IPC → 动画
+裁决流：agent 要执行工具 → HTTP hook（阻塞）→ 气泡等你点 → 同一个 socket 回 200/204
+看板流：双击桌宠 → 独立窗口 → 1s 轮询快照 → 列表（cwd 只有 basename）
 ```
 
 ## 跑起来
@@ -16,7 +17,7 @@ npm install
 npm start
 ```
 
-窗口会出现在屏幕右下角。端点（端口 + token）写在 userData 里，不在项目目录：
+窗口会出现在屏幕右下角。**拖动它换个位置，双击它打开会话看板**，右键退出。端点（端口 + token）写在 userData 里，不在项目目录：
 
 ```bash
 # 看端点：Windows 下是 %APPDATA%\clawd-starter\clawd-starter.port
@@ -48,7 +49,11 @@ curl -X POST http://127.0.0.1:<port>/state \
 挡的正是**浏览器发起的跨源请求**，那才是真正可利用的路径。这是 HTTP hook 架构的固有属性，不是疏漏。
 
 渲染层另有两道：SVG 字符串走 `DOMParser` + 标签白名单；气泡里的命令用 `textContent` 写入，
-agent 给的字符串永远不会被当 HTML 解析。
+agent 给的字符串永远不会被当 HTML 解析。看板同理——目录名、会话 id 全部 `textContent`。
+
+**cwd 是分层处理的（SEC-09）**：存储层留完整路径（「复制路径」要用），快照层只出最后一段目录名。
+快照会进渲染进程、进看板、上屏幕，完整路径不会。唯一的例外是用户显式点「复制路径」——
+主进程单条释放给剪贴板，`dashboard-preload.js` 里根本没有「取完整 cwd」这种接口。
 
 依赖侧：`electron ~45.0.0`，`npm audit` 为 0 漏洞（原来 41.10.7 有 8 条，含 1 条 high）。
 完整清单与验证记录见 `docs/ledger/SECURITY.md`。
@@ -60,12 +65,16 @@ node scripts/fake-feed.js                     # 完整剧本： thinking → wor
 node scripts/fake-feed.js Stop                # 单个事件
 node scripts/fake-feed.js --hold working 10   # 保持某个状态 10 秒
 
-npm run verify:electron                       # 55 项回归：窗口/透明/IPC/DOM/gaze/HTTP/权限/单实例/退出
+npm run verify:electron                       # 64 项回归：窗口/透明/IPC/DOM/gaze/HTTP/权限/看板/单实例/退出
 ```
 
 `verify:electron` 同时开两个调试端口：`--inspect=9229` 看主进程（窗口属性、IPC 接线），
-`--remote-debugging-port=9222` 看渲染进程（DOM、帧轮播、瞳孔位移、气泡内容）。
+`--remote-debugging-port=9222` 看渲染进程（DOM、帧轮播、瞳孔位移、气泡内容、看板列表）。
 **升级 Electron 后先跑它再提交。**
+
+它会给自己开一个临时 `--user-data-dir` 和一个临时端点文件，所以**你开着桌宠也能跑回归**，
+两者互不干扰。跑完按进程树 `taskkill /T /F` 清理——只杀主进程的话 GPU 子进程会逃逸，
+下次启动就报 `Unable to move the cache: 拒绝访问`。
 
 权限那一段（6 项）会把三种结局都走一遍：点拒绝 → 200 `behavior:deny`、点允许 → 200 `behavior:allow`、
 没人点 → **204 不做决定**；再加三条攻击面（带 Origin → 403、`text/plain` → 415、数组 body → 400）。
@@ -75,7 +84,7 @@ npm run verify:electron                       # 55 项回归：窗口/透明/IPC
 
 - 透明 / 无边框 / 置顶 / 不进任务栏的窗口，可拖动
 - 非像素区域**点击穿透**，鼠标不会穿过宠物本体
-- `POST /state` 接收器，随机端口 + 端点文件发现（端口与 token 一起写 userData）
+- `POST /state` 接收器，固定端口 23333 + 端点文件发现（端口与 token 一起写 userData）
 - 接口四道锁 + 渲染层 SVG 白名单（见下方「安全边界」）
 - 单会话状态机：事件 → 状态 → 优先级仲裁 → oneshot 播完自动退回 → 闲置发呆 / 睡着
 - 状态 → 帧序列的映射表（`src/visuals.js`），每个状态可含多帧，按 fps 轮播
@@ -83,9 +92,13 @@ npm run verify:electron                       # 55 项回归：窗口/透明/IPC
   （垂 / 甩 / 竖 / 绕 / 炸），error 会炸毛并让毛色泛红。截图见 `docs/ragdoll-states.png`
 - **眼球追踪**：主进程读全局光标 → 归一化成 gaze → 渲染层插值移动瞳孔
 - **双图层交叉淡入**：新状态先在隐藏层画好再淡入，切换瞬间不会闪白
-- **真 hook 接入**：`hooks/` 下两个文件，把 Claude Code 的 8 个事件送进来；观察型 hook 全部 `async`
-- **权限气泡（S5）**：桌宠替你在屏幕上问一句「这条命令放不放行」，点一下就把决定回写给 Claude Code；
+- **真 hook 接入**：`hooks/` 下两个文件，把 agent 的 8 个事件送进来；观察型 hook 全部 `async`。
+  安装器支持 `--agent claude|codebuddy|workbuddy`，三家的事件名 / matcher 取值 / async 支持各不相同
+- **权限气泡（S5）**：桌宠替你在屏幕上问一句「这条命令放不放行」，点一下就把决定回写给 agent；
   不点 / 关掉 / 退出 / 超时一律返回 **204 不做决定**，自动回落到终端原生提示
+- **会话看板（S6）**：双击桌宠弹出列表，一条会话一行——状态徽标、目录名、会话 id、闲了多久，
+  正在演的那条用左侧色条标出；按「最吵的排前面」排序（error 优先）。
+  目录**只显示最后一段**，完整路径只能点「复制路径」单独取（见下方 SEC-09 说明）
 - 调试入口：DevTools 里 `petDebug.setState('working')` / `petDebug.gaze({x:1,y:-1})` / `petDebug.state()`
 
 ## 故意的简化（去原项目对照时会遇到的差异）
@@ -93,8 +106,9 @@ npm run verify:electron                       # 55 项回归：窗口/透明/IPC
 | 这里 | 原项目 | 为什么先简化 |
 |---|---|---|
 | `visuals.js` 里写死 SVG | `themes/<name>/theme.json` + 资产目录 | 主题系统是 S7，先把"状态→画面"跑通 |
-| 只认 Claude 的事件名 | 30+ agent 各自的适配器 | 适配器是纯体力活，等内核稳了再铺 |
+| 事件名以 Claude Code 为基准 | 30+ agent 各自的适配器 | 安装器已能装三家（`--agent`），但事件映射表还没按 agent 分叉 |
 | `Map` 内存里存会话 | 加上持久化、恢复租约、历史记录 | 掉电恢复是产品需求，不是学习需求 |
+| 看板 1s 轮询 | 事件驱动的推送 + 增量 diff | `idleMs` 天然随时间变，轮询省掉一整套"何时该推"的判断 |
 | `/permission` 不校 token | 同样不校——这是 HTTP hook 架构决定的 | 本地 hook 是「请求即响应、同一个 socket」，决定天然绑在请求上，不需要 nonce。**只有远程审批（决定来自公网、可重放）才必须加** |
 | 气泡只支持鼠标点 + Esc | 支持键盘决定、远程审批（Telegram 等） | 先把"决定能正确回写"跑通，输入方式属于体验层 |
 | 权限请求只存在内存，不落盘 | 有决策历史 | 落盘就多存一份命令原文，等真需要排查再加 |
@@ -182,7 +196,43 @@ Node inspector 的 `Runtime.evaluate` 跑在全局作用域，而 `require` 是�
 
 这类 bug 的隐蔽性在于它表现为「慢」而不是「错」。没有断言就会当成网络偶发，能一直活到生产。
 
-**气泡只能用一次，之后的请求按钮全是灰的**
+**只有一只眼睛跟着鼠标转**
+
+`querySelector` 只返回**第一个**匹配。渲染层追踪眼球是这么写的：
+
+```js
+const pupils = el.querySelector("svg.on .pupils");
+pupils.setAttribute("transform", `translate(${dx} ${dy})`);
+```
+
+如果画眼睛时图省事，给左右眼各包一个 `<g class="pupils">`，那只有左眼会动，右眼永远钉在原地。
+两只眼的瞳孔必须收进**同一个**组里，且组内坐标用绝对值（渲染层会整个覆盖这个组的 `transform`）。
+
+这类 bug 的恶心之处在于它不报错、不警告，画面上看起来"只是有点怪"。回归里有两条永久断言：
+「每帧最多一个 `.pupils` 组」和「瞳孔层里两只眼都在（≥2 个瞳孔）」。
+
+**跑回归时提示"渲染进程 15s 内没起来"**
+
+八成不是代码坏了，是**你自己开着桌宠**。单实例锁 + 固定端口 23333 会让测试进程直接退出。
+
+修法不是关掉桌宠，而是让测试自隔离：`requestSingleInstanceLock()` 是按 `--user-data-dir` 分实例的，
+所以只要 spawn 时换一个临时 userData 目录（顺带把端点文件也指到临时目录），测试就是另一个应用：
+
+```js
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-verify-"));
+process.env.CLAWD_PORT_FILE = path.join(TMP, "clawd-starter.port");
+spawn(electron, [".", "--user-data-dir=" + path.join(TMP, "userdata"), ...]);
+```
+
+**顺带一条教训**：别用 `taskkill /IM electron.exe` 清场。这个项目自己的进程也叫 electron，
+一杀就把用户正在用的桌宠杀了。要按 PID 杀，且先用 `Get-CimInstance Win32_Process` 看命令行确认。
+
+**`Unable to move the cache: 拒绝访问`**
+
+`child.kill()` 只杀主进程，GPU / utility 子进程逃逸后继续占着缓存目录。下次启动就撞这个错。
+按进程树杀：`taskkill /PID <pid> /T /F`（`/T` 才是关键）。
+
+**权限气泡只能用一次，之后的请求按钮全是灰的**
 
 点完按钮立刻置灰是正确的防连点，但下一条 `render()` 必须把它恢复。少这一行，第二个及以后的
 权限请求全都点不动，只能等超时。所以 `render()` 开头无条件 `disabled = false`，
@@ -242,15 +292,49 @@ HTTP hook——Claude Code 直接 POST 我们的端点，**HTTP 响应就是决�
 写死进 `settings.json` 的。所以两个项目**不能同时跑**——后启动的会退到随机端口，而 URL 仍指向
 23333，权限请求会打到先启动的那个。端口变了必须重跑 `npm run install:hooks`。
 
-## 下一步：S6 多会话看板
+## S6 已完成：多会话看板
 
-`cwd` 要脱敏（见 SECURITY.md SEC-09），最好带一个「演示模式」隐藏项目名，
-避免投屏 / 直播时把客户项目路径漏出去。
+状态机里从 S2 起就有一张多会话仲裁表，但用户只看到桌宠演「最吵的那一条」。S6 把它摊开成一张表。
+
+**这一关真正的难点不是 UI，是 SEC-09。** S2 当时的做法是「cwd 只留 basename」——听着安全，
+其实是**砍功能**：看板要做「复制路径」「跳转终端」就必须有完整路径。S6 把它拆成两层：
+
+| 层 | 存什么 | 谁看得见 |
+|---|---|---|
+| 存储层（`state.js` 的 `sessions` Map） | 完整 cwd，清洗控制字符、限长 1024 | 只在主进程内存里 |
+| 快照层（`snapshot()` → IPC → 渲染进程 → 屏幕） | 只有最后一段目录名，限长 200 | 看板 DOM、投屏、截图 |
+
+完整路径唯一的出口是用户显式点某一行的「复制路径」——主进程**单条**释放给剪贴板。
+`dashboard-preload.js` **故意没有**「取完整 cwd」的接口，回归里用伪造 id `'../../etc/passwd'` 验证过拿不到。
+
+另外两个设计取舍：
+
+- **双击开关，不是「只开」**。桌宠没有任务栏入口，看板又是带边框的正常窗口，一旦被关掉就再也找不回来。
+  双击判定只认落在 `#pet` 上的——单击必须留给拖拽，否则拖一下就弹窗。
+- **1s 轮询，不是推送**。`idleMs` 本来就随时间变，没人发事件也得刷新；推的话还要维护一套「什么时候该推」，
+  而轮询一个本地 IPC 的代价近似为零。
+
+**演示模式**只隐藏目录名，状态和时间照旧——它防的是投屏/直播把客户项目名漏出去，不是把看板变成废纸。
+它是渲染层偏好，存在 `localStorage`，不回主进程；真要彻底隐藏，应该在宿主侧就不采集，那是另一件事。
+
+回归 64/64，其中看板 7 项。**没验的一段**：剪贴板内容。`copyPath` 返回 true/false 是准的
+（伪造 id 拿到 false 就是证据），但本环境 `clipboard.readText()` 恒为空，连「自己写个探针再读回」
+都拿不到——手工双击点一次才能确认粘出来的是完整路径。
+
+## 下一步：S7 主题系统
+
+把写死的 `visuals.js` 换成 `themes/<name>/theme.json` + 资产目录。
+
+开工前必须先在 `SECURITY.md` 里定一件事：`renderer.js` 的 `ALLOWED_TAGS` 现在**没有** `clipPath` / `mask` / `filter`。
+接外部主题时，放行它们等于让主题文件能做视觉欺骗（把 UI 伪装成系统弹窗）和信息外带（滤镜 URI 引用外部资源）；
+不放行，主题的表达能力就受限。**顺序必须是「先定白名单，再做加载器」**——反过来写，加载器写完才发现白名单要放宽，
+那时候放宽的动机已经变成「让这个主题能跑起来」，而不是「这样安全」。
 
 ## 对照阅读
 
 - `docs/ledger/PROGRESS.md` —— 每个阶段做了什么、实测数据、哪些没验
-- `src/state.js` —— 只看 `resolveDominantSessionState` 和 `updateVisualState` 附近
+- `src/state.js` —— 只看 `resolveDominantSessionState` 和 `updateVisualState` 附近，外加 SEC-09 的 `sanitizeCwd` / `publicCwd` / `fullCwd` 三个函数
 - `src/permission.js` —— 134 行，重点看 `settle()` 为什么必须是唯一出口
+- `src/dashboard-renderer.js` —— 156 行，看「行节点复用 + insertBefore 调序」怎么避免每秒重建
 - `hooks/clawd-hook.js` —— 看它如何"读了就 POST，然后立刻退出"
-- `hooks/install.js` —— 看观察型（async）和裁决型（阻塞）hook 的区别怎么落进 JSON
+- `hooks/install.js` —— 看观察型（async）和裁决型（阻塞）hook 的区别怎么落进 JSON，以及三家 agent 的差异表
