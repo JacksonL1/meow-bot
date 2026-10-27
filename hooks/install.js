@@ -19,11 +19,17 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { readPortFile } = require("../src/port-file");
+const { DEFAULT_PORT } = require("../src/server");
 
 const MARKER = "clawd-hook.js";
 const HOOK_PATH = path.join(__dirname, "clawd-hook.js");
+// HTTP hook 的标记放在 url 的 query 里：query 不影响服务端路由（只认 pathname），
+// 但让我们在卸载时能一眼认出"这条是我们的"。
+const HTTP_MARKER = "via=clawd-starter";
 
-// 只装 S4 用到的事件。PermissionRequest 属于 S5，装早了会误导人以为权限能批。
+// 只装 S4 用到的事件（观察型，全部 async）。
+// PermissionRequest 走 HTTP hook，不在这个列表里——见下面的 HTTP_EVENT。
 const EVENTS = [
   "SessionStart",
   "UserPromptSubmit",
@@ -35,6 +41,12 @@ const EVENTS = [
   "Notification",
 ];
 
+// S5：权限走 HTTP hook，由 Claude Code 直接 POST 桌宠，响应体就是决定。
+// 这是**阻塞式**的：不能加 async（加了就等于永远不给决定）。
+// timeout 是 Claude Code 侧的上限（秒）；桌宠自己 120s 没等到点击就回 204 让它回落原生提示。
+const HTTP_EVENT = "PermissionRequest";
+const HTTP_TIMEOUT_SEC = 600;
+
 const args = process.argv.slice(2);
 const uninstall = args.includes("--uninstall");
 const dryRun = args.includes("--dry-run");
@@ -45,7 +57,19 @@ const settingsFile =
     : path.join(os.homedir(), ".claude", "settings.json");
 
 function isOurs(hook) {
-  return hook && typeof hook.command === "string" && hook.command.includes(MARKER);
+  if (!hook || typeof hook !== "object") return false;
+  if (typeof hook.command === "string" && hook.command.includes(MARKER)) return true;
+  return hook.type === "http" && typeof hook.url === "string" && hook.url.includes(HTTP_MARKER);
+}
+
+// 桌宠没开就读不到端点文件，退回默认端口——装了也没用，但至少 url 是合法的，
+// 等桌宠起来后重跑一次 install 就会指向真端口。
+function permissionPort() {
+  try {
+    return readPortFile().port;
+  } catch {
+    return DEFAULT_PORT;
+  }
 }
 
 // 从某个事件的 entry 数组里摘掉我们自己的 hook；顺手丢掉被摘空的组
@@ -83,6 +107,21 @@ function ourGroup(event) {
   };
 }
 
+function ourHttpGroup(port) {
+  return {
+    matcher: "",
+    hooks: [
+      {
+        type: "http",
+        url: `http://127.0.0.1:${port}/permission?${HTTP_MARKER}`,
+        // 注意：这里**故意不写 async**。async hook 发出去就不管了，
+        // 而权限请求要的就是"等回答"，加了 async 等于永远不给决定。
+        timeout: HTTP_TIMEOUT_SEC,
+      },
+    ],
+  };
+}
+
 function readSettings() {
   if (!fs.existsSync(settingsFile)) {
     return { existed: false, data: {} };
@@ -110,6 +149,16 @@ function applyChanges(data) {
     } else {
       hooks[event] = [...cleaned, ourGroup(event)];
     }
+  }
+
+  // S5：PermissionRequest 是 HTTP-only 事件，装的是 url 不是命令。
+  // 顺带把这一组里残留的 command hook 也清掉（老版本可能装过）。
+  const cleanedHttp = stripOurs(hooks[HTTP_EVENT]);
+  if (uninstall) {
+    if (cleanedHttp.length > 0) hooks[HTTP_EVENT] = cleanedHttp;
+    else delete hooks[HTTP_EVENT];
+  } else {
+    hooks[HTTP_EVENT] = [...cleanedHttp, ourHttpGroup(permissionPort())];
   }
 
   if (Object.keys(hooks).length > 0) next.hooks = hooks;
@@ -163,9 +212,13 @@ function main() {
   console.log(
     uninstall
       ? `[clawd] 已从 ${settingsFile} 移除本项目的 hook（其他配置原样保留）`
-      : `[clawd] 已写入 ${settingsFile}，共 ${EVENTS.length} 个事件`
+      : `[clawd] 已写入 ${settingsFile}：${EVENTS.length} 个观察型 command hook + 1 个阻塞式 HTTP hook`
   );
-  if (!uninstall) console.log(`[clawd] hook 路径：${HOOK_PATH}`);
+  if (!uninstall) {
+    console.log(`[clawd] command hook：${HOOK_PATH}`);
+    console.log(`[clawd] 权限 HTTP hook：http://127.0.0.1:${permissionPort()}/permission（阻塞，${HTTP_TIMEOUT_SEC}s）`);
+    console.log(`[clawd] 注意：端口变了要重跑一次 install，否则权限请求会打到死端口`);
+  }
 }
 
 try {

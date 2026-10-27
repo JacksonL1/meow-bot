@@ -215,6 +215,8 @@ window.petDebug = {
     if (!gazeRaf) gazeRaf = requestAnimationFrame(stepGaze);
   },
   states: () => Object.keys(window.VISUAL_STATES),
+  // 现在屏幕上播的是哪个状态。联调时唯一可信的真相——DOM 里看不出状态名。
+  state: () => currentState,
 };
 
 setState("idle");

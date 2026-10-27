@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; connect-src 'none'"
+    />
+    <title>权限请求</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        /* 窗口是 transparent 的，圆角靠卡片自己画；窗口背景留空才有圆角效果 */
+        background: transparent;
+        overflow: hidden;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        font-size: 13px;
+        color: #2f2e2b;
+      }
+      #card {
+        background: #fffdf9;
+        border: 1px solid #ded8cc;
+        border-radius: 12px;
+        box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
+        padding: 12px 14px;
+        /* 不要固定高度：渲染完由 renderer 量出来告诉主进程改窗口高度 */
+      }
+      .head {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+      .badge {
+        font-size: 11px;
+        color: #8a6d3b;
+        background: #fdf1d8;
+        border-radius: 5px;
+        padding: 2px 6px;
+      }
+      .tool {
+        font-weight: 600;
+        font-size: 14px;
+      }
+      /* 命令正文是最重要的信息，必须等宽字体、保留换行、可滚动 */
+      pre.cmd {
+        margin: 0 0 8px;
+        padding: 8px 10px;
+        background: #f4f1ea;
+        border-radius: 8px;
+        font-family: ui-monospace, Consolas, "Cascadia Mono", monospace;
+        font-size: 12px;
+        line-height: 1.5;
+        white-space: pre-wrap;
+        word-break: break-all;
+        max-height: 180px;
+        overflow: auto;
+      }
+      .meta {
+        font-size: 11px;
+        color: #8a877e;
+        margin-bottom: 10px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      button {
+        flex: 1;
+        padding: 7px 10px;
+        border-radius: 8px;
+        border: 1px solid #cfc8b8;
+        background: #fff;
+        font: inherit;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #f6f2e9;
+      }
+      /* 允许按钮不做成"醒目的主色"：避免用户不读内容就顺手点 */
+      button.deny {
+        flex: 0 0 84px;
+      }
+      button.allow {
+        flex: 0 0 84px;
+        border-color: #b7c9a8;
+        background: #f2f7ee;
+      }
+      .note {
+        margin-top: 8px;
+        font-size: 11px;
+        color: #9a968c;
+        line-height: 1.4;
+      }
+      .queue {
+        margin-top: 6px;
+        font-size: 11px;
+        color: #8a6d3b;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="card">
+      <div class="head">
+        <span class="badge">需要批准</span>
+        <span class="tool" id="tool">…</span>
+      </div>
+      <pre class="cmd" id="cmd"></pre>
+      <div class="meta" id="meta"></div>
+      <div class="row">
+        <button class="deny" id="btnDeny">拒绝</button>
+        <button class="allow" id="btnAllow">允许</button>
+      </div>
+      <div class="queue" id="queue" hidden></div>
+      <div class="note">
+        不点任何按钮会在 2 分钟后交还给 Claude Code 自己提示；按 Esc 立即交还。
+      </div>
+    </div>
+    <script src="./bubble-renderer.js"></script>
+  </body>
+</html>

@@ -72,12 +72,29 @@
 - **影响**：当前窗口只有 240×240 且只显示宠物，问题不大。但 S5 气泡会显示「正在执行什么命令」——在共享屏幕、直播、录屏时可能把项目路径或命令内容暴露给旁人。
 - **修复**：进入全屏/锁屏时降低层级或隐藏；S5 后的气泡内容做脱敏（只显示工具名，不显示完整命令与路径）。
 
-### SEC-08 依赖 Electron 41.10.7，`npm audit` 报 8 个高危公告
+### SEC-08 依赖版本落后，`npm audit` 报 8 个高危公告（2026-10-27 已修）
 
 - **严重度**：P1
-- **实测**：`electron@41.10.7`，`npm audit` → `high`，受影响范围 `<=42.11.15`，共 8 条公告（含 HID/USB 权限归属错误、SameSite cookie 绕过、指针锁定权限归属错误等）。修复版本 `45.0.0`，属 major 升级。
-- **说明**：这些公告多与「加载远程内容 + 权限请求」相关，本项目只加载本地文件，**实际可利用性低**。但作为 Electron 应用的卫生标准，应在 S4 之前升级。
-- **修复**：`package.json` 中把 `"electron": "^41.10.4"` 改为固定版本（如 `"45.0.0"`），去掉 `^`，避免每次 `npm install` 漂移；升级后回归跑一遍 S1-S3 的可见行为。
+- **实测（修复前）**：`electron@41.10.7`，`npm audit` → `high`，受影响范围 `<=42.11.15`，共 8 条公告。
+- **说明**：这些公告多与「加载远程内容 + 权限请求」相关，本项目只加载本地文件，**实际可利用性低**。但作为 Electron 应用的卫生标准必须修。
+- **关键纠正**：`npm audit fix --force` 建议 `45.0.0`，但那是 npm 的「跳到最新版」策略，**不是最小修复**。逐条读公告范围后发现最低修复版本是 `42.11.16`：
+
+  | 级别 | 修复于 | 公告 |
+  |---|---|---|
+  | high | <42.11.16 | eMudhra 中间证书缓解 |
+  | moderate | <42.11.9 | Pointer lock 权限归因到错误 frame |
+  | moderate | <42.11.3 | HID/USB 权限归因、SameSite cookie、openExternal 归因 |
+  | low | <42.11.6 | Frame subscription / 离屏渲染信任 GPU 提供的几何 |
+  | low | <42.11.1 | Extension tabs.query 越权返回 URL 与标题 |
+
+  41.x 没有 backport（41.10.7 是最后一版且仍受影响），所以必须跨 major。
+- **决策**：`42.11.18` 与 `45.0.0` 都实测过，**同一套回归脚本都是 37/37**。最终选 `45.0.0`：
+  1. `42` 已不在 Electron 的支持线内，将来新公告不会再 backport，等于把问题往后推；
+  2. 既然升级成本已付（回归脚本可复用），没必要付第二次；
+  3. `~45.0.0` 而非 `^45.0.0`：45.0.x 补丁自动进（安全修复），45.1+ 需要人工过一遍 + 跑回归。
+- **代价**：`45.0.0` 是 major 的第一个版本，尚无补丁版。这份风险由回归脚本兜住——`npm run verify:electron` 就是升级闸门。
+- **验证**：见下方「2026-10-27 修复记录（SEC-08）」。
+
 
 ### SEC-09 `cwd` 原样存储与推送，未脱敏
 
@@ -110,13 +127,50 @@
 | SEC-05 | 🟡 已加固 | `src/renderer.js`：`innerHTML` 改为 `DOMParser` + 标签白名单（svg/g/path/rect/text…）+ 属性清洗（剥 `on*`、非 `#` 的 `href`、`javascript:`、`url(`）；解析失败返回 `null`，`setState` 直接跳过 | 恶意 SVG 的 `<script>`/`<foreignObject>`/`<image>`/`onclick`/`onload` 全部被剥；正常帧与 `.pupils` 不受影响；非法 XML 返回 null |
 | SEC-06 | ✅ 已修 | `webPreferences` 显式写 `sandbox: true`、`webSecurity: true`、`allowRunningInsecureContent: false` | 启动、IPC、拖拽、穿透全部正常 |
 | SEC-07 | 🟡 部分修 | `powerMonitor` 监听 `lock-screen`/`suspend` 隐藏窗口，`unlock-screen`/`resume` 恢复；气泡内容脱敏留到 S5 | 仅逻辑实现，未做真机锁屏/投屏回归 |
-| SEC-08 | ❌ 未修 | 仍是 `electron@41.10.7`。`npm audit` 复核：`electron high, range <=42.11.15, fix 45.0.0 (major)` | **待决定**：属 major 升级，需单独一轮做回归，不在本次安全修复里夹带 |
+| SEC-08 | ✅ 已修（10-27） | 升到 `electron@45.0.0`，`~` 版本范围。见下一节 | `npm audit` → 0 漏洞；回归 37/37 |
 | SEC-09 | ✅ 已修 | `src/state.js`：`cwd` 只保留最后一段目录名，限 200 字符 | 传 `C:\Users\Think\secret-folder\my-proj`，快照里只剩 `my-proj` |
 | SEC-10 | ✅ 已修 | 端点文件统一写 `userData`（`src/port-file.js` 统一算路径，`fake-feed.js` 复用同一份逻辑）；`app.requestSingleInstanceLock()` 单实例锁 | 文件落在 `%APPDATA%\clawd-starter\clawd-starter.port`；第二个实例直接退出 |
 
 **顺带产出**：新增 `src/port-file.js`（端点文件读写，唯一真相），`scripts/fake-feed.js` 改为读 JSON 端点并带 token。
 
 **给 S5 的提醒**：SEC-01 的 token 只能证明「调用方拿到了端点文件」，**不能**证明「这一次权限请求是它发起的」。S5 的一次性 nonce 仍然必须做，token 不能替代 nonce。
+
+---
+
+## 2026-10-27 修复记录（SEC-08 依赖升级）
+
+**结论**：`electron 41.10.7 → 45.0.0`，`npm audit` 从 8 条公告降到 0。
+
+**怎么验的**：为了不再靠肉眼判断「升级后还能不能用」，先写了回归脚本 `scripts/verify-electron.js`，
+在**旧版本上先跑出 36/36 的基线**，再对每个候选版本跑同一套判据。脚本同时开两个调试端口：
+
+- `--inspect=9229` 主进程（Node inspector）→ 读窗口属性、数 IPC 监听器、调 `desktopCapturer`
+- `--remote-debugging-port=9222` 渲染进程（CDP）→ 读 DOM、切状态、推 gaze、量像素
+
+| 版本 | Chrome | Node | 回归 | audit | 备注 |
+|---|---|---|---|---|---|
+| 41.10.7（升级前） | 146.0.7680.216 | 24.18.0 | 36/36 | 8 条，high | 基线，用来证明脚本本身是对的 |
+| 42.11.18 | 148.0.7778.280 | 24.19.0 | 36/36 | 0 | 最小修复版本 |
+| **45.0.0（采用）** | 156.0.8078.48 | 24.22.0 | 37/37 | 0 | 新增透明检查后 37 项 |
+
+**37 项覆盖**：页面与容器、7 状态注册、contextIsolation / sandbox（渲染层拿不到 `require`/`process`/`ipcRenderer`，preload 只有 6 个具名动作）、
+状态切换换层、旧层淡出后清空、帧轮播、gaze 收敛到 `translate(3.60 -2.60)` 与回中、命中判定（中心命中 / 左上角穿透）、
+窗口存在/可见/置顶/240×240/不可缩放、四条 IPC 接线、**窗口真透明**、端点文件、`/health` 200 与无 token 401、
+`POST /state` 端到端驱动渲染层、单实例锁、退出清理。
+
+**透明检测怎么做的**（自动化里最容易被漏掉的一项）：从主进程 inspector 调 `desktopCapturer` 抓屏，
+比较「窗口矩形内侧紧邻边界 10px」与「外侧紧邻边界 10px」的像素。窗口若真透明，两处看到的是同一层桌面，
+差值应接近 0。用相邻对而不是窗口内外两大片区域，是为了抵消壁纸渐变与暗角。实测 45.0.0 上最大通道差 `0`。
+
+**写脚本时踩到的两个坑**（都不是 Electron 的问题，但会让人误判成升级失败）：
+
+1. **时序竞态**：`main.js` 在启动 300ms 后推一次初始状态 `idle`。如果测试在这之前调 `setState`，
+   会被随后到达的 `idle` 覆盖，表现为「图层没换、帧不轮播」——看起来像升级把渲染搞坏了。
+   同理，`POST /state` 的响应返回时主进程已经 `broadcast` 过了，此时再手动改状态等于覆盖它。
+2. **测量假象**：用 `spawnSync` 连发测 hook 得 ~950ms，真实是 240-280ms（父进程阻塞造成的）。见 PROGRESS.md。
+
+**遗留**：`45.0.0` 是 major 的首个版本，还没有补丁版。所以 `package.json` 用 `~45.0.0`，
+45.0.x 补丁自动进、45.1+ 必须人工跑一次 `npm run verify:electron` 再升。
 
 ---
 
@@ -146,17 +200,94 @@
 
 ---
 
-## S5 预判：权限回包是整个项目最高危的一关
+## S5 权限回包：预判（已被证伪的部分）与真实契约
 
-**P0 级设计风险。** S5 会让桌宠替用户回答 `PermissionRequest`。如果实现不当，等于给所有本机进程开了一个「绕过 Claude Code 权限确认」的后门。
+**P0 级设计风险。** S5 会让桌宠替用户回答 `PermissionRequest`。实现不当等于给所有本机进程开一个「绕过 Claude Code 权限确认」的后门。
 
-必须同时满足以下五条，缺一不可：
+### 开工前先纠正：原五条预判里，1、2、3、4 全部基于错误的架构假设
 
-1. **一次性 nonce**：每次权限请求生成随机 nonce，与 `session_id`、`tool_use_id` 绑定；回包必须携带，用后即焚。
-2. **nonce 只走 stdin**：nonce 只通过 hook 进程的 stdin 传入，不落盘、不进端口文件、不写日志。这样其他进程即使能 POST 也伪造不了回包。
-3. **默认拒绝**：超时、解析失败、nonce 不匹配、未知会话 —— 一律 `deny`。**绝不能「超时即允许」**。
-4. **回包校验来源**：回包请求除 nonce 外，还要满足 SEC-01/SEC-02 的 Host 与 token 校验。
-5. **UI 不盲批**：气泡必须显示足够判断的信息（工具名 + 目标路径 + 关键参数），且「允许」不能做成单键无脑确认；禁止提供「永久允许所有」而跳过二次确认。
+写预判时假设 `PermissionRequest` 走 **command hook**（和 S4 一样有个短命进程读 stdin）。
+实际不是——主仓库 `hooks/install.js:1223` 的 `HTTP_HOOKS`：
+
+```json
+{ "matcher": "", "hook": { "type": "http", "url": "http://127.0.0.1:23333/permission", "timeout": 600 } }
+```
+
+**Claude Code 直接 POST 我们的端点，HTTP 响应就是决定。没有中间进程，也没有 stdin。**
+这推翻了四条预判：
+
+| 原预判 | 为什么站不住 | 真相 |
+|---|---|---|
+| 1. 一次性 nonce，绑定 `session_id` + `tool_use_id` | HTTP hook 是**请求即响应、同一个 socket**，决定天然绑在请求上，没有独立的「回包」步骤可伪造 | 主仓库 `src/permission.js`、`server-route-permission.js` 里**根本没有 nonce**。nonce 只出现在 `telegram-native-runner.js`，用于远程审批——因为 Telegram 回调来自公网、可重放，才需要一次性凭据 |
+| 2. nonce 只走 stdin | 没有 stdin 这个通道 | 同上 |
+| 3. 默认 deny | deny 会让工具调用**失败** | 正确做法是返回 **204 不做决定**，让 Claude Code 回落到它自己的原生确认提示（用户照样会在终端被问到）。deny 只在用户明确点「拒绝」时用 |
+| 4. 回包要过 Host + token | **`/permission` 不可能校验 token** —— 调用方是 Claude Code 本身，它不知道我们的 token | `/permission` 比 `/state` 更开放，这是 HTTP hook 架构的固有属性，只能靠 HTTP 边界收敛 |
+
+**唯一站得住的是第 5 条**（UI 不盲批），而它恰恰是最重要的一条。
+
+### 真实契约（读主仓库源码得到）
+
+请求体：`{ tool_name, tool_input, session_id, permission_suggestions }`
+
+响应三态：
+
+| 情形 | 响应 | 含义 |
+|---|---|---|
+| 用户点 Allow | 200 `{hookSpecificOutput:{hookEventName:"PermissionRequest",decision:{behavior:"allow"}}}` | 放行 |
+| 用户点 Deny | 200 同上，`decision:{behavior:"deny",message:"…"}` | 拒绝并回话 |
+| 超时 / 解析失败 / 气泡不可用 | **204 空响应** | 不做决定 → Claude Code 回落原生提示 |
+
+（`server-route-permission.js:509` 构造 allow 体；`:497` 等处的 `send*PermissionNoDecision` 都是 204）
+
+### 因此 S5 的要求改写为五条
+
+1. **默认不做决定**：超时、解析失败、气泡不可用、未知请求 —— 一律 **204**，回落到 Claude Code 原生提示。**绝不能超时即允许，也不该超时即 deny**（deny 会让工具静默失败，用户以为被批准过）。
+2. **deny 只在用户明确点击时产生**，且必须携带 `message` 回给 agent，让对方知道为什么。
+3. **HTTP 边界照旧收紧**：`/permission` 不能要 token，但 Host / Origin / Content-Type 三道必须做——这挡的是**浏览器发起的跨源请求**，那才是真正可利用的路径。空 Origin、重复 Host 头、非 `application/json` 一律拒。
+4. **请求与响应强绑定**：pending 请求用自增 `requestId` + 内存 Map，回写前校验该请求仍处于 pending；已结束的请求不得被二次响应。
+5. **UI 不盲批**（原第 5 条，保留）：气泡必须显示工具名 + 完整命令/路径 + 会话 cwd；「允许」不能是无信息单键；**禁止「永久允许所有」**，也不做自动化放行规则。
+
+### 威胁模型（写下来，免得以后自己吓自己）
+
+能 POST 到 `127.0.0.1:<port>` 的本机进程可以伪造一张假气泡诱骗点击。但这个能力的前提是它已经能在用户机器上执行代码——
+而它若真想绕过权限，直接改 `~/.claude/settings.json` 的 `permissions.allow` 更省事。所以这条路径的**增量风险有限**，
+防护重心应放在「浏览器跨源」和「用户看得清」上，而不是强行给本机进程加一道它能绕过的锁。
+
+**给未来的提醒**：一旦做远程审批（Telegram / 飞书 / 手机端），决定就来自公网通道，那时**必须**引入一次性 nonce
+（参考 `telegram-native-runner.js` 的 `callback_data: clawd-test:<nonce>` 模式）。本地 HTTP hook 不需要。
+
+### S5 落地核对（2026-10-27，实现完成，回归 55/55）
+
+五条要求逐条对到代码与断言，不留"应该做了"这种模糊结论：
+
+| # | 要求 | 落在哪 | 怎么证明 |
+|---|---|---|---|
+| 1 | 默认不做决定，一律 204 | `src/permission.js` 的 `settle()` else 分支。超时 / `dismiss()` / `dispose()` / 连接被对端掐断，四条路全汇到这一个出口 | 回归「没人点 → 204 不做决定」（实测等 6001ms）、「退出时挂起的第一条 → 204」、「退出时排队的那条 → 204」 |
+| 2 | deny 只在明确点击时产生，且带 message | `permission.js` 中 `outcome === "deny"` 分支 | 回归「点拒绝 → 200 + behavior:deny」+「deny 带 message 回给 agent」+「响应带 hookEventName」 |
+| 3 | HTTP 边界收紧，但 `/permission` 不校 token | `src/server.js`：`/permission` 过 Host / Origin / Content-Type 三道；token 只保护 `/state` 与 `/health` | 回归「带 Origin → 403 空响应」「text/plain → 415」「数组 body → 400」 |
+| 4 | 请求与响应强绑定 | 自增 `requestId` + 内存 `Map`；`settle()` 先查条目存在、再查 `settled`，`pending.delete()` 之后才回写 | `settle()` 是唯一出口，重复调用直接 `return false`，天然防二次响应 |
+| 5 | UI 不盲批 | `src/bubble.html`：**「允许」故意不用主色**，两个按钮视觉权重接近，逼用户先读正文；正文含工具名 + 完整命令 + cwd + 会话前缀 | 回归「气泡显示了完整命令（不截断关键信息）」「气泡显示了来源目录」「没有『永久允许』这类按钮」 |
+
+### 实现期被自动化测出来的两个真 bug
+
+这两条不是设计缺陷，是**实现缺陷**，而且都属于"不会崩、只会让人莫名其妙"的类型——正因如此才必须记下来：
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| 启动后**第一个**权限请求必定丢失：气泡空白，点了没反应，最后 2 分钟超时回落 | 气泡窗口是懒创建的。`webContents.send` 发生在渲染层执行 `bubble-renderer.js` 之前，IPC 消息被静默丢弃（不报错、不排队） | 渲染层注册完 `onRequest` 后回一个 `bubble:ready`，主进程用 `bubblePendingEntry` 暂存，收到握手才投递 |
+| 气泡只能用一次：第二次及以后的请求按钮全是灰的，点不动 | `decide()` 把两个按钮 `disabled = true` 防连点，但下一条 `render()` 没有恢复，状态一路带下去 | `render()` 开头无条件 `disabled = false` |
+
+第一条的隐蔽性值得单独强调：它的表现是"慢"，不是"错"。没有断言就会当成网络偶发，这类 bug 能活到生产。
+
+### 退出时必须给挂起的请求一个答复
+
+`before-quit` 里调 `permissions.dispose()`，把仍 pending 的请求全部以 204 结束。理由不是洁癖：
+
+- 用户关掉桌宠的瞬间，Claude Code 可能正卡在一个 `PermissionRequest` 上等回应；
+- hook 侧写的是 `timeout: 600`，连接悬空意味着**终端最长 10 分钟没反应**，而用户已经看不到气泡了，无从判断发生了什么；
+- 204 让 Claude Code 立刻回落原生提示，用户换到终端照样能批。
+
+排队中的那条更容易写错：`dispose()` 走 `settle() → onResolve()`，而 `onResolve` 里有"弹下一条"的逻辑。写得不对就会在退出过程中新建一个浏览器窗口，或者把排队项漏成悬空连接。回归里因此**同时挂两条**（一条显示、一条排队）来覆盖它。
 
 ---
 
@@ -176,7 +307,8 @@
 - [ ] 新增的网络/文件输入是否做了长度与类型校验
 - [ ] 新增的渲染内容是否走了 `innerHTML` 或模板字符串拼接
 - [ ] 是否有新的敏感信息（路径、命令、prompt）进入渲染层或日志
-- [ ] 若涉及权限决策：是否默认拒绝、是否有一次性 nonce、是否防伪造
+- [ ] 若涉及权限决策：**没拿到明确决定时是否返回「不做决定」而不是拒绝**、deny 是否只在用户明确点击时产生、是否禁止「永久允许」
+- [ ] 若涉及远程审批（决定来自公网、可重放）：是否有一次性 nonce。**本地 HTTP hook 不需要**，别照抄
 - [ ] 以上结论是否已回写到本文件的对应阶段小节
 
 ---
