@@ -19,6 +19,48 @@ S5 权限气泡已完成并回归通过（55/55）。**下一步 S6 多会话 da
 
 ## 已完成
 
+### 接入层国内化：一个安装器，三种 agent（2026-10-27）
+
+原来 `hooks/install.js` 写死 Claude Code。三家 hook **格式**兼容（都是 `{matcher, hooks:[{type, command|url}]}`），
+但契约有三处实质差异，照抄会装出"装好了却不触发"或"重复触发"的结果：
+
+| 差异 | Claude Code | CodeBuddy | WorkBuddy |
+|---|---|---|---|
+| 事件名 | 有 `PostToolUseFailure` | 无，但有 `PreCompact` | 同 CodeBuddy |
+| `matcher` | `"*"` | `""`（主仓库一致） | `""` |
+| `async` 字段 | 支持，观察型必加 | 官方安装器从不写 | 官方安装器从不写 |
+| PermissionRequest | ✓ 真会 POST | ✓ 真会 POST | **✗ 原生沙箱 + GUI 自己处理，永不调用外部端点** |
+
+最后一条是硬事实，来自主仓库源码注释（`workbuddy-install.js:180`）——它甚至专门写代码去清理
+早期版本给 WorkBuddy 装下的死 URL。所以 `AGENTS.workbuddy.permission = "none"`，**给 WorkBuddy 装权限 hook 是纯垃圾配置**。
+
+- [x] `AGENTS` 表驱动：`--agent claude|codebuddy|workbuddy`，默认 claude（保持旧行为不变）
+- [x] 观察型 hook 按 agent 决定要不要写 `async`；权限 hook 按 agent 决定装不装
+- [x] 卸载时即使 `permission: "none"` 也会清理自己留下的残条
+- [x] 新增 npm 脚本 `install:hooks:workbuddy` / `:codebuddy` 及对应卸载
+- [x] 验证「不破坏别人配置」：拿主仓库留下的备份当输入跑 dry-run，
+      主仓库 8 条 command hook **全部保留**，只追加我们自己的 9 条
+
+**共存的两条代价（必须记住）**：CodeBuddy 上两套 hook 并存时，
+① 每个事件会跑两次 node（它不支持 async，无法像 Claude 那样甩掉冷启动）；
+② `PermissionRequest` 会有两条 http hook 指向同一个 23333 → **一次请求弹两个气泡**。
+所以真要长期用 starter 接 CodeBuddy，应当把主仓库那套卸掉，而不是叠着。
+
+### 形象改造：螃蟹 → 布偶猫（2026-10-27）
+
+只换了 `src/visuals.js` 一个文件，`renderer.js` / `state.js` / `main.js` 一行没动——这正是 S3 把"状态机"和"画什么"分开的回报。
+
+- [x] `ragdoll()` 完全对齐原 `crab()` 的接口：`{ eyes, overlay, fur/point, tail, dx, dy, puff, blush }`，`viewBox` 仍是 `0 0 200 200`
+- [x] 品种三要素：**蓝宝石虹膜 + 竖瞳**（圆瞳会立刻变成狗/人）、奶油白长毛、深棕重点色（耳/尾/白手套）
+- [x] 状态差异化不只靠眼睛：尾巴有 5 种姿势（垂/甩/竖/绕/炸），error 额外炸毛并让毛色泛红
+- [x] attention 加**腮红**——这是被截图逼出来的：`^ ^` 的弯眼和 sleeping 的闭眼弧太像，扫一眼分不出来
+- [x] 静态契约校验器（临时脚本）：7 状态 19 帧，全部只使用白名单标签，eyeTracking 帧都含 `.pupils`
+- [x] 回归 55/55 不变，`gaze` 在新形象上仍收敛（`translate(3.60 -2.60)`）
+- [x] 预览截图留档 `docs/ragdoll-states.png`
+
+**白名单的硬约束**（换主题 / 接 S7 时会再撞一次）：`renderer.js` 的 `ALLOWED_TAGS` **没有 `clipPath` / `mask` / `filter`**。
+所以蓬松感不能靠滤镜，只能用「粗描边 + 圆角端点」堆出来；尾巴就是一条 `stroke-width=21` 的曲线。
+
 ### S5 权限气泡（2026-10-27）
 
 开工前把预判读了一遍，**发现原五条要求里有四条建立在错误假设上**（以为走 command hook，实际是 `type:"http"` 的 HTTP hook），已改写为真实契约版五条，详见 `SECURITY.md`。
@@ -157,6 +199,7 @@ hook 单次耗时拆解（Windows，本机实测）：
 
 | 日期 | 类型 | 内容 |
 |---|---|---|
+| 2026-10-27 | 形象 | 螃蟹 → **布偶猫**。只改 `src/visuals.js`（193 → 334 行，7 状态 19 帧），接口契约与 `viewBox` 不变，`renderer.js` 零改动，回归 55/55 |
 | 2026-10-27 | 功能 | 完成 S5：`src/permission.js` 裁决台 + `src/server.js` `/permission` 端点 + 三个气泡文件（html/renderer/preload）+ `hooks/install.js` 增加阻塞式 HTTP hook。回归 37 → **55 项** |
 | 2026-10-27 | 安全 | 修正 S5 预判：`PermissionRequest` 是 `type:"http"` 而非 command hook，原五条中四条（nonce、默认拒绝、token 校验）全部作废；改写为真实契约五条并落地 |
 | 2026-10-27 | 修复 | 权限气泡两个实现 bug：①首个请求因页面未 ready 被静默丢弃（加 `bubble:ready` 握手）②按钮置灰后不恢复导致只能点一次 |

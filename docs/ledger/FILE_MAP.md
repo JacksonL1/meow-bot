@@ -32,19 +32,20 @@ clawd-starter/
 | `src/port-file.js` | S2 | 端点文件唯一真相：按平台算 userData 路径、写 `{port, token}`（0600）、读回并校验格式 | 59 行。`fake-feed.js` 与主进程共用，避免两边路径漂移 |
 | `src/state.js` | S2 | 状态机心脏：`EVENT_STATE` 事件映射、`PRIORITY` 优先级仲裁、oneshot 定时回落、25s 发呆 / 60s 入睡、250ms 统一 tick；入参清洗（session_id 64 字符、会话上限 100、cwd 只留 basename） | 196 行。原项目 4098 行里抽出的骨架 |
 | `src/renderer.js` | S3 | 渲染层：SVG 白名单清洗（`DOMParser`，剥 `on*`/外部 href/`javascript:`）、状态切换重建 DOM、双图层交叉淡入、按 fps 切帧、瞳孔位移插值、命中判定切穿透 | 219 行。`window.petDebug` 调试入口（含 `svg()` 试清洗、`state()` 查当前状态） |
-| `src/visuals.js` | S3 | 视觉数据：7 个状态的 SVG 帧序列（共 17 帧）、fps、眼球可动标记 | 193 行。纯数据，S7 会搬进 theme.json |
+| `src/visuals.js` | S3 | 视觉数据：**布偶猫**形象，7 个状态共 19 帧的 SVG 帧序列、fps、眼球可动标记；`ragdoll()` 一个函数带全部参数（eyes/fur/point/tail/puff/blush），overlay 挂件（思考气泡/火花/闪光/铃铛/zzz）与形象解耦 | 334 行。换形象必须守住 4 条契约，见文件头注释 |
 | `src/preload.js` | S1 | 上下文桥：向渲染层暴露 6 个动作（onState / onGaze / dragStart / dragEnd / setIgnoreMouse / quit） | 13 行。安全边界，不要加 `ipcRenderer` |
 | `src/index.html` | S1 | 窗口页面：CSP meta、透明背景样式、双图层容器、加载 visuals.js 与 renderer.js | 88 行。CSP 为 `default-src 'none'` + 白名单 |
 | `scripts/fake-feed.js` | S2 | 假数据源：从端点文件读 port+token 后 POST 事件，支持完整剧本 / 单事件 / `--hold` 保持状态 | S4 之后只用于离线调试，真事件由 hook 送 |
 | `scripts/verify-electron.js` | S4-前 / S5 | 回归闸门：同时开主进程 inspector(9229) 与渲染进程 CDP(9222)，跑 **55 项断言**——窗口属性、透明、IPC 接线、DOM、帧轮播、gaze、HTTP 四道锁、权限六段（拒绝/允许/超时/跨源/非 JSON/坏 body）、单实例锁、退出收尾、端点清理 | 零第三方依赖（用 Node 内置 `WebSocket`）。`npm run verify:electron`。**主进程 inspector 连上后必须先发 `Runtime.enable`**，否则 evaluate 永远不回显 |
 | `hooks/clawd-hook.js` | S4 | Claude Code hook 适配器：读端点文件 → 读 stdin（2s 硬超时 / 1MB 上限）→ 只取 `session_id/event/cwd/tool_name` → POST（1.5s 超时）→ 永远 `exit(0)` | 111 行。三条铁律：不阻塞、不打日志、不抛异常。桌宠没开就走 `readPortFile` 的 catch 直接返回 |
-| `hooks/install.js` | S4 / S5 | 往 `~/.claude/settings.json` 的 `hooks` 段增量合并 9 个条目：8 个 command 事件（观察型，写 `async: true, timeout: 5`）+ 1 个 `PermissionRequest` **HTTP hook**（阻塞型，不写 async，`timeout: 600`，url 带 `via=clawd-starter` 标记）。marker 只认自己的条目，备份 + 临时文件 rename 原子写，支持 `--uninstall` / `--dry-run` / `--file` | 观察型 hook 不能拖住 agent；权限 hook 反过来必须拖住——**两者语义相反，不要统一** |
+| `hooks/install.js` | S4 / S5 | 多 agent 安装器。`AGENTS` 表驱动 `--agent claude\|codebuddy\|workbuddy`，往对应 `settings.json` 的 `hooks` 段增量合并：观察型 command hook（按 agent 决定是否写 `async: true, timeout: 5`）+ 权限条目（只有 `permission: "http"` 的 agent 才装；WorkBuddy 原生处理权限，装的是死配置）。marker 只认自己的条目，备份 + 临时文件 rename 原子写，支持 `--uninstall` / `--dry-run` / `--file` | 观察型 hook 不能拖住 agent，权限 hook 反过来必须拖住——**两种语义相反，不要统一** |
 
 ## 其他文件
 
 | 文件 | 职责 | 备注 |
 |---|---|---|
 | `preview.html` | 静态预览页，浏览器打开可一次看完所有状态的 SVG 与帧序列 | 不参与运行，纯设计对照用 |
+| `docs/ragdoll-states.png` | 布偶猫七状态预览截图，用于设计留档与"改坏了没"的目视对照 | 2026-10-27 形象改造时截的 |
 | `README.md` | 项目说明、已验证能力清单、故意的简化对照表、3 条踩坑记录 | 踩坑部分是同类项目最有价值的参考 |
 | `package.json` | 只有 `electron ~45.0.0` 一个依赖，`npm start` → `electron .` | 用 `~` 不用 `^`：补丁自动进（安全修复），minor 要人过一遍再升 |
 | `package-lock.json` | 依赖锁定，实际安装 45.0.0 | `~45.0.0` 允许 45.0.x 补丁，挡住 45.1+ |

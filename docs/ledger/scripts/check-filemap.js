@@ -41,7 +41,11 @@ function main() {
   const actual = walk(ROOT);
 
   const missing = actual.filter((f) => !recorded.has(f));
-  const stale = [...recorded].filter((f) => !actual.includes(f));
+  // 存在性必须直接问文件系统，不能拿 walk 的结果反查：
+  // docs/ 在 SKIP_DIRS 里（台账本身不参与"是否漏记"的比对），
+  // 但它下面的资产（比如 docs/ragdoll-states.png）是应该能被台账引用的。
+  // 用 actual 判断会让这类条目永远被误报成"已不存在"。
+  const stale = [...recorded].filter((f) => !fs.existsSync(path.join(ROOT, f)));
 
   console.log(`项目根：${ROOT}`);
   console.log(`实际文件 ${actual.length} 个，台账记录 ${recorded.size} 条\n`);

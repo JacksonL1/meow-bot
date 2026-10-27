@@ -10,7 +10,11 @@
     "verify:electron": "node scripts/verify-electron.js",
     "install:hooks": "node hooks/install.js",
     "uninstall:hooks": "node hooks/install.js --uninstall",
-    "preview:hooks": "node hooks/install.js --dry-run"
+    "preview:hooks": "node hooks/install.js --dry-run",
+    "install:hooks:workbuddy": "node hooks/install.js --agent workbuddy",
+    "uninstall:hooks:workbuddy": "node hooks/install.js --agent workbuddy --uninstall",
+    "install:hooks:codebuddy": "node hooks/install.js --agent codebuddy",
+    "uninstall:hooks:codebuddy": "node hooks/install.js --agent codebuddy --uninstall"
   },
   "devDependencies": {
     "electron": "~45.0.0"

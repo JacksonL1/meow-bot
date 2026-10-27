@@ -47,7 +47,7 @@ S5 之后多了一条链路：Claude Code 要执行工具时，桌宠会弹出�
 | 权限裁决 | 挂起请求、等待决定、唯一出口 `settle()` 保证恰好响应一次 | `src/permission.js` |
 | 权限气泡 | 卡片 UI、两个按钮、Esc 不表态、量高度回传 | `src/bubble.html` + `bubble-renderer.js` + `bubble-preload.js` |
 | 渲染 | 双图层交叉淡入、帧轮播、瞳孔位移插值 | `src/renderer.js` |
-| 视觉数据 | 7 个状态的 SVG 帧序列与 fps，纯数据无逻辑 | `src/visuals.js` |
+| 视觉数据 | **布偶猫**形象，7 个状态 19 帧的 SVG 帧序列与 fps，纯数据无逻辑 | `src/visuals.js` |
 | 进程间桥 | 只暴露 6 个具体动作，不泄漏 `ipcRenderer` | `src/preload.js` |
 | 调试 | 假数据源，三种用法（完整剧本 / 单事件 / 保持某状态） | `scripts/fake-feed.js` |
 | 回归闸门 | 主进程 inspector + 渲染进程 CDP，55 项断言 | `scripts/verify-electron.js` |
