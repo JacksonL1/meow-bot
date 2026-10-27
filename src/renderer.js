@@ -13,6 +13,7 @@ const layers = [document.getElementById("layerA"), document.getElementById("laye
 
 let activeLayer = 0; // 当前可见的那一层在 layers 里的下标
 let currentState = null;
+let currentDef = null; // 当前状态的完整定义（fps / eyeTracking / motion / gags）
 let frames = []; // 当前层里该状态的所有帧元素
 let frameIndex = 0;
 let framer = null;
@@ -133,6 +134,7 @@ function setState(state, force = false) {
   frames = nodes;
   frameIndex = 0;
   currentState = state;
+  currentDef = def;
   buildCount += 1;
 
   // 2) 再交换 opacity —— 交叉淡入就完成了
@@ -146,6 +148,8 @@ function setState(state, force = false) {
   }, 220);
 
   startFramer(def);
+  startMotion(def);
+  startGags(def);
   applyGaze();
 }
 
@@ -162,9 +166,262 @@ function startFramer(def) {
     frames[frameIndex].classList.add("on");
     // 换帧之后瞳孔是新节点，必须重新套一次位移
     applyGaze();
+    // 部件也是新节点，动画目标要重新收集（否则动画停在旧帧的节点上）
+    if (motionRules.length) collectMotionParts();
   }, 1000 / (def.fps || 8));
 }
 
+// ------------------------------------------------------------
+// 部件动画（活猫感）
+//
+// 为什么不用 CSS 动画：白名单拒了 <style> 和 SMIL，主题里写不了动画。
+// 为什么不用多帧：逐帧替换是离散的，6~8fps 一定是频闪——用户原话"卡顿式切换"。
+// 所以这里做连续插值：主题只声明"哪个部件怎么动、多快"，rAF 每帧算一次，
+// 60fps。呼吸、摆尾、歪头、眨眼全部走这一条路。
+//
+// 约定（themes/README.md 里也写了）：被动画的部件是外层 `<g class="m-xxx">`，
+// 它自身**不能有 transform**——否则会被这里的 setAttribute 覆盖掉。
+// 图里烧死的静角放在内层 g 上。
+// ------------------------------------------------------------
+
+let motionRules = [];
+let motionParts = new Map();
+let motionRaf = null;
+let motionT0 = 0;
+const blinkSched = new Map(); // part -> { next, start }
+
+function collectMotionParts() {
+  motionParts = new Map();
+  const svg = layers[activeLayer].querySelector("svg.on");
+  if (!svg) return;
+  for (const rule of motionRules) {
+    if (motionParts.has(rule.part)) continue;
+    // part 已经被 theme.js 用 PART_RE 限成 [a-z0-9-]，拼进选择器是安全的
+    const el = svg.querySelector(".m-" + rule.part);
+    if (el) motionParts.set(rule.part, el);
+  }
+}
+
+function pivotTransform(pivot, inner) {
+  const [px, py] = pivot;
+  return `translate(${px} ${py}) ${inner} translate(${-px} ${-py})`;
+}
+
+function startMotion(def) {
+  if (motionRaf) cancelAnimationFrame(motionRaf);
+  motionRaf = null;
+  blinkSched.clear();
+  motionRules = (def && Array.isArray(def.motion) ? def.motion : []).slice();
+  motionT0 = 0;
+  if (!motionRules.length) return;
+  collectMotionParts();
+  motionRaf = requestAnimationFrame(tickMotion);
+}
+
+function tickMotion(now) {
+  if (!motionT0) motionT0 = now;
+  const t = now - motionT0;
+
+  for (const rule of motionRules) {
+    const el = motionParts.get(rule.part);
+    if (!el) continue;
+
+    if (rule.type === "blink") {
+      el.setAttribute("transform", pivotTransform(rule.pivot, `scale(1 ${blinkScale(rule, now)})`));
+      continue;
+    }
+
+    // 正弦缓动：0 → 1 → 0，首尾都停得住，不会在循环点上"顿一下"
+    const p = (t / rule.period + rule.phase) % 1;
+    const k = 0.5 - 0.5 * Math.cos(p * Math.PI * 2);
+    writeTransform(el, rule, k);
+  }
+  motionRaf = requestAnimationFrame(tickMotion);
+}
+
+// 把一条规则在"进度 k（0→1）"上的样子写进元素。
+// motion（循环）和 gags（一次性）共用这一段——两边只差 k 怎么算出来，
+// 写 transform 的活是同一件，分开写早晚会写出两种不一致的插值。
+function writeTransform(el, rule, k) {
+  if (rule.type === "rotate") {
+    const a = (rule.from + (rule.to - rule.from) * k).toFixed(2);
+    el.setAttribute("transform", pivotTransform(rule.pivot, `rotate(${a})`));
+  } else if (rule.type === "scale") {
+    const sx = (rule.from[0] + (rule.to[0] - rule.from[0]) * k).toFixed(3);
+    const sy = (rule.from[1] + (rule.to[1] - rule.from[1]) * k).toFixed(3);
+    el.setAttribute("transform", pivotTransform(rule.pivot, `scale(${sx} ${sy})`));
+  } else {
+    const x = (rule.from[0] + (rule.to[0] - rule.from[0]) * k).toFixed(2);
+    const y = (rule.from[1] + (rule.to[1] - rule.from[1]) * k).toFixed(2);
+    el.setAttribute("transform", `translate(${x} ${y})`);
+  }
+}
+
+// 眨眼：随机间隔，闭合 140ms 一个来回。用纵向压缩代替画眼皮——
+// 眼睛是圆的，压到 0.12 就是一条缝，读起来就是眨眼，不必多画两帧。
+function blinkScale(rule, now) {
+  let s = blinkSched.get(rule.part);
+  if (!s) {
+    s = { next: now + rule.min + Math.random() * (rule.max - rule.min), start: 0 };
+    blinkSched.set(rule.part, s);
+  }
+  if (!s.start) {
+    if (now < s.next) return 1;
+    s.start = now;
+  }
+  const p = (now - s.start) / 140;
+  if (p >= 1) {
+    s.start = 0;
+    s.next = now + rule.min + Math.random() * (rule.max - rule.min);
+    return 1;
+  }
+  const f = p < 0.5 ? p * 2 : (1 - p) * 2;
+  return 1 - 0.88 * f;
+}
+
+// ------------------------------------------------------------
+// 彩蛋（gags）
+//
+// "一直在呼吸"和"隔一阵钓上来一条鱼"是两件事。
+// motion 是循环的，写不出"偶尔来一次"；所以单开一层：主题声明
+// {name, parts, every:[min,max], duration, steps[]}，这里负责三件事：
+//   1. 按 every 随机排期（固定节拍一上来就显得机械）
+//   2. 开演时把部件放出来（移除 display），按 steps 一次性插值
+//   3. 演完**按开演前的原值**还原，再排下一次（不是一律隐藏，理由见 restoreGagParts）
+//
+// 两条纪律：
+//   · 换状态一律清空。彩蛋属于某个状态，状态走了它就该跟着死，
+//     否则会有一条鱼挂在"睡眠"的猫面前。
+//   · 部件靠 display 收放，不靠 opacity。透明元素仍然参与命中判定与无障碍树，
+//     而且 opacity 不在白名单允许的动画属性里（这里只能改 transform）。
+// ------------------------------------------------------------
+
+let gagDefs = [];
+let gagTimer = null;
+let gagRaf = null;
+let gagNodes = new Map(); // part -> 元素（只包含本次彩蛋用到的）
+let gagOrig = new Map(); // part -> {display, transform} 开演前的原值
+let gagRun = null; // { def, t0 }
+
+function startGags(def) {
+  stopGags();
+  gagDefs = def && Array.isArray(def.gags) ? def.gags.slice() : [];
+  if (!gagDefs.length) return;
+  scheduleGag();
+}
+
+function stopGags() {
+  if (gagTimer) clearTimeout(gagTimer);
+  if (gagRaf) cancelAnimationFrame(gagRaf);
+  gagTimer = null;
+  gagRaf = null;
+  gagDefs = [];
+  gagRun = null;
+  restoreGagParts();
+}
+
+// 收尾必须回到**开演前的原值**，不能一律 display:none。
+// 因为彩蛋的部件分两种：一种天生藏着（鱼、拖鞋，写死 display="none"），
+// 另一种本来就露着（瞳孔——它被拉进彩蛋只是为了"跟着看一眼鱼"）。
+// 一律隐藏的写法实测会把猫的瞳孔一起抹掉，而且看起来像"主题坏了"。
+function restoreGagParts() {
+  for (const [part, el] of gagNodes) {
+    const orig = gagOrig.get(part) || { display: null, transform: null };
+    if (orig.display === null) el.removeAttribute("display");
+    else el.setAttribute("display", orig.display);
+    if (orig.transform === null) el.removeAttribute("transform");
+    else el.setAttribute("transform", orig.transform);
+  }
+  gagNodes = new Map();
+  gagOrig = new Map();
+}
+
+function scheduleGag() {
+  gagTimer = null;
+  if (!gagDefs.length) return;
+  const def = gagDefs[Math.floor(Math.random() * gagDefs.length)];
+  const wait = def.every[0] + Math.random() * (def.every[1] - def.every[0]);
+  gagTimer = setTimeout(() => runGag(def), wait);
+}
+
+function runGag(def) {
+  if (gagRaf) cancelAnimationFrame(gagRaf);
+  gagRaf = null;
+  restoreGagParts();
+
+  const svg = layers[activeLayer].querySelector("svg.on");
+  if (svg) {
+    for (const part of def.parts) {
+      const el = svg.querySelector(".m-" + part);
+      if (!el) continue;
+      gagNodes.set(part, el);
+      gagOrig.set(part, { display: el.getAttribute("display"), transform: el.getAttribute("transform") });
+    }
+  }
+  // 部件一个都没找到不是错误：主题里少画一个彩蛋，表现为"这条不出现"，
+  // 不该连累整个状态。排下一条就行了。
+  if (!gagNodes.size) {
+    scheduleGag();
+    return;
+  }
+
+  for (const el of gagNodes.values()) el.removeAttribute("display");
+  gagRun = { def, t0: 0 };
+  renderGag(0); // 先把第 0 帧写上，否则第一帧会闪一下上一次的 transform
+  gagRaf = requestAnimationFrame(tickGags);
+}
+
+// 步骤的缓动。'out' 是默认：出水、浮上来这类"由快到慢"的动作天然合手；
+// 'in' 给甩出去（越甩越快）；'inout' 留给"翻个个儿"这种两头都要软的动作。
+function easeCurve(p, ease) {
+  if (ease === "in") return p * p * p;
+  if (ease === "inout") return p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
+  return 1 - Math.pow(1 - p, 3);
+}
+
+function renderGag(t) {
+  for (const step of gagRun.def.steps) {
+    const el = gagNodes.get(step.part);
+    if (!el) continue;
+    // **还没到点的步骤直接跳过**，不能"钳在 from 上照写一遍"。
+    // 后者会把同一部件上正在演的那一段覆盖掉：实测 fish 的第一段（浮出水面 1s）
+    // 被第二段（at=1900）的 from=[0,0] 压在 0 上，鱼根本没浮起来。
+    // 跳过之后语义就变成"当前有效的那一段说了算"，也正是时间线的直觉。
+    if (t < step.at) continue;
+    // 窗口内按进度插值，过了窗口夹在 to 上（继续有效，直到被同一部件的下一段接走）
+    const p = Math.min(1, (t - step.at) / step.span);
+    writeTransform(el, step, easeCurve(p, step.ease));
+  }
+}
+
+function tickGags(now) {
+  if (!gagRun) return;
+  if (!gagRun.t0) gagRun.t0 = now;
+  const t = now - gagRun.t0;
+
+  if (t >= gagRun.def.duration) {
+    restoreGagParts();
+    gagRun = null;
+    gagRaf = null;
+    scheduleGag(); // 演完接着排下一条
+    return;
+  }
+
+  // 帧切换 / 换主题会把节点换掉。对着已经离开 DOM 的节点写 transform 不会报错，
+  // 但屏幕上什么都不会发生——那种"彩蛋偶尔不出现"最难查，所以直接认输重排。
+  for (const el of gagNodes.values()) {
+    if (!el.isConnected) {
+      restoreGagParts();
+      gagRun = null;
+      gagRaf = null;
+      scheduleGag();
+      return;
+    }
+  }
+
+  renderGag(t);
+  gagRaf = requestAnimationFrame(tickGags);
+}
 // ------------------------------------------------------------
 // 眼球追踪
 //
@@ -181,6 +438,12 @@ let gazeCurrent = { x: 0, y: 0 };
 let gazeRaf = null;
 
 function applyGaze() {
+  // eyeTracking 是主题里的开关，**默认关**。以前这里不看它——主题写了 false
+  // 也照样跟眼，那个字段等于死的（写了不生效比没写更坑，作者会以为自己关掉了）。
+  // 现在的语义：只有明确 true 才跟，而且这个 false 在画面上有对象可管
+  // （working 的瞳孔是一个 .pupils 组，关掉就是它不动）。
+  if (!currentDef || currentDef.eyeTracking !== true) return;
+
   const pupils = layers[activeLayer].querySelector("svg.on .pupils");
   if (!pupils) return; // 闭眼 / 死鱼眼没有瞳孔，直接跳过
   const dx = (gazeCurrent.x * MAX_X).toFixed(2);
@@ -202,7 +465,14 @@ function stepGaze() {
   gazeRaf = requestAnimationFrame(stepGaze);
 }
 
+// 调试用"钉住"：回归要断言"瞳孔会走到指定坐标"，但主进程每 100ms 会按真实光标
+// 推一次 gaze，正好把测试注入的坐标覆盖掉——实测出现过断言读到的是光标位置
+// （translate(-0.98 0.81)）而不是 (3.60 -2.60)。钉住之后真实推送一律忽略，
+// 被测对象（渲染层的插值与写入）才被隔离出来。只在 petDebug 里用得到。
+let gazePinned = false;
+
 window.clawd.onGaze((gaze) => {
+  if (gazePinned) return;
   gazeTarget = gaze;
   if (!gazeRaf) gazeRaf = requestAnimationFrame(stepGaze);
 });
@@ -297,10 +567,44 @@ window.clawd.onState((snapshot) => {
 window.petDebug = {
   setState,
   svg: svgNode, // 在 DevTools 里试清洗规则：petDebug.svg('<svg ...><script>..</script></svg>')
-  gaze: (g) => {
+  gaze: (g, pin = false) => {
+    // pin=true：忽略主进程的真实 gaze 推送，让注入值稳定成立（回归专用）
+    gazePinned = !!pin;
     gazeTarget = g;
     if (!gazeRaf) gazeRaf = requestAnimationFrame(stepGaze);
   },
+  unpinGaze: () => {
+    gazePinned = false;
+  },
+  // 当前各部件被插值成什么样。回归用它判断"动画到底在不在动"——
+  // 只看一眼像素是没用的，静止画面和动画都可能长一样。
+  motion: () => {
+    const out = {};
+    for (const [part, el] of motionParts) out[part] = el.getAttribute("transform");
+    return out;
+  },
+  // 当前状态声明了哪些彩蛋（working 是 fish / slipper）
+  gagNames: () => gagDefs.map((g) => g.name),
+  // 手动放一条彩蛋。回归等不了 7~14 秒的随机排期，但"排期"和"播放"是两件事：
+  // 这里只跳过排期，播放走的还是 runGag 那条路径，测的仍然是真代码。
+  gag: (name) => {
+    const def = gagDefs.find((g) => g.name === name);
+    if (!def) return false;
+    if (gagTimer) clearTimeout(gagTimer);
+    gagTimer = null;
+    runGag(def);
+    return true;
+  },
+  // 彩蛋部件此刻的 display / transform。用来证明"真的被放出来并且真的在动"。
+  gagState: () => {
+    const out = {};
+    for (const [part, el] of gagNodes) {
+      out[part] = { display: el.getAttribute("display"), transform: el.getAttribute("transform") };
+    }
+    return out;
+  },
+  // 当前状态跟不跟鼠标（主题里的声明，不是"图里有没有瞳孔"）
+  eyeTracking: () => !!(currentDef && currentDef.eyeTracking === true),
   states: () => Object.keys(window.VISUAL_STATES || {}),
   // 现在屏幕上播的是哪个状态。联调时唯一可信的真相——DOM 里看不出状态名。
   state: () => currentState,

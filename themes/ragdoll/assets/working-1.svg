@@ -1,88 +1,101 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
   <g transform="translate(0 0)">
-    <!-- 地面阴影 -->
-    <ellipse cx="100" cy="172" rx="65" ry="8" fill="#524338" opacity="0.12"/>
-
-    <!-- 尾巴 (更粗更蓬松) -->
-    <path d="M145 152 C170 160 192 142 184 120" fill="none" stroke="#524338" stroke-width="28" stroke-linecap="round" stroke-linejoin="round" opacity="0.14"/>
-    <path d="M145 152 C170 160 192 142 184 120" fill="none" stroke="#967866" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
-    <path d="M145 152 C170 160 192 142 184 120" fill="none" stroke="#FAF6F0" stroke-width="10" stroke-linecap="round" opacity="0.35"/>
-
-    
-
-    <!-- 身体后半部分 -->
-    <ellipse cx="100" cy="142" rx="54" ry="32" fill="#FAF6F0" stroke="#524338" stroke-width="3.5"/>
-
-    <!-- 奢华的胸口大毛领 (Ruff) - 放在头部后面凸显立体感 -->
-    <path d="M60 115 C45 130 55 155 75 160 C85 163 115 163 125 160 C145 155 155 130 140 115 C125 125 115 128 100 128 C85 128 75 125 60 115 Z" fill="#FFFFFF" stroke="#524338" stroke-width="3.5" stroke-linejoin="round"/>
-
-    <!-- 四只胖乎乎的白手套爪子 -->
-    <ellipse cx="68" cy="164" rx="12" ry="8" fill="#FFFFFF" stroke="#524338" stroke-width="3"/>
-    <ellipse cx="132" cy="164" rx="12" ry="8" fill="#FFFFFF" stroke="#524338" stroke-width="3"/>
-    <ellipse cx="152" cy="158" rx="10" ry="7" fill="#FFFFFF" stroke="#524338" stroke-width="2.5"/>
-
-    <!-- 耳朵 (放在头部后面显得更自然) -->
-    <g stroke="#524338" stroke-width="3.5" stroke-linejoin="round">
-      <path d="M56 60 C42 30 62 18 78 38 C82 42 80 48 76 50 Z" fill="#7A5E4E"/>
-      <path d="M144 60 C158 30 138 18 122 38 C118 42 120 48 124 50 Z" fill="#7A5E4E"/>
-    </g>
-    <!-- 耳内粉色绒毛 -->
-    <path d="M60 55 C50 38 65 28 72 38 C75 42 70 48 65 52 Z" fill="#F2A7A7" opacity="0.55"/>
-    <path d="M140 55 C150 38 135 28 128 38 C125 42 130 48 135 52 Z" fill="#F2A7A7" opacity="0.55"/>
-
-    <!-- 头部底色与轮廓 (带毛刺边缘的包子脸颊) -->
-    <path d="M100 48 C125 48 142 55 146 72 C150 90 152 105 136 114 C125 120 112 122 100 122 C88 122 75 120 64 114 C48 105 50 90 54 72 C58 55 75 48 100 48 Z" fill="#FAF6F0" stroke="#524338" stroke-width="3.5" stroke-linejoin="round"/>
-
-    <!-- 八字倒V面具 -->
-    
-    <path d="M100 48
-             C125 48 142 55 146 72
-             C150 90 152 105 136 114
-             C130 117 124 105 118 95
-             C112 85 106 72 100 72
-             C94 72 88 85 82 95
-             C76 105 70 117 64 114
-             C48 105 50 90 54 72
-             C58 55 75 48 100 48 Z"
-      fill="#967866"/>
-
-    <!-- 眼睛 -->
-    
-      <!-- 左眼 -->
-      <circle cx="74" cy="92" r="14" fill="#524338"/>
-      <circle cx="74" cy="92" r="12.5" fill="#2B73B0"/>
-      <circle cx="74" cy="92" r="10.5" fill="#51ABE8"/>
-
-      <!-- 右眼 -->
-      <circle cx="126" cy="92" r="14" fill="#524338"/>
-      <circle cx="126" cy="92" r="12.5" fill="#2B73B0"/>
-      <circle cx="126" cy="92" r="10.5" fill="#51ABE8"/>
-
-      <!-- 两眼共用的瞳孔层（全帧只允许存在一个） -->
-      <g class="pupils">
-        <ellipse cx="74" cy="92" rx="5" ry="9" fill="#1A2E40"/>
-        <circle cx="70.5" cy="87" r="3" fill="#FFFFFF"/>
-        <circle cx="77" cy="96" r="1.5" fill="#FFFFFF" opacity="0.85"/>
-        <ellipse cx="126" cy="92" rx="5" ry="9" fill="#1A2E40"/>
-        <circle cx="122.5" cy="87" r="3" fill="#FFFFFF"/>
-        <circle cx="129" cy="96" r="1.5" fill="#FFFFFF" opacity="0.85"/>
-      </g>
-
-    <!-- 腮红 -->
-    
-
-    <!-- 鼻尖与精致小嘴 -->
-    <path d="M100 102 L104 96.5 C106 95 94 95 96 96.5 Z" fill="#F2A7A7" stroke="#524338" stroke-width="1.8" stroke-linejoin="round"/>
-    <path d="M100 102 L100 106 M100 106 Q94 113 88 108 M100 106 Q106 113 112 108" fill="none" stroke="#524338" stroke-width="2.5" stroke-linecap="round"/>
-
-    <!-- 柔和胡须 -->
-    <g stroke="#524338" stroke-width="1.6" stroke-linecap="round" opacity="0.4">
-      <path d="M46 95 L22 91"/><path d="M44 101 L20 101"/><path d="M46 107 L24 112"/>
-      <path d="M154 95 L178 91"/><path d="M156 101 L180 101"/><path d="M154 107 L176 112"/>
+<ellipse cx="100" cy="176" rx="60" ry="7" fill="#524338" opacity="0.12"/>
+<g class="m-tail">
+    <path d="M150 152 C178 154 190 126 178 102" fill="none" stroke="#524338" stroke-width="27" stroke-linecap="round" stroke-linejoin="round" opacity="0.14"/>
+    <path d="M150 152 C178 154 190 126 178 102" fill="none" stroke="#967866" stroke-width="23" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M150 152 C178 154 190 126 178 102" fill="none" stroke="#FAF6F0" stroke-width="9" stroke-linecap="round" opacity="0.32"/>
+  </g>
+<g class="m-body">
+  <ellipse cx="100" cy="153" rx="53" ry="25" fill="#FAF6F0" stroke="#524338" stroke-width="3.5"/>
+  <path d="M64 128 C49 143 59 168 79 173
+    C89 176 111 176 121 173
+    C141 168 151 143 136 128
+    C121 138 79 141 64 128 Z"
+    fill="#FFFFFF" stroke="#524338" stroke-width="3.5" stroke-linejoin="round"/>
+  <ellipse cx="68" cy="169" rx="12" ry="8" fill="#FFFFFF" stroke="#524338" stroke-width="3"/><path d="M64 173 v2.4" stroke="#524338" stroke-width="1.4" stroke-linecap="round" opacity="0.5"/><path d="M69 173 v2.4" stroke="#524338" stroke-width="1.4" stroke-linecap="round" opacity="0.5"/>
+</g>
+<ellipse cx="166" cy="188" rx="32" ry="11" fill="#8FC4E2" stroke="#4A7C99" stroke-width="1.6"/>
+<ellipse cx="161" cy="184" rx="22" ry="6" fill="#B7DCF0" opacity="0.85"/>
+<g class="m-rod">
+  <path d="M126 176 Q180 108 194 46" fill="none" stroke="#5A3E2B" stroke-width="7" stroke-linecap="round"/>
+  <path d="M126 176 Q180 108 194 46" fill="none" stroke="#A9793F" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="141" cy="156" r="5.2" fill="#7A5230" stroke="#3E2A1C" stroke-width="1.4"/>
+  <circle cx="141" cy="156" r="1.5" fill="#C79A6B"/>
+  <path d="M194 46 C198 102 188 148 178 170" fill="none" stroke="#7A7A7A" stroke-width="1.4"/>
+  <circle cx="178" cy="179" r="4" fill="#F5F5F5" stroke="#5E5E5E" stroke-width="1"/>
+  <path d="M174 179 A 4 4 0 0 1 182 179 Z" fill="#E05A5A"/>
+  <ellipse cx="178" cy="182" rx="11" ry="3.6" fill="none" stroke="#FFFFFF" stroke-width="1.5" opacity="0.55"/>
+</g>
+<!-- 彩蛋：钓上来的鱼。外层管位移（浮上来 / 送到嘴边），内层管缩放（被吃掉）。
+     拆两层是因为一个元素只能有一个 transform 属性，位移和缩放写在同一条上会互相覆盖 -->
+<g class="m-fish" display="none">
+  <g class="m-fish-in">
+    <path d="M0 0 C-8 -7 -18 -4 -20 0 C-18 4 -8 7 0 0 Z" transform="translate(178 170)" fill="#7FB2C9" stroke="#3E6A7E" stroke-width="1.6" stroke-linejoin="round"/>
+    <path d="M-20 0 L-27 -6 L-27 6 Z" transform="translate(178 170)" fill="#7FB2C9" stroke="#3E6A7E" stroke-width="1.6" stroke-linejoin="round"/>
+    <circle cx="170" cy="168.5" r="1.5" fill="#2B3A42"/>
+  </g>
+</g>
+<!-- 彩蛋：钓上来的拖鞋。同样内外两层：外层位移，内层翻转（嫌弃地甩出去） -->
+<g class="m-slipper" display="none">
+  <g class="m-slipper-tilt">
+    <g transform="translate(178 168) rotate(-18)">
+      <path d="M-14 0 C-14 -7 -6 -8 2 -7 C10 -6 13 -3 13 1 C13 6 8 8 0 8 C-8 8 -14 6 -14 0 Z" fill="#E8956B" stroke="#8A4B2E" stroke-width="1.8" stroke-linejoin="round"/>
+      <path d="M-9 -3 C-5 -7 3 -7 8 -4" fill="none" stroke="#8A4B2E" stroke-width="2.2" stroke-linecap="round"/>
+      <ellipse cx="0" cy="2" rx="9" ry="5" fill="#C46A45" opacity="0.45"/>
     </g>
   </g>
-  <g stroke="#BA7517" stroke-width="3" stroke-linecap="round" fill="none" opacity="1">
-    <path d="M150 92 l14 -10"/>
-    <path d="M154 104 l16 -4"/>
+</g>
+<!-- 握竿的爪子：竿画完之后重画一次右前爪压在上面，才是"握着"而不是"竿穿过身体" -->
+<ellipse cx="132" cy="164" rx="12" ry="8" fill="#FFFFFF" stroke="#524338" stroke-width="3"/><path d="M128 168 v2.4" stroke="#524338" stroke-width="1.4" stroke-linecap="round" opacity="0.5"/><path d="M133 168 v2.4" stroke="#524338" stroke-width="1.4" stroke-linecap="round" opacity="0.5"/>
+<g class="m-head"><g class="m-ears"><path d="M-16 3 C-18 -12 -8 -31 0 -40 C9 -31 17 -12 15 3 Z" transform="translate(76.6 79.7) rotate(-3) scale(-1.02 1.02)" fill="#7A5E4E" stroke="#524338" stroke-width="3.4" stroke-linejoin="round"/>
+    <path d="M-9 0 C-11 -10 -5 -23 0 -29 C5 -23 10 -11 9 0 Z" transform="translate(76.6 79.7) rotate(-3) scale(-1.02 1.02)" fill="#F2A7A7" opacity="0.5"/><path d="M-16 3 C-18 -12 -8 -31 0 -40 C9 -31 17 -12 15 3 Z" transform="translate(123.4 79.7) rotate(3) scale(1.02 1.02)" fill="#7A5E4E" stroke="#524338" stroke-width="3.4" stroke-linejoin="round"/>
+    <path d="M-9 0 C-11 -10 -5 -23 0 -29 C5 -23 10 -11 9 0 Z" transform="translate(123.4 79.7) rotate(3) scale(1.02 1.02)" fill="#F2A7A7" opacity="0.5"/></g>
+    <ellipse cx="100" cy="100" rx="45" ry="35" fill="#FAF6F0" stroke="#524338" stroke-width="3.5"/>
+    <path d="M100.0 64.1 C124.5 64.1 141.1 70.7 145.0 86.8 C148.9 103.8 150.9 118.0 135.2 126.5
+    C129.3 129.3 123.5 118.0 117.6 108.5 C111.7 99.1 105.9 86.8 100.0 86.8
+    C94.1 86.8 88.3 99.1 82.4 108.5 C76.5 118.0 70.7 129.3 64.8 126.5
+    C49.1 118.0 51.1 103.8 55.0 86.8 C58.9 70.7 75.5 64.1 100.0 64.1 Z" fill="#967866"/>
+    <g class="m-eyes">
+    <!-- 先画两只眼球，再画瞳孔组，最后画眼睑。
+         这个顺序不是随便排的：瞳孔必须压在虹膜上方、又被眼睑压住。
+         瞳孔合成一个 .pupils 组，是为了让 eyeTracking 这个开关**可见可测**——
+         working 的状态声明了 eyeTracking:false，那个 false 必须在结构上有对象可管，
+         否则"不跟眼"只是"图里恰好没有瞳孔层"，是巧合不是功能。 -->
+    <circle cx="79" cy="104" r="11.5" fill="#2B73B0"/>
+    <circle cx="79" cy="104" r="9.200000000000001" fill="#51ABE8"/>
+    <circle cx="121" cy="104" r="11.5" fill="#2B73B0"/>
+    <circle cx="121" cy="104" r="9.200000000000001" fill="#51ABE8"/>
+    <g class="pupils m-pupils">
+      <ellipse cx="79" cy="108.83" rx="3.4499999999999997" ry="4.6000000000000005" fill="#1A2E40"/>
+      <ellipse cx="121" cy="108.83" rx="3.4499999999999997" ry="4.6000000000000005" fill="#1A2E40"/>
+    </g>
+    <!-- 眼睑：一块从眼角上方压下来的实心弧，边缘单独描一遍 -->
+    <path d="M66 102 Q79 108.5 92 102
+             L92 86.5 L66 86.5 Z" fill="#967866"/>
+    <path d="M66 102 Q79 108.5 92 102"
+          fill="none" stroke="#524338" stroke-width="2.4" stroke-linecap="round"/>
+    <!-- 眼下的一道疲劳动纹 -->
+    <path d="M73.25 118.5 q5.75 2.5 11.5 0" fill="none"
+          stroke="#524338" stroke-width="1.4" stroke-linecap="round" opacity="0.45"/>
+    <!-- 眼睑：一块从眼角上方压下来的实心弧，边缘单独描一遍 -->
+    <path d="M108 102 Q121 108.5 134 102
+             L134 86.5 L108 86.5 Z" fill="#967866"/>
+    <path d="M108 102 Q121 108.5 134 102"
+          fill="none" stroke="#524338" stroke-width="2.4" stroke-linecap="round"/>
+    <!-- 眼下的一道疲劳动纹 -->
+    <path d="M115.25 118.5 q5.75 2.5 11.5 0" fill="none"
+          stroke="#524338" stroke-width="1.4" stroke-linecap="round" opacity="0.45"/></g>
+    <!-- 鼻尖与嘴 -->
+    <path d="M100 116 L104 110.5 C106 109 94 109 96 110.5 Z" fill="#F2A7A7" stroke="#524338" stroke-width="1.8" stroke-linejoin="round"/>
+    <path d="M100 116 L100 120 M100 120 Q94 127 88 122 M100 120 Q106 127 112 122" fill="none" stroke="#524338" stroke-width="2.5" stroke-linecap="round"/></g>
+<g stroke="#524338" stroke-width="1.6" stroke-linecap="round" opacity="0.4">
+    <path d="M57.25 109 L31.25 105"/>
+    <path d="M55.25 115 L29.25 115"/>
+    <path d="M57.25 121 L33.25 126"/>
+    <path d="M142.75 109 L168.75 105"/>
+    <path d="M144.75 115 L170.75 115"/>
+    <path d="M142.75 121 L166.75 126"/>
+  </g>
   </g>
 </svg>

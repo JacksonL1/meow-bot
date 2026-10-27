@@ -57,6 +57,156 @@ function clamp(n, lo, hi) {
   return Math.min(hi, Math.max(lo, n));
 }
 
+// ------------------------------------------------------------
+// 部件动画（"活猫感"）
+//
+// 为什么动画不写在主题的 SVG 里：白名单拒了 <style> 和 SMIL（见 SECURITY.md），
+// 所以主题作者没法写 CSS 动画；剩下唯一的路就是多画几帧再逐帧替换，
+// 而 6~8fps 的逐帧替换一定是频闪，看着"卡顿"。
+// 所以改成：主题只**声明**哪个部件怎么动，渲染层用 rAF 连续插值（60fps）。
+// SVG 里的约定见 themes/README.md：被动画的部件是外层 <g class="m-xxx">，
+// 静角烧在内层，两者不打架。
+//
+// 单条规则写错只丢这一条，不连坐整个主题——和 fps 的处理一致：
+// 动画坏了应该表现为"不动"，而不是"主题加载失败、画面空白"。
+// ------------------------------------------------------------
+const MAX_MOTION_RULES = 12;
+const MOTION_TYPES = new Set(["rotate", "scale", "translate", "blink"]);
+const PART_RE = /^[a-z0-9][a-z0-9-]{0,23}$/;
+
+function finiteOr(v, lo, hi) {
+  return Number.isFinite(v) ? clamp(v, lo, hi) : null;
+}
+
+function pairOr(v, lo, hi) {
+  if (!Array.isArray(v) || v.length !== 2) return null;
+  const a = finiteOr(v[0], lo, hi);
+  const b = finiteOr(v[1], lo, hi);
+  return a === null || b === null ? null : [a, b];
+}
+
+function normalizeMotion(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const rule of raw.slice(0, MAX_MOTION_RULES)) {
+    if (!isPlainObject(rule)) continue;
+    if (typeof rule.part !== "string" || !PART_RE.test(rule.part)) continue;
+    if (!MOTION_TYPES.has(rule.type)) continue;
+
+    const base = {
+      part: rule.part,
+      type: rule.type,
+      period: finiteOr(rule.period, 200, 20000) ?? 3000,
+      phase: finiteOr(rule.phase, 0, 1) ?? 0,
+      pivot: pairOr(rule.pivot, 0, 200) ?? [100, 100],
+    };
+
+    if (rule.type === "blink") {
+      out.push({
+        ...base,
+        min: finiteOr(rule.min, 400, 60000) ?? 3000,
+        max: finiteOr(rule.max, 600, 90000) ?? 7000,
+      });
+      continue;
+    }
+    if (rule.type === "rotate") {
+      const from = finiteOr(rule.from, -180, 180);
+      const to = finiteOr(rule.to, -180, 180);
+      if (from === null || to === null) continue;
+      out.push({ ...base, from, to });
+      continue;
+    }
+    // scale 上限 3 是为了防止一个 scale(80) 把整幅图放大到撑爆窗口；
+    // translate 用 viewBox 尺度（200）的 40% 作为上限。
+    const lim = rule.type === "scale" ? [0.2, 3] : [-80, 80];
+    const from = pairOr(rule.from, lim[0], lim[1]);
+    const to = pairOr(rule.to, lim[0], lim[1]);
+    if (!from || !to) continue;
+    out.push({ ...base, from, to });
+  }
+  return out;
+}
+
+// 彩蛋（gags）：隔一阵干一件"一次性"的事（钓上鱼吃掉 / 钓上拖鞋扔掉）。
+// motion 是循环的，表达不了"偶尔来一次"，所以单开一层。
+//
+// 一条彩蛋 = 一组部件 + 一个排期区间 + 一串**步骤**。
+// 步骤和 motion 的差别就两处，但两处都很关键：
+//   1. 步骤是**一次性**的：在 [at, at+span] 里从 from 走到 to；
+//      还没到点的不参与，过了点的停在 to 上，直到被同一部件的下一段接走。
+//      motion 是 period/phase 的无限循环，写不出"先浮上来，停一下，再被吃掉"。
+//   2. 步骤按数组顺序应用，**同一部件多段时后一条覆盖前一条**。
+//      所以相邻两段的端点必须写成一样的值（a 的 to == b 的 from），否则会跳一下。
+// 校验思路和 motion 一致：名字走 PART_RE、时间与数量全部钳制、坏一条只丢一条。
+const MAX_GAGS = 4;
+const MAX_GAG_PARTS = 4;
+const MAX_GAG_STEPS = 8;
+const EASES = new Set(["out", "in", "inout"]);
+
+function normalizeGagSteps(raw, duration) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const step of raw.slice(0, MAX_GAG_STEPS)) {
+    if (!isPlainObject(step)) continue;
+    if (typeof step.part !== "string" || !PART_RE.test(step.part)) continue;
+    if (!MOTION_TYPES.has(step.type) || step.type === "blink") continue;
+
+    const at = finiteOr(step.at, 0, duration) ?? 0;
+    // span 不能超出彩蛋本身：at + span > duration 的那一截演不到，提前夹住，
+    // 否则作者会以为"我写了 800ms 的抛出"，实际只播了 300ms。
+    const span = Math.min(finiteOr(step.span, 50, duration) ?? duration - at, duration - at) || 50;
+
+    const base = {
+      part: step.part,
+      type: step.type,
+      at,
+      span,
+      ease: EASES.has(step.ease) ? step.ease : "out",
+      pivot: pairOr(step.pivot, 0, 200) ?? [100, 100],
+    };
+
+    if (step.type === "rotate") {
+      const from = finiteOr(step.from, -180, 180);
+      const to = finiteOr(step.to, -180, 180);
+      if (from === null || to === null) continue;
+      out.push({ ...base, from, to });
+      continue;
+    }
+    const lim = step.type === "scale" ? [0.02, 3] : [-120, 120];
+    const from = pairOr(step.from, lim[0], lim[1]);
+    const to = pairOr(step.to, lim[0], lim[1]);
+    if (!from || !to) continue;
+    out.push({ ...base, from, to });
+  }
+  return out;
+}
+
+function normalizeGags(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const g of raw.slice(0, MAX_GAGS)) {
+    if (!isPlainObject(g)) continue;
+    if (typeof g.name !== "string" || !PART_RE.test(g.name)) continue;
+
+    const parts = Array.isArray(g.parts)
+      ? g.parts.filter((p) => typeof p === "string" && PART_RE.test(p)).slice(0, MAX_GAG_PARTS)
+      : [];
+    if (!parts.length) continue;
+
+    // every 是"多久来一次"的区间，取随机值。写反了就丢掉这条，
+    // 而不是自动 swap——作者笔误应该报出来，不该被悄悄纠正成另一种节奏。
+    const every = pairOr(g.every, 800, 120000) || [8000, 18000];
+    if (every[1] < every[0]) continue;
+
+    const duration = finiteOr(g.duration, 300, 10000) ?? 2500;
+    const steps = normalizeGagSteps(g.steps, duration);
+    if (!steps.length) continue;
+
+    out.push({ name: g.name, parts, every, duration, steps });
+  }
+  return out;
+}
+
 /**
  * 列出磁盘上真实存在的主题 id。**所有**对外接口都以这个结果为准，
  * 外部传进来的 id 先在这里比对，比对不上就直接拒——这一步比任何正则都可靠。
@@ -161,7 +311,6 @@ function loadTheme(id) {
 
   const budget = { bytes: 0 };
   const states = {};
-
   for (const name of STATE_NAMES) {
     const def = meta.states[name];
     if (!def) continue; // 允许缺，加载完成后补齐成 idle
@@ -192,6 +341,8 @@ function loadTheme(id) {
       // 只有明确写 true 才开眼球追踪。默认关：
       // 开了但那一帧没有 <g class="pupils">，渲染层会拿到 null，属于"静默失效"。
       eyeTracking: def.eyeTracking === true,
+      motion: normalizeMotion(def.motion),
+      gags: normalizeGags(def.gags),
       frames,
     };
   }

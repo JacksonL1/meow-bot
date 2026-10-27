@@ -44,7 +44,12 @@ const EVENT_STATE = {
   SessionEnd: null, // 特殊处理：移除会话
 };
 
-const IDLE_AFTER_MS = 25_000; // 这么久没动静 → 回 idle 发呆
+// 注意：IDLE_AFTER_MS 目前**没有被任何逻辑使用**。
+// 早期设想是"25 秒没动静就回 idle 发呆"，但接上会带来一个副作用：
+// 一次长工具调用（比如跑 40 秒的构建）期间没有任何事件，宠物会被误判成发呆。
+// 现在的实际行为是：working 会一直挂着，直到下一个事件到来、或 60 秒后直接睡着。
+// 要用它之前先想清楚"长工具调用"怎么区分，别直接把它塞进 tick()。
+const IDLE_AFTER_MS = 25_000;
 const SLEEP_AFTER_MS = 60_000; // 这么久没动静 → 睡着
 const TICK_MS = 250;
 

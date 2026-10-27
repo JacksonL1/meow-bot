@@ -1,71 +1,47 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
   <g transform="translate(0 0)">
-    <!-- 地面阴影 -->
-    <ellipse cx="100" cy="172" rx="65" ry="8" fill="#524338" opacity="0.12"/>
-
-    <!-- 尾巴 (更粗更蓬松) -->
-    <path d="M142 154 C172 162 192 144 182 120 C174 104 148 114 140 132" fill="none" stroke="#524338" stroke-width="28" stroke-linecap="round" stroke-linejoin="round" opacity="0.14"/>
-    <path d="M142 154 C172 162 192 144 182 120 C174 104 148 114 140 132" fill="none" stroke="#785C47" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
-    <path d="M142 154 C172 162 192 144 182 120 C174 104 148 114 140 132" fill="none" stroke="#F0E8DD" stroke-width="10" stroke-linecap="round" opacity="0.35"/>
-
-    
-
-    <!-- 身体后半部分 -->
-    <ellipse cx="100" cy="142" rx="54" ry="32" fill="#F0E8DD" stroke="#524338" stroke-width="3.5"/>
-
-    <!-- 奢华的胸口大毛领 (Ruff) - 放在头部后面凸显立体感 -->
-    <path d="M60 115 C45 130 55 155 75 160 C85 163 115 163 125 160 C145 155 155 130 140 115 C125 125 115 128 100 128 C85 128 75 125 60 115 Z" fill="#FFFFFF" stroke="#524338" stroke-width="3.5" stroke-linejoin="round"/>
-
-    <!-- 四只胖乎乎的白手套爪子 -->
-    <ellipse cx="68" cy="164" rx="12" ry="8" fill="#FFFFFF" stroke="#524338" stroke-width="3"/>
-    <ellipse cx="132" cy="164" rx="12" ry="8" fill="#FFFFFF" stroke="#524338" stroke-width="3"/>
-    <ellipse cx="152" cy="158" rx="10" ry="7" fill="#FFFFFF" stroke="#524338" stroke-width="2.5"/>
-
-    <!-- 耳朵 (放在头部后面显得更自然) -->
-    <g stroke="#524338" stroke-width="3.5" stroke-linejoin="round">
-      <path d="M56 60 C42 30 62 18 78 38 C82 42 80 48 76 50 Z" fill="#7A5E4E"/>
-      <path d="M144 60 C158 30 138 18 122 38 C118 42 120 48 124 50 Z" fill="#7A5E4E"/>
-    </g>
-    <!-- 耳内粉色绒毛 -->
-    <path d="M60 55 C50 38 65 28 72 38 C75 42 70 48 65 52 Z" fill="#F2A7A7" opacity="0.55"/>
-    <path d="M140 55 C150 38 135 28 128 38 C125 42 130 48 135 52 Z" fill="#F2A7A7" opacity="0.55"/>
-
-    <!-- 头部底色与轮廓 (带毛刺边缘的包子脸颊) -->
-    <path d="M100 48 C125 48 142 55 146 72 C150 90 152 105 136 114 C125 120 112 122 100 122 C88 122 75 120 64 114 C48 105 50 90 54 72 C58 55 75 48 100 48 Z" fill="#F0E8DD" stroke="#524338" stroke-width="3.5" stroke-linejoin="round"/>
-
-    <!-- 八字倒V面具 -->
-    
-    <path d="M100 48
-             C125 48 142 55 146 72
-             C150 90 152 105 136 114
-             C130 117 124 105 118 95
-             C112 85 106 72 100 72
-             C94 72 88 85 82 95
-             C76 105 70 117 64 114
-             C48 105 50 90 54 72
-             C58 55 75 48 100 48 Z"
-      fill="#785C47"/>
-
-    <!-- 眼睛 -->
-    
-      <path d="M61 90 Q74 101 87 90" fill="none" stroke="#524338" stroke-width="4" stroke-linecap="round"/>
-      <path d="M113 90 Q126 101 139 90" fill="none" stroke="#524338" stroke-width="4" stroke-linecap="round"/>
-
-    <!-- 腮红 -->
-    
-
-    <!-- 鼻尖与精致小嘴 -->
-    <path d="M100 102 L104 96.5 C106 95 94 95 96 96.5 Z" fill="#F2A7A7" stroke="#524338" stroke-width="1.8" stroke-linejoin="round"/>
-    <path d="M100 102 L100 106 M100 106 Q94 113 88 108 M100 106 Q106 113 112 108" fill="none" stroke="#524338" stroke-width="2.5" stroke-linecap="round"/>
-
-    <!-- 柔和胡须 -->
-    <g stroke="#524338" stroke-width="1.6" stroke-linecap="round" opacity="0.4">
-      <path d="M46 95 L22 91"/><path d="M44 101 L20 101"/><path d="M46 107 L24 112"/>
-      <path d="M154 95 L178 91"/><path d="M156 101 L180 101"/><path d="M154 107 L176 112"/>
-    </g>
+<ellipse cx="104" cy="178" rx="72" ry="7" fill="#524338" opacity="0.13"/>
+<g class="m-tail">
+    <path d="M152 170 C182 176 196 164 190 146" fill="none" stroke="#524338" stroke-width="24" stroke-linecap="round" stroke-linejoin="round" opacity="0.14"/>
+    <path d="M152 170 C182 176 196 164 190 146" fill="none" stroke="#785C47" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M152 170 C182 176 196 164 190 146" fill="none" stroke="#F0E8DD" stroke-width="8" stroke-linecap="round" opacity="0.32"/>
   </g>
-  <g fill="#5F5E5A" font-family="system-ui, sans-serif" font-weight="500" opacity="1">
-    <text x="146" y="78" font-size="18">z</text>
-    <text x="161" y="60" font-size="14">z</text>
+<g class="m-body">
+  <path d="M110.0 125.1 L120.4 127.6 L132.1 126.9 L139.7 130.9 L151.3 132.1 L155.1 137.1 L164.9 140.0 L164.3 145.2 L171.0 149.5 L166.2 154.3 L168.9 159.4 L160.6 163.0 L158.9 168.2 L148.1 170.3 L142.3 174.8 L130.4 175.1 L121.3 178.4 L110.0 176.8 L98.7 178.4 L89.6 175.1 L77.7 174.8 L71.9 170.3 L61.1 168.2 L59.4 163.0 L51.1 159.4 L53.8 154.3 L49.0 149.5 L55.7 145.2 L55.1 140.0 L64.9 137.1 L68.7 132.1 L80.3 130.9 L87.9 126.9 L99.6 127.6 Z" fill="#F0E8DD" stroke="#524338" stroke-width="3.2" stroke-linejoin="round"/>
+  <!-- 背上和身侧的毛簇 -->
+  <path d="M128 129 L127.4 123.0 L130.1 118.2 L131.9 121.1 L131.2 125.3 Z" fill="#F0E8DD" opacity="0.9"/>
+  <path d="M146 133 L147.7 128.3 L151.4 125.8 L151.7 128.6 L149.7 131.4 Z" fill="#F0E8DD" opacity="0.9"/>
+  <path d="M162 146 L165.6 143.4 L169.6 143.4 L168.4 145.6 L165.5 146.7 Z" fill="#F0E8DD" opacity="0.9"/>
+  <path d="M74 132 L70.3 127.9 L69.8 122.9 L72.6 124.1 L74.4 127.5 Z" fill="#F0E8DD" opacity="0.9"/>
+  <path d="M126 148 C140 139 158 144 160 155" fill="none" stroke="#FFFFFF" stroke-width="9" stroke-linecap="round" opacity="0.45"/>
+</g>
+<g class="m-paws">
+  <ellipse cx="50" cy="172" rx="13.5" ry="7.5" fill="#FFFFFF" stroke="#524338" stroke-width="3"/>
+  <ellipse cx="90" cy="175" rx="13" ry="7" fill="#FFFFFF" stroke="#524338" stroke-width="3"/>
+  <path d="M47 177 v3.2 M53 178 v3.2 M87 180 v3.2 M93 180 v3.2" stroke="#524338" stroke-width="1.5" stroke-linecap="round" opacity="0.45"/>
+</g>
+<g class="m-head"><g class="m-ears"><path d="M-16 3 C-18 -12 -8 -31 0 -40 C9 -31 17 -12 15 3 Z" transform="translate(54.8 127.2) rotate(-14) scale(-0.86 0.86)" fill="#7A5E4E" stroke="#524338" stroke-width="3.4" stroke-linejoin="round"/>
+    <path d="M-9 0 C-11 -10 -5 -23 0 -29 C5 -23 10 -11 9 0 Z" transform="translate(54.8 127.2) rotate(-14) scale(-0.86 0.86)" fill="#F2A7A7" opacity="0.5"/><path d="M-16 3 C-18 -12 -8 -31 0 -40 C9 -31 17 -12 15 3 Z" transform="translate(89.2 127.2) rotate(14) scale(0.86 0.86)" fill="#7A5E4E" stroke="#524338" stroke-width="3.4" stroke-linejoin="round"/>
+    <path d="M-9 0 C-11 -10 -5 -23 0 -29 C5 -23 10 -11 9 0 Z" transform="translate(89.2 127.2) rotate(14) scale(0.86 0.86)" fill="#F2A7A7" opacity="0.5"/></g>
+    <ellipse cx="72" cy="144" rx="33" ry="29" fill="#F0E8DD" stroke="#524338" stroke-width="3.5"/>
+    <path d="M72.0 114.2 C89.9 114.2 102.1 119.7 105.0 133.0 C107.9 147.1 109.3 158.9 97.8 165.9
+    C93.5 168.3 89.2 158.9 84.9 151.1 C80.6 143.2 76.3 133.0 72.0 133.0
+    C67.7 133.0 63.4 143.2 59.1 151.1 C54.8 158.9 50.5 168.3 46.2 165.9
+    C34.7 158.9 36.1 147.1 39.0 133.0 C41.9 119.7 54.1 114.2 72.0 114.2 Z" fill="#785C47"/>
+    <g class="m-eyes">
+    <path d="M45 144 Q58 154 71 144" fill="none" stroke="#524338" stroke-width="3.8" stroke-linecap="round"/>
+    <path d="M73 144 Q86 154 99 144" fill="none" stroke="#524338" stroke-width="3.8" stroke-linecap="round"/>
+  </g>
+    <!-- 鼻尖与嘴 -->
+    <path d="M72 160 L76 154.5 C78 153 66 153 68 154.5 Z" fill="#F2A7A7" stroke="#524338" stroke-width="1.8" stroke-linejoin="round"/>
+    <path d="M65 168 Q72 165 79 168" fill="none" stroke="#524338" stroke-width="2.6" stroke-linecap="round"/></g>
+<g stroke="#524338" stroke-width="1.4" stroke-linecap="round" opacity="0.32">
+  <path d="M42 151 L24 148"/><path d="M41 158 L22 158"/>
+  <path d="M102 151 L120 148"/><path d="M103 158 L122 158"/>
+</g>
+<g class="m-zzz" fill="#6B6A66" font-family="system-ui, sans-serif" font-weight="600">
+  <text x="116" y="100" font-size="15">z</text>
+  <text x="138" y="76" font-size="11.5" opacity="0.7">z</text>
+</g>
   </g>
 </svg>

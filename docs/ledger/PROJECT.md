@@ -13,7 +13,7 @@
 | 端点文件 | `%APPDATA%\clawd-starter\clawd-starter.port`，内容 `{port, token}`，权限 0600 |
 | 依赖服务 | 无。不连任何外部服务，只在本机开一个 HTTP 端口接收事件 |
 | 版本控制 | git，**5 次提交**（截至 `修改一下形象，添加会话看板窗口`）。**S7 主题系统 + 这批台账改动尚未提交** |
-| 体积 | 22 个源文件，约 4600 行（`src/` 2518 + `hooks/` 427 + `scripts/` 1658），另有 `themes/` 下 39 个 SVG 资产 |
+| 体积 | 22 个源文件，约 5300 行（`src/` 2982 + `hooks/` 427 + `scripts/` 1868），另有 `themes/` 下 27 个 SVG 资产（ragdoll 7 / crab 19 / _template 1） |
 
 ## 它解决什么问题
 
@@ -51,11 +51,11 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 | 权限裁决 | 挂起请求、等待决定、唯一出口 `settle()` 保证恰好响应一次 | `src/permission.js` |
 | 权限气泡 | 卡片 UI、两个按钮、Esc 不表态、量高度回传 | `src/bubble.html` + `bubble-renderer.js` + `bubble-preload.js` |
 | 会话看板 | 独立窗口、双击开关、1s 轮询快照、按「最吵的排前面」排序、演示模式、复制路径 | `src/dashboard.html` + `dashboard-renderer.js` + `dashboard-preload.js` |
-| 渲染 | 双图层交叉淡入、帧轮播、瞳孔位移插值、SVG 白名单清洗 | `src/renderer.js` |
-| 主题 | 扫目录、校验 schema 与资产、缺状态补齐、全坏兜底（主进程）；换主题 = 换帧数据 + 重画 | `src/theme.js` + `themes/<id>/theme.json` |
+| 渲染 | 双图层交叉淡入、帧轮播、瞳孔位移插值、SVG 白名单清洗；**部件动画引擎**（`motion` → rAF 插值到 60fps）与**彩蛋引擎**（`gags` → 随机排期的一次性动作） | `src/renderer.js` |
+| 主题 | 扫目录、校验 schema 与资产、校验 `motion`/`gags` 规则、缺状态补齐、全坏兜底（主进程）；换主题 = 换帧数据 + 重画 | `src/theme.js` + `themes/<id>/theme.json` |
 | 进程间桥 | 只暴露具体动作，不泄漏 `ipcRenderer` | `src/preload.js`（主窗口 9 个）+ `src/dashboard-preload.js`（看板 5 个）|
 | 调试 | 假数据源，三种用法（完整剧本 / 单事件 / 保持某状态）；形象对照截图；主题打包 | `scripts/fake-feed.js`、`preview-shot.js`、`build-preview-bundle.js` |
-| 回归闸门 | 主进程 inspector + 渲染进程 CDP，92 项断言 | `scripts/verify-electron.js` |
+| 回归闸门 | 主进程 inspector + 渲染进程 CDP，**103 项断言** | `scripts/verify-electron.js` |
 
 ## 已知限制
 
@@ -71,7 +71,8 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 - 看板的「复制路径」在回归里验的是返回值 + 剪贴板内容（实测能拿到完整路径）；但**环境不具备时**（某些会话读不到剪贴板）会降级成一条警告，不做假断言
 - 看板不能跳转终端——`fullCwd()` 已经留好了，只是没做动作按钮
 - **主题只支持 SVG**。GIF / APNG / WebP 要写图片解码器，没做（主仓库有，用的是动画解码 + 资产缓存）
-- **主题不能用 `<style>` 做 CSS 动画**，只能靠帧序列。这是刻意让渡：`<style>` 里能写 `@import`、能覆盖整页
+- **主题不能用 `<style>` 做 CSS 动画**。动画只能靠 `motion` 声明 + 渲染层插值，或画多帧逐帧替换（那条路已经证明是频闪）。这是刻意让渡：`<style>` 里能写 `@import`、能覆盖整页
+- **彩蛋（`gags`）目前只有 ragdoll 的 working 用上了**（钓上鱼吃掉 / 钓上拖鞋扔掉）。排期是随机 7~28 秒，肉眼验收得等一会儿；回归用 `petDebug.gag(name)` 跳过排期，不掷骰子
 - 状态时长（25s 发呆 / 60s 入睡）仍写死在 `state.js`，没进 `theme.json`
 - 没有在线主题目录，主题只能手工放进 `themes/`。换来的是供应链攻击面为零
 
@@ -89,3 +90,9 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 10. **主题的白名单顺序不许反**：先定 `ALLOWED_TAGS`，再写加载器。反过来写，等主题加载不出来时才放宽白名单，动机就变成"让它能跑"而不是"这样安全"。
 11. **`url()` 目标校验只能收紧不能放松**。放行 `filter` / `clip-path` / `mask` 之后，这条是唯一的出口管控——它们的值天生就是 `url()`。任何"顺手也允许相对路径"的改动，等于把主题变成 SSRF 探针。
 12. **主题必须在 `createWindow()` 之前定好**。渲染层一加载就 `invoke("theme:get")`，晚一步第一帧就是空白——而桌宠没有任务栏入口，空白窗口用户不知道怎么关。
+13. **别用多帧去换流畅度**。逐帧替换是离散采样，6~8fps 一定是频闪（看着像卡顿，其实是台阶）。要顺就上 `motion` 让渲染层插值到 60fps。**帧数多 ≠ 流畅**：ragdoll 从 19 帧降到 7 帧，反而更顺。
+14. **被动画的部件外层 `<g class="m-xxx">` 不许自带 `transform`**。渲染层每帧 `setAttribute("transform", …)` 会覆盖它，静态角度必须放内层 `<g>`。写错的后果是"这个部件不动"，画面上一点提示都没有——回归里用"motion 声明的部件必须存在"兜这一条。
+15. **`motion.part` 是选择器片段**，会拼进 `querySelector(".m-" + part)`。必须过 `PART_RE`，不要因为"反正只有自己写的主题"就省掉——主题本来就是外部输入。
+16. **`gags` 里有两处选择器片段**：外层 `parts[]`（放行/回收哪些部件）和内层 `steps[].part`（动画目标）。两处都走 `PART_RE`。这是 `motion` 那条的加强版，也是最容易只改一处的地方。
+17. **彩蛋演完必须"恢复原值"而不是"一律隐藏"**。彩蛋的部件有两种来源：天生藏着的（鱼、拖鞋，写死 `display="none"`）和本来就露着的（`pupils`，被拉进彩蛋只是为了"跟着看一眼"）。一律 `display:none` 会把猫的瞳孔一起抹掉。`restoreGagParts()` 里存的是**开演前的属性快照**，别简化成常量。
+18. **一个部件同一时刻只能被一个 `transform` 源控制**。`motion` 每帧都在写，所以彩蛋**不要去动 `motion` 已经占用的部件**（比如 `head`）；同一个部件要同时位移和缩放，就在 SVG 里**再套一层 `<g class="m-xxx">`**，外层管位移、内层管缩放。写在同一层会互相覆盖，表现为"只有一个生效"，且不会报错。

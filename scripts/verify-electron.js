@@ -326,12 +326,35 @@ async function main() {
     ok("首帧已上屏（.layer.show 内有 svg）", !!(await R.eval("!!document.querySelector('.layer.show svg.on')")));
     ok("7 个状态全部注册", (await R.eval("window.petDebug && window.petDebug.states().length")) === 7);
 
-    // 帧总数是"主题真的被完整读进来"的证据：7 个状态 19 帧。
-    // 随便少一帧就说明某个资产没读到——而画面上只是"少了一帧"，看不出来。
+    // 帧总数 = "主题真的被完整读进来"的证据，但**不能再写死 19**：
+    // 动画从"逐帧替换"改成"部件插值"之后，每个状态只需要 1 帧。
+    // 所以改成跟 theme.json 对账——写死数字会逼着以后每次改动画都要改测试。
+    const themeFs = require("node:fs");
+    const themePath = require("node:path").join(__dirname, "..", "themes", "ragdoll", "theme.json");
+    const themeJson = JSON.parse(themeFs.readFileSync(themePath, "utf8"));
+    const wantFrames = Object.values(themeJson.states).reduce((n, s) => n + s.frames.length, 0);
     const totalFrames = await R.eval(
       "Object.values(window.VISUAL_STATES).reduce((n, s) => n + s.frames.length, 0)"
     );
-    ok("主题帧数完整（7 状态 19 帧）", totalFrames === 19, `帧数=${totalFrames}`);
+    ok("主题帧数与 theme.json 一致", totalFrames === wantFrames, `实际=${totalFrames} 期望=${wantFrames}`);
+
+    // motion 声明的部件必须真的存在于那一帧里。写错一个 part 名的后果是
+    // "这条动画静默不生效"，画面上完全看不出来——所以要在结构上先卡住。
+    const missingParts = await R.eval(`(() => {
+      const bad = [];
+      const sec = window.VISUAL_STATES;
+      for (const [name, def] of Object.entries(sec)) {
+        if (!def.motion || !def.motion.length) continue;
+        const host = document.createElement('div');
+        host.innerHTML = def.frames[0];
+        const svg = host.querySelector('svg');
+        for (const rule of def.motion) {
+          if (!svg.querySelector('.m-' + rule.part)) bad.push(name + ':' + rule.part);
+        }
+      }
+      return bad.join(',');
+    })()`);
+    ok("motion 声明的部件在 SVG 里都存在", missingParts === "", `缺失：${missingParts}`);
 
     // ---------- 2. 渲染进程隔离（SEC-06） ----------
     ok("contextIsolation 生效：渲染层拿不到 require", (await R.eval("typeof window.require")) === "undefined");
@@ -420,17 +443,131 @@ async function main() {
     }
     ok("旧图层在淡出后被清空", cleared);
 
-    // working 有 2 帧、fps 8 → 等一会应该发生过换帧
-    const frameMoves = await R.eval(`(async () => {
-      const seen = new Set();
+    // 部件动画在不在动。这是"活猫感"的唯一可测证据：
+    // 静态截图看不出区别，只有连续采样 transform 才能证明插值在跑。
+    // 采样窗口 1.2s，覆盖最短周期（error 的抖动 160ms）和常规呼吸（3.4s 的一小段）。
+    const motionMoves = await R.eval(`(async () => {
+      const snaps = [];
       for (let i = 0; i < 12; i++) {
-        const n = [...document.querySelectorAll('.layer.show svg')].findIndex(s => s.classList.contains('on'));
-        seen.add(n);
-        await new Promise(r => setTimeout(r, 140));
+        snaps.push(JSON.stringify(window.petDebug.motion()));
+        await new Promise(r => setTimeout(r, 100));
       }
-      return seen.size;
+      return new Set(snaps).size;
     })()`);
-    ok("帧轮播在跑（观察到多个帧下标）", frameMoves >= 2, `不同帧 ${frameMoves}`);
+    ok("部件动画在跑（同一状态下 transform 持续变化）", motionMoves >= 4, `不同快照 ${motionMoves}/12`);
+
+    // 眨眼：眼睛部件会被压成 scale(1, <1)，而且是"闭上再睁开"，不是一直眯着。
+    // 间隔是随机 1.8~4.2s（thinking），所以采样窗口要盖过最大间隔。
+    // 注意：采样必须从 **Node 侧**逐次读，不能写成页面里的长循环——
+    // CDP 的 send() 有 5 秒超时，一次 5 秒以上的 eval 会静默返回 undefined。
+    await R.eval("window.petDebug.setState('thinking')");
+    await sleep(120);
+    let blinkMin = 1;
+    for (let i = 0; i < 100; i++) {
+      const t = await R.eval("window.petDebug.motion().eyes || ''");
+      const m = /scale\(1 ([\d.]+)\)/.exec(t || "");
+      if (m) blinkMin = Math.min(blinkMin, Number(m[1]));
+      if (blinkMin < 0.5) break;
+      await sleep(50);
+    }
+    ok("会眨眼（眼睛被压扁过一次以上）", blinkMin < 0.5, `最小纵向比例 ${blinkMin}`);
+
+    // ---------- 3.5 彩蛋（gags）与 eyeTracking ----------
+    // 彩蛋是"隔一阵干一件一次性的事"（钓上鱼吃掉 / 钓上拖鞋扔掉）。
+    // 要能测的有四件事：声明得到、部件画了、放得出来、收得回去。
+    // 排期是随机 7~14 秒，回归等不起，所以用 petDebug.gag() 跳过排期——
+    // 播放走的还是同一条 runGag，测的仍然是真代码，只是不掷骰子。
+    await R.eval("window.petDebug.setState('working')");
+    await sleep(250);
+
+    const gagNames = JSON.parse((await R.eval("JSON.stringify(window.petDebug.gagNames())")) || "[]");
+    ok(
+      "working 声明了两条彩蛋（fish / slipper）",
+      gagNames.includes("fish") && gagNames.includes("slipper"),
+      `gagNames=${JSON.stringify(gagNames)}`
+    );
+
+    // 部件名写错在画面上表现为"这条彩蛋永远不出现"，静默且极难联想，所以先在结构上卡住。
+    const gagPartMissing = await R.eval(`(() => {
+      const bad = [];
+      for (const [name, def] of Object.entries(window.VISUAL_STATES)) {
+        if (!def.gags || !def.gags.length) continue;
+        const host = document.createElement('div');
+        host.innerHTML = def.frames[0];
+        const svg = host.querySelector('svg');
+        for (const g of def.gags) {
+          for (const step of g.steps) {
+            if (!svg.querySelector('.m-' + step.part)) bad.push(name + ':' + g.name + ':' + step.part);
+          }
+        }
+      }
+      return bad.join(',');
+    })()`);
+    ok("gags 的部件在 SVG 里都存在", gagPartMissing === "", `缺失：${gagPartMissing}`);
+
+    // eyeTracking 以前是"写了不生效"的字段：主题声明了 false，渲染层照样写瞳孔 transform。
+    // 现在它真的管住 applyGaze。测两件事：开关值传到了渲染层、以及瞳孔确实不动。
+    ok("working 的 eyeTracking 为 false", (await R.eval("window.petDebug.eyeTracking()")) === false);
+    await R.eval("window.petDebug.setState('idle')");
+    await sleep(150);
+    ok("idle 的 eyeTracking 为 true（对照组）", (await R.eval("window.petDebug.eyeTracking()")) === true);
+    await R.eval("window.petDebug.setState('working')");
+    await sleep(200);
+
+    await R.eval("window.petDebug.gaze({x:1,y:1}, true)");
+    await sleep(420);
+    const workPupils = await R.eval(
+      "document.querySelector('.layer.show svg.on .pupils')?.getAttribute('transform') ?? null"
+    );
+    ok("working 下瞳孔不跟鼠标（疲惫的猫不追光标）", workPupils === null || workPupils === "translate(0.00 0.00)", `transform=${workPupils}`);
+    await R.eval("window.petDebug.unpinGaze()");
+
+    // 放出来 + 真的在动
+    await R.eval("window.petDebug.setState('working')");
+    await sleep(200);
+    await R.eval("window.petDebug.gag('fish')");
+    await sleep(120);
+    const gagA = JSON.parse((await R.eval("JSON.stringify(window.petDebug.gagState())")) || "{}");
+    await sleep(380);
+    const gagB = JSON.parse((await R.eval("JSON.stringify(window.petDebug.gagState())")) || "{}");
+    ok(
+      "彩蛋把藏着的部件放出来了（display 不再是 none）",
+      !!(gagA.fish && gagA.fish.display !== "none"),
+      `fish.display=${gagA.fish && gagA.fish.display}`
+    );
+    ok(
+      "彩蛋在动（同一部件的 transform 在变）",
+      !!(gagA.fish && gagB.fish && gagA.fish.transform !== gagB.fish.transform),
+      `${gagA.fish && gagA.fish.transform} → ${gagB.fish && gagB.fish.transform}`
+    );
+
+    // 收回去。这里同时守住一个真实踩过的坑：收尾不能一律 display:none，
+    // 瞳孔是"本来露着、被拉进彩蛋跟着看一眼"的部件，一律隐藏会把猫的眼睛抹掉。
+    let gagDone = false;
+    for (let i = 0; i < 40; i++) {
+      const st = JSON.parse(
+        (await R.eval(`JSON.stringify({
+          fish: document.querySelector('.layer.show svg.on .m-fish')?.getAttribute('display') ?? null,
+        })`)) || "{}"
+      );
+      if (st.fish === "none") {
+        gagDone = true;
+        break;
+      }
+      await sleep(150);
+    }
+    const restored = JSON.parse(
+      (await R.eval(`JSON.stringify({
+        pupilsDisplay: document.querySelector('.layer.show svg.on .pupils')?.getAttribute('display') ?? null,
+        pupilsTransform: document.querySelector('.layer.show svg.on .pupils')?.getAttribute('transform') ?? null,
+      })`)) || "{}"
+    );
+    ok("彩蛋演完把鱼收回（display 回到 none）", gagDone);
+    ok(
+      "彩蛋结束后瞳孔恢复原状（没被当成一次性部件一起藏掉）",
+      restored.pupilsDisplay === null && restored.pupilsTransform === null,
+      `display=${restored.pupilsDisplay} transform=${restored.pupilsTransform}`
+    );
 
     // ---------- 4. 眼球追踪 ----------
     // 结构前提：渲染层用 querySelector(".pupils") 拿第一个就驱动，
@@ -451,7 +588,10 @@ async function main() {
 
     await R.eval("window.petDebug.setState('idle')");
     await sleep(200);
-    await R.eval("window.petDebug.gaze({x:1,y:-1})");
+    // 第二个参数 pin=true：钉住，别让主进程按真实光标推的 gaze 把它盖掉。
+    // 这条断言测的是"渲染层会不会把给定坐标插值到瞳孔上"，不是"主进程算得准不准"，
+    // 两者混在一起就会随机失败（实测读到过 translate(-0.98 0.81)，那是光标位置）。
+    await R.eval("window.petDebug.gaze({x:1,y:-1}, true)");
     let transform = null;
     for (let i = 0; i < 30; i++) {
       transform = await R.eval("document.querySelector('.layer.show svg.on .pupils')?.getAttribute('transform') || null");
@@ -467,12 +607,14 @@ async function main() {
     ok("瞳孔层里两只眼都在（≥2 个瞳孔）", pupilCount >= 2, `瞳孔节点 ${pupilCount}`);
 
     // 回中
-    await R.eval("window.petDebug.gaze({x:0,y:0})");
+    await R.eval("window.petDebug.gaze({x:0,y:0}, true)");
     await sleep(900);
     ok(
       "gaze 能回中",
       (await R.eval("document.querySelector('.layer.show svg.on .pupils')?.getAttribute('transform')")) === "translate(0.00 0.00)"
     );
+    // 放开钉子，后面的断言要看到真实光标驱动的行为
+    await R.eval("window.petDebug.unpinGaze()");
 
     // ---------- 5. 命中判定（点击穿透的依据） ----------
     ok(
@@ -533,14 +675,22 @@ async function main() {
         win.hide();
         await new Promise((r) => setTimeout(r, 320));
         const hidden = await grab();
+        // 背景噪声基线：窗口已经藏起来了，同一块桌面再拍一次。
+        // 用户可能同时开着自己的桌宠（实测就撞上过），或者桌面上有会动的东西，
+        // 那几像素本来就在变——这跟"窗口不透明"是两件事，必须先把噪声量出来再比较，
+        // 否则一个 5/255 的帧间抖动就能让整条断言假失败。
+        await new Promise((r) => setTimeout(r, 320));
+        const hiddenAgain = await grab();
         win.showInactive();
-        if (!shown || !hidden) return 'no-source';
+        if (!shown || !hidden || !hiddenAgain) return 'no-source';
         const size = shown.getSize();
         const sizeHidden = hidden.getSize();
         if (size.width !== sizeHidden.width || size.height !== sizeHidden.height) return 'size-mismatch';
         const A = shown.toBitmap();
         const B = hidden.toBitmap();
+        const B2 = hiddenAgain.toBitmap();
         const at = (buf, x, y) => { const i = (y * size.width + x) * 4; return [buf[i + 2], buf[i + 1], buf[i]]; };
+        const dist = (a, c) => Math.max(Math.abs(a[0] - c[0]), Math.abs(a[1] - c[1]), Math.abs(a[2] - c[2]));
         const pad = 10;
         const pts = [
           [pad, pad],
@@ -550,17 +700,30 @@ async function main() {
         ];
         return pts.map(([x, y]) => {
           const a = at(A, x, y);
-          const c = at(B, x, y);
-          return Math.max(Math.abs(a[0] - c[0]), Math.abs(a[1] - c[1]), Math.abs(a[2] - c[2]));
+          const b = at(B, x, y);
+          const b2 = at(B2, x, y);
+          const noise = dist(b, b2); // 这块桌面自己会动多少
+          return { diff: dist(a, b), noise };
         });
       })()`);
       if (Array.isArray(transparency)) {
-        const good = transparency.filter((d) => d <= 2).length;
-        ok(
-          "窗口真透明（显示与隐藏时四角像素一致）",
-          good === 4,
-          `四角差值=[${transparency.join(", ")}]，达标 ${good}/4`
-        );
+        // 只认"背景稳定"的角（噪声 ≤ 6）。噪声大的角根本没资格判定：
+        // 那一块桌面自己就在变，比出来的差值说明不了窗口透明不透明。
+        // 不设成"噪声+大容差"，否则一个噪声 137 的角会把断言变成永远通过的空壳。
+        const usable = transparency.filter((p) => p.noise <= 6);
+        const clean = usable.filter((p) => p.diff <= 2);
+        const detail = transparency
+          .map((p) => `${p.diff}/${p.noise}`)
+          .join(", ");
+        if (usable.length < 3) {
+          console.log(`跳过  窗口透明检查（桌面背景变化太大，可用角 ${usable.length}/4，差值/噪声=${detail}）`);
+        } else {
+          ok(
+            "窗口真透明（显示与隐藏时四角像素一致）",
+            clean.length === usable.length,
+            `差值/噪声=[${detail}]，可判定 ${clean.length}/${usable.length}`
+          );
+        }
       } else {
         console.log(`跳过  窗口透明检查（${transparency}，需要可见桌面）`);
       }
@@ -886,8 +1049,17 @@ async function main() {
         // 再读，等于把自己的证据覆盖掉了——探针能跑通时，读到的永远是 PROBE-OK。
         // 现在：先读真值；不等才做一次"能不能读写"的能力探测（并且把原值写回去）。
         if (M) {
-          const clip = await M.eval("require('electron').clipboard.readText()");
-          if (clip === "E:\\work\\proj-alpha") {
+          const EXPECTED = "E:\\work\\proj-alpha";
+          // 单次读不可靠：Windows 上只要有别的进程（剪贴板管理器、另一个 Electron）
+          // 正握着剪贴板，readText 会返回空串。实测两次里就有一次读到空——
+          // 那是环境抖动，不是 bug，所以要重试几次再下结论。
+          let clip = "";
+          for (let i = 0; i < 6; i++) {
+            clip = await M.eval("require('electron').clipboard.readText()");
+            if (clip === EXPECTED) break;
+            await sleep(120);
+          }
+          if (clip === EXPECTED) {
             ok("剪贴板拿到的是完整路径", true, `剪贴板=${JSON.stringify(clip)}`);
           } else {
             const probe = await M.eval(
@@ -899,7 +1071,9 @@ async function main() {
               // 剪贴板可读写，那这个不一致就是真 bug，不能当成环境问题放过
               ok("剪贴板拿到的是完整路径", false, `剪贴板=${JSON.stringify(clip)}`);
             } else {
-              console.log("      [warn] 本环境访问不到 Windows 剪贴板，跳过内容校验（需手工点一次验证）");
+              console.log(
+                `      [warn] 本环境读不到剪贴板内容，跳过校验（需手工点一次验证）。读到=${JSON.stringify(clip)}`
+              );
             }
           }
         }

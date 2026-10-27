@@ -78,9 +78,10 @@
     </style>
   </head>
   <body>
-    <h1>状态 → 帧序列</h1>
+    <h1>状态 → 姿势</h1>
     <p class="sub">
-      每张卡片都在真的播：帧数少的靠眼球追踪补活气，帧数多的靠轮播。<br />
+      这张图只拍<strong>静止的姿势</strong>：动画是渲染层按 <code>theme.json</code> 里的 <code>motion</code>
+      用 rAF 连续插值的（呼吸/摆尾/歪头/眨眼），静态截图拍不出来，要看动画请直接跑 <code>npm start</code>。<br />
       事件→状态的权威映射在 <code>src/state.js</code> 的 <code>EVENT_STATE</code>；
       画面数据来自 <code>themes/&lt;id&gt;/theme.json</code>，换主题不动一行代码。
     </p>
@@ -95,7 +96,7 @@
     <script>
       const META = [
         ["sleeping", "睡着", "60s 无事件"],
-        ["idle", "发呆", "无会话 / 25s 无事件"],
+        ["idle", "发呆", "无会话 / 单次状态播完"],
         ["thinking", "思考", "UserPromptSubmit"],
         ["working", "干活", "PreToolUse / PostToolUse"],
         ["attention", "干完了", "Stop"],
@@ -156,7 +157,13 @@
           meta.textContent = label;
           const badge = document.createElement("span");
           badge.className = "tag";
-          badge.textContent = `${def.frames.length} 帧 · ${def.fps}fps${def.eyeTracking ? " · 跟眼" : ""}`;
+          // 标注只写**声明了什么**（帧数 / 跟不跟眼 / 几条动画 / 几条彩蛋），
+          // 不写"看起来怎样"——后者看图就行，前者是这张图看不出来的信息。
+          // 彩蛋单独标出来，是因为它变化很慢（7~28 秒一次），
+          // 盯着一张静图永远看不到它发生，容易以为是没做。
+          badge.textContent = `${def.frames.length} 帧 · ${def.fps}fps${def.eyeTracking ? " · 跟眼" : " · 不跟眼"}${
+            def.motion && def.motion.length ? ` · ${def.motion.length} 条动画` : ""
+          }${def.gags && def.gags.length ? ` · ${def.gags.length} 条彩蛋` : ""}`;
           meta.appendChild(badge);
 
           const evEl = document.createElement("div");

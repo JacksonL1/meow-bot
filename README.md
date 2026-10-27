@@ -71,7 +71,7 @@ node scripts/fake-feed.js                     # 完整剧本： thinking → wor
 node scripts/fake-feed.js Stop                # 单个事件
 node scripts/fake-feed.js --hold working 10   # 保持某个状态 10 秒
 
-npm run verify:electron                       # 92 项回归：窗口/透明/IPC/DOM/gaze/HTTP/权限/看板/主题/单实例/退出
+npm run verify:electron                       # 103 项回归：窗口/透明/IPC/DOM/动画/彩蛋/gaze/HTTP/权限/看板/主题/单实例/退出
 
 npm run preview:states                        # 七状态对照图 → docs/ragdoll-states.png
 node scripts/preview-shot.js --theme=crab     # 换主题 → docs/crab-states.png
@@ -104,9 +104,18 @@ npm start -- --theme=crab
 - 接口四道锁 + 渲染层 SVG 白名单（见下方「安全边界」）
 - 单会话状态机：事件 → 状态 → 优先级仲裁 → oneshot 播完自动退回 → 闲置发呆 / 睡着
 - **主题系统（S7）**：形象不再是代码，而是 `themes/<id>/theme.json` + 一堆 SVG。`ragdoll`（默认）和 `crab` 两个内置主题，双击看板底部就能换
-- **形象是布偶猫**：奶油白长毛 + 深棕重点色 + 蓝宝石竖瞳；七个状态的尾巴姿势各不相同
-  （垂 / 甩 / 竖 / 绕 / 炸），error 会炸毛并让毛色泛红。截图见 `docs/ragdoll-states.png`
-- **眼球追踪**：主进程读全局光标 → 归一化成 gaze → 渲染层插值移动瞳孔
+- **形象是布偶猫**：奶油白长毛 + 深棕重点色 + 蓝宝石竖瞳。**七个状态是七种不同姿势**，
+  不是同一张图加个贴纸：idle 端坐、thinking 蹲低歪头、attention 拔高张嘴、working 趴低钓鱼、
+  error 炸毛泛红、notification 抬头举信封、sleeping 侧躺垫爪。截图见 `docs/ragdoll-states.png`
+- **部件动画（不是换帧）**：主题在 `theme.json` 的 `motion` 里声明"哪个部件怎么动"
+  （呼吸、摆尾、歪头、眨眼、抖动），渲染层用 `requestAnimationFrame` 连续插值到 60fps。
+  为什么不用多帧轮播：白名单拒了 `<style>` 和 SMIL，主题里写不了 CSS 动画，
+  而逐帧替换是**离散**的——6~8fps 一定频闪，看起来就是"卡顿式切换"
+- **彩蛋（`gags`）**：循环的 `motion` 表达不了"隔一阵来一次"，所以单开一层。
+  working 的猫会时不时**钓上一条鱼**（浮出水面 → 盯着看 → 加速收进嘴边并缩小）
+  或**一只拖鞋**（翻个个儿 → 甩出画面 → 嫌弃地撇开眼），`pupils` 跟着转过去看
+- **眼球追踪**：主进程读全局光标 → 归一化成 gaze → 渲染层插值移动瞳孔。
+  受主题的 `eyeTracking` 管：钓鱼时（working）关掉，太累了不追光标
 - **双图层交叉淡入**：新状态先在隐藏层画好再淡入，切换瞬间不会闪白
 - **真 hook 接入**：`hooks/` 下两个文件，把 agent 的 8 个事件送进来；观察型 hook 全部 `async`。
   安装器支持 `--agent claude|codebuddy|workbuddy`，三家的事件名 / matcher 取值 / async 支持各不相同
@@ -404,7 +413,7 @@ Chrome 对超大模糊半径是同步算的，一个 `9999` 就是一次卡死�
   加载失败导致空白的话，用户看到的是一个**看得见进程、找不到窗口、不知道点哪里退出**的东西——比报错难处理得多。
 - **失败是整个主题拒绝，不是部分加载**。半个主题的表现是"看着有点怪"，作者根本不会发现。
 
-回归 92/92，其中主题与白名单 26 项。`npm run preview:states` 出对照图（`--theme=crab` 换主题），
+回归 103/103，其中主题与白名单 26 项、动画与彩蛋 13 项。`npm run preview:states` 出对照图（`--theme=crab` 换主题），
 `npm run build:preview` 更新预览页的数据包。
 
 ## 对照阅读

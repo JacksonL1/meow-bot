@@ -183,7 +183,43 @@ app.whenReady().then(() => {
     }
     await sleep(700); // 让 CSS 过渡/字体落定
 
-    const shot = await C.send("Page.captureScreenshot", { format: "png" });
+    // 隐藏窗口不会自己产生新帧，而 Page.captureScreenshot 要等一帧才返回。
+    // 以前页面里每个状态都有逐帧轮播的定时器，一直在制造帧，所以这个前提从没暴露；
+    // 改成"1 帧/状态 + 部件动画"之后页面完全静止，截图就会一直等到超时。
+    // 所以截图前先手动制造一次重绘，失败再重试。
+    const repaint = () =>
+      C.send("Runtime.evaluate", {
+        expression:
+          "requestAnimationFrame(() => { document.body.style.opacity = '0.999'; requestAnimationFrame(() => { document.body.style.opacity = ''; }); })",
+      });
+
+    // 默认只截视口（640 高），第二行状态会被切掉一半。
+    // 状态对照图是给人看的"七个姿势是否分得开"，缺一行就失去一半用处，
+    // 所以先按内容高度把视口撑开再截。宽度不变，栅格不会重排。
+    const contentH = await C.send("Runtime.evaluate", {
+      expression: "Math.ceil(document.documentElement.scrollHeight)",
+      returnByValue: true,
+    });
+    const fullH = Math.min(Math.max(contentH?.result?.result?.value || 640, 640), 4000);
+    await C.send("Emulation.setDeviceMetricsOverride", {
+      width: 1020,
+      height: fullH,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+    await sleep(400);
+
+    let shot = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await repaint();
+      await sleep(220);
+      shot = await C.send("Page.captureScreenshot", {
+        format: "png",
+        fromSurface: true,
+        captureBeyondViewport: false,
+      });
+      if (shot?.result?.data) break;
+    }
     if (!shot?.result?.data) throw new Error("截图失败：" + JSON.stringify(shot).slice(0, 200));
 
     fs.mkdirSync(path.dirname(OUT), { recursive: true });

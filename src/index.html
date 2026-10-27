@@ -36,17 +36,21 @@
         height: 176px;
       }
       /* 双图层交叉淡入：新图层先画好再淡入，旧图层同时淡出，
-         中间不会出现"空白一帧"——这是单图层换图做不到的 */
+         中间不会出现"空白一帧"——这是单图层换图做不到的。
+         220ms 比原来的 160ms 慢一点：两个姿势差异大时，太快会读成"闪了一下"，
+         慢下来才像"换了个动作"。附带极轻微的缩放，收尾更软。 */
       .layer {
         position: absolute;
         inset: 0;
         display: grid;
         place-items: center;
         opacity: 0;
-        transition: opacity 160ms ease-out;
+        transform: scale(0.99);
+        transition: opacity 220ms ease-out, transform 220ms ease-out;
       }
       .layer.show {
         opacity: 1;
+        transform: scale(1);
       }
       /* 同一图层里塞着该状态的所有帧，只显示当前那一帧 */
       .layer svg {
