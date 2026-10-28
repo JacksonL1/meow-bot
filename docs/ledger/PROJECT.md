@@ -13,7 +13,7 @@
 | 端点文件 | `%APPDATA%\clawd-starter\clawd-starter.port`，内容 `{port, token}`，权限 0600 |
 | 依赖服务 | 无。不连任何外部服务，只在本机开一个 HTTP 端口接收事件 |
 | 版本控制 | git，**5 次提交**（截至 `修改一下形象，添加会话看板窗口`）。**S7 主题系统 + 这批台账改动尚未提交** |
-| 体积 | 22 个源文件，约 5300 行（`src/` 2982 + `hooks/` 427 + `scripts/` 1868），另有 `themes/` 下 27 个 SVG 资产（ragdoll 7 / crab 19 / _template 1） |
+| 体积 | 22 个源文件，约 6150 行（`src/` 3562 + `hooks/` 427 + `scripts/` 2157），另有 `themes/` 下 41 个 SVG 资产（ragdoll 21 / crab 19 / _template 1） |
 
 ## 它解决什么问题
 
@@ -51,11 +51,11 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 | 权限裁决 | 挂起请求、等待决定、唯一出口 `settle()` 保证恰好响应一次 | `src/permission.js` |
 | 权限气泡 | 卡片 UI、两个按钮、Esc 不表态、量高度回传 | `src/bubble.html` + `bubble-renderer.js` + `bubble-preload.js` |
 | 会话看板 | 独立窗口、双击开关、1s 轮询快照、按「最吵的排前面」排序、演示模式、复制路径 | `src/dashboard.html` + `dashboard-renderer.js` + `dashboard-preload.js` |
-| 渲染 | 双图层交叉淡入、帧轮播、瞳孔位移插值、SVG 白名单清洗；**部件动画引擎**（`motion` → rAF 插值到 60fps）与**彩蛋引擎**（`gags` → 随机排期的一次性动作） | `src/renderer.js` |
+| 渲染 | **两条路径**：① 骨骼弹簧（`rigType: ragdoll-spring-v2`，JS 直接拼 SVG + 二阶弹簧阻尼通道，60fps）；② 帧序列（双图层交叉淡入、帧轮播、瞳孔位移插值）。两条都共用 `svgNode()` 白名单出口 | `src/renderer.js` |
 | 主题 | 扫目录、校验 schema 与资产、校验 `motion`/`gags` 规则、缺状态补齐、全坏兜底（主进程）；换主题 = 换帧数据 + 重画 | `src/theme.js` + `themes/<id>/theme.json` |
 | 进程间桥 | 只暴露具体动作，不泄漏 `ipcRenderer` | `src/preload.js`（主窗口 9 个）+ `src/dashboard-preload.js`（看板 5 个）|
 | 调试 | 假数据源，三种用法（完整剧本 / 单事件 / 保持某状态）；形象对照截图；主题打包 | `scripts/fake-feed.js`、`preview-shot.js`、`build-preview-bundle.js` |
-| 回归闸门 | 主进程 inspector + 渲染进程 CDP，**103 项断言** | `scripts/verify-electron.js` |
+| 回归闸门 | 主进程 inspector + 渲染进程 CDP，**112 条断言；当前 112 PASS / 0 FAIL**（剪贴板那条环境不可读时 `[warn]` 降级）；两条渲染路径用同一批断言、`rigMode` 分叉判据 | `scripts/verify-electron.js` |
 
 ## 已知限制
 
@@ -72,8 +72,8 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 - 看板不能跳转终端——`fullCwd()` 已经留好了，只是没做动作按钮
 - **主题只支持 SVG**。GIF / APNG / WebP 要写图片解码器，没做（主仓库有，用的是动画解码 + 资产缓存）
 - **主题不能用 `<style>` 做 CSS 动画**。动画只能靠 `motion` 声明 + 渲染层插值，或画多帧逐帧替换（那条路已经证明是频闪）。这是刻意让渡：`<style>` 里能写 `@import`、能覆盖整页
-- **彩蛋（`gags`）目前只有 ragdoll 的 working 用上了**（钓上鱼吃掉 / 钓上拖鞋扔掉）。排期是随机 7~28 秒，肉眼验收得等一会儿；回归用 `petDebug.gag(name)` 跳过排期，不掷骰子
-- 状态时长（25s 发呆 / 60s 入睡）仍写死在 `state.js`，没进 `theme.json`
+- **working 的桌面场景只存在于骨骼渲染器里**（键盘 + 编辑器窗口 + 代码行生长），是 `renderer.js` 里写死的，不是主题数据。彩蛋（`gags`）已经整体删除：用户把 working 从「钓鱼」改回「敲键盘」之后，鱼和拖鞋就没有存在的理由了，留着只会变成没人走的死路径
+- ~~状态时长写死在 `state.js`~~ → 已进 `theme.json.timings`（2026-10-28）。**主题只能改已有的四个数，改不了状态机的形状**
 - 没有在线主题目录，主题只能手工放进 `themes/`。换来的是供应链攻击面为零
 
 ## 硬约束（改代码前先看）
@@ -96,3 +96,10 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 16. **`gags` 里有两处选择器片段**：外层 `parts[]`（放行/回收哪些部件）和内层 `steps[].part`（动画目标）。两处都走 `PART_RE`。这是 `motion` 那条的加强版，也是最容易只改一处的地方。
 17. **彩蛋演完必须"恢复原值"而不是"一律隐藏"**。彩蛋的部件有两种来源：天生藏着的（鱼、拖鞋，写死 `display="none"`）和本来就露着的（`pupils`，被拉进彩蛋只是为了"跟着看一眼"）。一律 `display:none` 会把猫的瞳孔一起抹掉。`restoreGagParts()` 里存的是**开演前的属性快照**，别简化成常量。
 18. **一个部件同一时刻只能被一个 `transform` 源控制**。`motion` 每帧都在写，所以彩蛋**不要去动 `motion` 已经占用的部件**（比如 `head`）；同一个部件要同时位移和缩放，就在 SVG 里**再套一层 `<g class="m-xxx">`**，外层管位移、内层管缩放。写在同一层会互相覆盖，表现为"只有一个生效"，且不会报错。
+19. **`src/` 下 `innerHTML` 的出现次数必须是 0**（回归里已有一条机械检查在查这条，2026-10-28 补）。主题内容只能走 `svgNode()`（`DOMParser` + `ALLOWED_TAGS`）。这条是可机械检查的，别靠"我记得用清洗函数"——上一版重写把整个非骨骼路径改回了 `innerHTML = frames.join("")`，白名单函数还在文件里但已不在任何路径上（见 SECURITY「两道闸是怎么被无声拆掉的」）。
+20. **`index.html` 必须带 CSP meta**。删它要单独一次提交并在 SECURITY 留记录。它平时看起来是"一行没用的配置"——因为它挡的东西今天一个都不在；它挡的是明天漏过白名单的那一个。
+21. **架构重写后必须比对回归通过数**。任何一项掉红都要能说出原因；"测试过时了，先放着"是这次 49 条断言集体失效时的第一反应，也是差点把三道防线一起放过去的反应。
+22. **主题自报 `rigType`，不要靠 id / name 嗅探渲染器**。`id === "ragdoll"` 的兜底意味着任何叫 ragdoll 的主题都会掉进"画死在 JS 里的那只猫"。加载器透传 `rigType`，未知字段可忽略，但**渲染分支的选择必须来自主题声明**。
+23. **每个 `petDebug` 出口都要有一条断言证明它自己有货**。`ragdollRig.springs` vs 实际的 `this.sp` 只差一个名字，结果是 `return {}`——不报错、不崩溃、调用方看不出来。观测窗口没有自检，它就只是装饰（见 SECURITY「骨骼弹簧重写」第四节）。
+24. **断言的期望值不要按精确字符串比中间层会改写的量**。`style.transform` 经 CSSOM 序列化会把尾零吃掉（写 `3.80px`、读 `3.8px`），凡是经过 Web API 序列化的值，一律用**数值 + 容差**判据。
+25. **一个功能下线，要把它的「校验层」和「文档」一起删**。彩蛋删掉之后，`theme.js` 里还在校验 `gags`、`themes/README.md` 里还写着完整的 `gags` schema——主题作者照着写会**校验通过、加载成功、什么都不发生**。比删掉更难查，因为它长得像能用。判据只有一个：**这个字段还有消费者吗**。没有就连校验带文档一起删。

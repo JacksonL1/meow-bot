@@ -1,93 +1,95 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="zh-CN">
-  <head>
-    <meta charset="utf-8" />
-    <!-- SEC-03：默认全禁，再按需开口。
-         内联 <style> 需要 'unsafe-inline'；如果不想开，把样式挪进独立 css 文件。 -->
-    <meta
-      http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; connect-src 'none'"
-    />
-    <title>clawd-starter</title>
-    <style>
-      html,
-      body {
-        margin: 0;
-        height: 100%;
-        background: transparent;
-        overflow: hidden;
-        user-select: none;
-        cursor: default;
-        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-      }
-      #stage {
-        position: absolute;
-        inset: 0;
-        display: grid;
-        place-items: center;
-        cursor: grab;
-      }
-      #stage:active {
-        cursor: grabbing;
-      }
-      #pet {
-        position: relative;
-        width: 176px;
-        height: 176px;
-      }
-      /* 双图层交叉淡入：新图层先画好再淡入，旧图层同时淡出，
-         中间不会出现"空白一帧"——这是单图层换图做不到的。
-         220ms 比原来的 160ms 慢一点：两个姿势差异大时，太快会读成"闪了一下"，
-         慢下来才像"换了个动作"。附带极轻微的缩放，收尾更软。 */
-      .layer {
-        position: absolute;
-        inset: 0;
-        display: grid;
-        place-items: center;
-        opacity: 0;
-        transform: scale(0.99);
-        transition: opacity 220ms ease-out, transform 220ms ease-out;
-      }
-      .layer.show {
-        opacity: 1;
-        transform: scale(1);
-      }
-      /* 同一图层里塞着该状态的所有帧，只显示当前那一帧 */
-      .layer svg {
-        display: none;
-        width: 176px;
-        height: 176px;
-      }
-      .layer svg.on {
-        display: block;
-      }
-      #hint {
-        position: absolute;
-        left: 0;
-        right: 0;
-        bottom: 6px;
-        text-align: center;
-        font-size: 11px;
-        color: #5f5e5a;
-        opacity: 0;
-        transition: opacity 200ms;
-        pointer-events: none;
-      }
-      body:hover #hint {
-        opacity: 0.75;
-      }
-    </style>
-  </head>
-  <body>
-    <div id="stage">
-      <div id="pet">
-        <div class="layer" id="layerA"></div>
-        <div class="layer" id="layerB"></div>
-      </div>
+<head>
+  <meta charset="UTF-8">
+  <!-- SEC-03：默认全禁，再按需开口。
+       内联 <style> 需要 'unsafe-inline'；如果不想开，把样式挪进独立 css 文件。
+       **这条 meta 不能删**：它是最后一道闸。CSP 一旦缺席，主题里的 SVG 只要漏过
+       白名单（或某个包里塞了 <script>），就有执行权。 -->
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; connect-src 'none'"
+  />
+  <title>clawd-starter · 布偶猫</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      user-select: none;
+      -webkit-user-drag: none;
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: transparent;
+      overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    #stage {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      cursor: grab;
+    }
+    #stage:active {
+      cursor: grabbing;
+    }
+    #pet {
+      position: relative;
+      width: 176px;
+      height: 176px;
+      pointer-events: auto;
+    }
+    .layer {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      transition: opacity 180ms ease-out;
+      pointer-events: none;
+    }
+    .layer.show {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .layer svg {
+      width: 100%;
+      height: 100%;
+      display: none;
+      overflow: visible;
+    }
+    .layer svg.on {
+      display: block;
+    }
+    #hint {
+      position: absolute;
+      bottom: 6px;
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: rgba(40, 32, 26, 0.72);
+      color: #FAF6F0;
+      font-size: 10px;
+      white-space: nowrap;
+      opacity: 0;
+      transition: opacity 200ms ease;
+      pointer-events: none;
+    }
+    body:hover #hint {
+      opacity: 0.78;
+    }
+  </style>
+</head>
+<body>
+  <div id="stage">
+    <div id="pet">
+      <div id="layerA" class="layer show"></div>
+      <div id="layerB" class="layer"></div>
     </div>
-    <div id="hint">拖动我 · 双击看会话 · 右键退出</div>
-    <!-- S7：不再有 visuals.js。帧数据由主进程从 themes/ 读出来，
-         经 preload 的 getTheme() 送进来。 -->
-    <script src="./renderer.js"></script>
-  </body>
+    <div id="hint">拖动我 · 摸头撸猫 · 双击看会话 · 右键退出</div>
+  </div>
+  <script src="./renderer.js"></script>
+</body>
 </html>

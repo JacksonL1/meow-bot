@@ -1,123 +1,81 @@
 {
   "schemaVersion": 1,
-  "name": "布偶猫",
+  "name": "布偶猫 (60fps 骨骼弹簧物理版)",
   "author": "clawd-starter",
   "version": "2.0.0",
-  "description": "布偶猫：奶油白长毛 + 深棕重点色 + 蓝宝石竖瞳。七个状态是七种不同姿势，动作由渲染层按 motion 连续插值（不靠换帧）。",
-  "_comment": "每个状态只有 1 帧：动画不靠逐帧替换（6~8fps 一定频闪），而是由 motion 描述部件怎么动，渲染层用 rAF 以 60fps 插值。part 对应 SVG 里的 <g class=\"m-<part>\">，那一层不能自带 transform（会被覆盖），静态角度放内层。type 支持 rotate / scale / translate / blink。",
+  "description": "支持二阶弹簧阻尼姿态插值、多段柔性尾巴、呼吸起伏、视线头部视差跟随、自然眨眼与耳廓微动的全身骨骼化布偶猫主题。",
+  "rigType": "ragdoll-spring-v2",
   "states": {
     "idle": {
-      "fps": 1,
+      "fps": 60,
       "eyeTracking": true,
-      "frames": ["idle-1.svg"],
-      "motion": [
-        { "part": "body", "type": "scale", "pivot": [100, 168], "from": [1, 1], "to": [1, 1.03], "period": 3400 },
-        { "part": "head", "type": "translate", "from": [0, 0], "to": [0, -1.4], "period": 3400, "phase": 0.08 },
-        { "part": "tail", "type": "rotate", "pivot": [148, 152], "from": -7, "to": 7, "period": 2600 },
-        { "part": "ears", "type": "rotate", "pivot": [100, 60], "from": -1.5, "to": 1.5, "period": 5200 },
-        { "part": "eyes", "type": "blink", "pivot": [100, 92], "min": 2600, "max": 6800 }
+      "frames": [
+        "idle-1.svg",
+        "idle-2.svg",
+        "idle-3.svg"
       ]
     },
     "thinking": {
-      "fps": 1,
+      "fps": 60,
       "eyeTracking": true,
-      "frames": ["thinking-1.svg"],
-      "motion": [
-        { "part": "body", "type": "scale", "pivot": [100, 172], "from": [1, 1], "to": [1, 1.022], "period": 2900 },
-        { "part": "head", "type": "rotate", "pivot": [98, 122], "from": -13, "to": -18, "period": 2500 },
-        { "part": "tail", "type": "rotate", "pivot": [148, 156], "from": 4, "to": 15, "period": 1100 },
-        { "part": "eyes", "type": "blink", "pivot": [98, 95], "min": 1800, "max": 4200 }
+      "frames": [
+        "thinking-1.svg",
+        "thinking-2.svg",
+        "thinking-3.svg"
       ]
     },
     "working": {
-      "fps": 1,
+      "fps": 60,
       "eyeTracking": false,
-      "frames": ["working-1.svg"],
-      "_comment": "干活时眼睛疲劳半睁，不跟鼠标——盯了一天屏幕的猫没力气追光标。靠 gags 出彩蛋。",
-      "motion": [
-        { "part": "body", "type": "translate", "from": [0, 0], "to": [0, 1.6], "period": 1800 },
-        { "part": "head", "type": "rotate", "pivot": [100, 130], "from": -1.5, "to": 1.5, "period": 3200 },
-        { "part": "tail", "type": "rotate", "pivot": [150, 152], "from": -3, "to": 6, "period": 900 },
-        { "part": "rod", "type": "rotate", "pivot": [126, 176], "from": -1.4, "to": 1.4, "period": 1400 },
-        { "part": "eyes", "type": "blink", "pivot": [100, 102], "min": 3600, "max": 8200 }
-      ],
-      "gags": [
-        {
-          "name": "fish",
-          "parts": ["fish", "fish-in", "pupils"],
-          "every": [7000, 14000],
-          "duration": 2900,
-          "_comment": "浮出水面 1s → 眼睛跟过去盯着看 0.9s → 加速收向嘴边并缩到看不见（叼走吃掉）。pupils 也参与，猫是真的在看自己钓上来的东西，而不是鱼凭空出现。",
-          "steps": [
-            { "part": "pupils", "type": "translate", "from": [0, 0], "to": [2.8, 2.0], "at": 200, "span": 450, "ease": "out" },
-            { "part": "pupils", "type": "translate", "from": [2.8, 2.0], "to": [1.4, 0.9], "at": 1900, "span": 500 },
-            { "part": "fish", "type": "translate", "from": [-4, 40], "to": [0, 0], "at": 0, "span": 1000, "ease": "out" },
-            { "part": "fish", "type": "translate", "from": [0, 0], "to": [-48, -56], "at": 1900, "span": 800, "ease": "in" },
-            { "part": "fish-in", "type": "scale", "pivot": [178, 170], "from": [1, 1], "to": [0.02, 0.02], "at": 2000, "span": 750, "ease": "inout" }
-          ]
-        },
-        {
-          "name": "slipper",
-          "parts": ["slipper", "slipper-tilt", "pupils"],
-          "every": [15000, 28000],
-          "duration": 2600,
-          "_comment": "浮出水面 1s → 盯着看 → 翻个个儿甩出画面 → 嫌弃地撇开眼。两条彩蛋都会占用 pupils，所以它们不能同时播（排期是串行的，天然不会撞）",
-          "steps": [
-            { "part": "pupils", "type": "translate", "from": [0, 0], "to": [2.8, 2.0], "at": 200, "span": 450, "ease": "out" },
-            { "part": "pupils", "type": "translate", "from": [2.8, 2.0], "to": [-1.8, -0.7], "at": 1600, "span": 500 },
-            { "part": "slipper", "type": "translate", "from": [-6, 44], "to": [0, 0], "at": 0, "span": 1000, "ease": "out" },
-            { "part": "slipper-tilt", "type": "rotate", "pivot": [178, 168], "from": 0, "to": -34, "at": 1000, "span": 900 },
-            { "part": "slipper", "type": "translate", "from": [0, 0], "to": [74, -66], "at": 1900, "span": 700, "ease": "in" }
-          ]
-        }
+      "frames": [
+        "working-1.svg",
+        "working-2.svg",
+        "working-3.svg",
+        "working-4.svg"
       ]
     },
     "attention": {
-      "fps": 1,
+      "fps": 60,
       "eyeTracking": true,
-      "frames": ["attention-1.svg"],
-      "motion": [
-        { "part": "body", "type": "scale", "pivot": [100, 174], "from": [1, 1], "to": [1, 1.045], "period": 760 },
-        { "part": "head", "type": "translate", "from": [0, 0], "to": [0, -2.2], "period": 1500 },
-        { "part": "tail", "type": "rotate", "pivot": [150, 148], "from": 8, "to": 20, "period": 620 },
-        { "part": "ears", "type": "rotate", "pivot": [100, 56], "from": -3, "to": 3, "period": 900 },
-        { "part": "eyes", "type": "blink", "pivot": [100, 84], "min": 2400, "max": 4200 }
+      "frames": [
+        "attention-1.svg",
+        "attention-2.svg"
       ]
     },
     "error": {
-      "fps": 1,
+      "fps": 60,
       "eyeTracking": false,
-      "frames": ["error-1.svg"],
-      "motion": [
-        { "part": "body", "type": "translate", "from": [-1.2, 0], "to": [1.2, 0], "period": 160 },
-        { "part": "head", "type": "rotate", "pivot": [100, 128], "from": -3, "to": 3, "period": 180 },
-        { "part": "tail", "type": "rotate", "pivot": [148, 156], "from": -9, "to": 9, "period": 220 }
+      "frames": [
+        "error-1.svg",
+        "error-2.svg"
       ]
     },
     "notification": {
-      "fps": 1,
+      "fps": 60,
       "eyeTracking": true,
-      "frames": ["notification-1.svg"],
-      "motion": [
-        { "part": "body", "type": "scale", "pivot": [100, 172], "from": [1, 1], "to": [1, 1.028], "period": 2600 },
-        { "part": "head", "type": "rotate", "pivot": [100, 120], "from": -3, "to": 3, "period": 1800 },
-        { "part": "tail", "type": "rotate", "pivot": [146, 152], "from": -12, "to": 12, "period": 1800 },
-        { "part": "card", "type": "rotate", "pivot": [149, 86], "from": -2.5, "to": 2.5, "period": 2200 },
-        { "part": "floath", "type": "translate", "from": [0, 3], "to": [0, -3], "period": 2600 },
-        { "part": "eyes", "type": "blink", "pivot": [100, 90], "min": 3000, "max": 6000 }
+      "frames": [
+        "notification-1.svg",
+        "notification-2.svg",
+        "notification-3.svg",
+        "notification-4.svg"
       ]
     },
     "sleeping": {
-      "fps": 1,
+      "fps": 60,
       "eyeTracking": false,
-      "frames": ["sleeping-1.svg"],
-      "motion": [
-        { "part": "body", "type": "scale", "pivot": [110, 177], "from": [1, 1], "to": [1.012, 1.045], "period": 4200 },
-        { "part": "head", "type": "translate", "from": [0, 0], "to": [0, -1.2], "period": 4200, "phase": 0.12 },
-        { "part": "tail", "type": "rotate", "pivot": [152, 170], "from": 1, "to": 5, "period": 5200 },
-        { "part": "ears", "type": "rotate", "pivot": [72, 120], "from": -1, "to": 2.5, "period": 6400 },
-        { "part": "zzz", "type": "translate", "from": [0, 0], "to": [3, -4], "period": 4200 }
+      "frames": [
+        "sleeping-1.svg",
+        "sleeping-2.svg",
+        "sleeping-3.svg"
       ]
     }
+  },
+  "timings": {
+    "oneshot": {
+      "error": 1200,
+      "notification": 1500,
+      "attention": 800
+    },
+    "sleepAfterMs": 20000
   }
 }

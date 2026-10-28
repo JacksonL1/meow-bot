@@ -44,6 +44,18 @@ const MAX_FRAMES_PER_STATE = 12;
 const MIN_FPS = 1;
 const MAX_FPS = 30;
 
+// 状态时长（毫秒）的边界。和 fps 一样：**钳制而不是拒绝**——写错的时长
+// 不该让整个主题挂掉，但 0 会让 oneshot 一闪而过、过大又会假死，所以拉回区间。
+const MIN_ONESHOT_MS = 200;
+const MAX_ONESHOT_MS = 30_000;
+const MIN_SLEEP_AFTER_MS = 2_000;
+const MAX_SLEEP_AFTER_MS = 3_600_000;
+
+// timings 只认这三个：它们就是 state.js 里 ONESHOT 的键。
+// 主题**可以改这三个的时长，但没法把别的状态变成 oneshot**——
+// 那是状态机的形状，不是外观参数，交给主题改会让"working 播 2 秒就消失"成为可能。
+const ONESHOT_STATES = ["error", "notification", "attention"];
+
 // 资产名：字母数字开头，只允许 字母数字 . _ -，必须以 .svg 结尾，最长 64。
 // 这个正则同时挡掉了 `../x`、`/etc/x`、`C:\x`、`a\b`、带空格的名字。
 const ASSET_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.svg$/;
@@ -58,154 +70,16 @@ function clamp(n, lo, hi) {
 }
 
 // ------------------------------------------------------------
-// 部件动画（"活猫感"）
+// 这里曾经有一整套 motion / gags 的校验器（部件动画 + 一次性彩蛋）。
 //
-// 为什么动画不写在主题的 SVG 里：白名单拒了 <style> 和 SMIL（见 SECURITY.md），
-// 所以主题作者没法写 CSS 动画；剩下唯一的路就是多画几帧再逐帧替换，
-// 而 6~8fps 的逐帧替换一定是频闪，看着"卡顿"。
-// 所以改成：主题只**声明**哪个部件怎么动，渲染层用 rAF 连续插值（60fps）。
-// SVG 里的约定见 themes/README.md：被动画的部件是外层 <g class="m-xxx">，
-// 静角烧在内层，两者不打架。
+// 两套都删了，因为**没有消费者**：渲染层的 motion 引擎随骨骼弹簧重写一起没了，
+// 彩蛋的鱼 / 拖鞋也随「working 改回敲键盘」一起删了。
+// 留着校验器的后果比删掉更糟：主题作者写对了 gags 会**校验通过、加载成功、
+// 什么都不发生**——这正是这个项目踩过四次的那一类（CSP / 白名单 /
+// VISUAL_STATES / petDebug.springs）。
 //
-// 单条规则写错只丢这一条，不连坐整个主题——和 fps 的处理一致：
-// 动画坏了应该表现为"不动"，而不是"主题加载失败、画面空白"。
+// 现在主题里写 motion 或 gags 会被当作未知字段忽略。要恢复，先恢复消费者。
 // ------------------------------------------------------------
-const MAX_MOTION_RULES = 12;
-const MOTION_TYPES = new Set(["rotate", "scale", "translate", "blink"]);
-const PART_RE = /^[a-z0-9][a-z0-9-]{0,23}$/;
-
-function finiteOr(v, lo, hi) {
-  return Number.isFinite(v) ? clamp(v, lo, hi) : null;
-}
-
-function pairOr(v, lo, hi) {
-  if (!Array.isArray(v) || v.length !== 2) return null;
-  const a = finiteOr(v[0], lo, hi);
-  const b = finiteOr(v[1], lo, hi);
-  return a === null || b === null ? null : [a, b];
-}
-
-function normalizeMotion(raw) {
-  if (!Array.isArray(raw)) return [];
-  const out = [];
-  for (const rule of raw.slice(0, MAX_MOTION_RULES)) {
-    if (!isPlainObject(rule)) continue;
-    if (typeof rule.part !== "string" || !PART_RE.test(rule.part)) continue;
-    if (!MOTION_TYPES.has(rule.type)) continue;
-
-    const base = {
-      part: rule.part,
-      type: rule.type,
-      period: finiteOr(rule.period, 200, 20000) ?? 3000,
-      phase: finiteOr(rule.phase, 0, 1) ?? 0,
-      pivot: pairOr(rule.pivot, 0, 200) ?? [100, 100],
-    };
-
-    if (rule.type === "blink") {
-      out.push({
-        ...base,
-        min: finiteOr(rule.min, 400, 60000) ?? 3000,
-        max: finiteOr(rule.max, 600, 90000) ?? 7000,
-      });
-      continue;
-    }
-    if (rule.type === "rotate") {
-      const from = finiteOr(rule.from, -180, 180);
-      const to = finiteOr(rule.to, -180, 180);
-      if (from === null || to === null) continue;
-      out.push({ ...base, from, to });
-      continue;
-    }
-    // scale 上限 3 是为了防止一个 scale(80) 把整幅图放大到撑爆窗口；
-    // translate 用 viewBox 尺度（200）的 40% 作为上限。
-    const lim = rule.type === "scale" ? [0.2, 3] : [-80, 80];
-    const from = pairOr(rule.from, lim[0], lim[1]);
-    const to = pairOr(rule.to, lim[0], lim[1]);
-    if (!from || !to) continue;
-    out.push({ ...base, from, to });
-  }
-  return out;
-}
-
-// 彩蛋（gags）：隔一阵干一件"一次性"的事（钓上鱼吃掉 / 钓上拖鞋扔掉）。
-// motion 是循环的，表达不了"偶尔来一次"，所以单开一层。
-//
-// 一条彩蛋 = 一组部件 + 一个排期区间 + 一串**步骤**。
-// 步骤和 motion 的差别就两处，但两处都很关键：
-//   1. 步骤是**一次性**的：在 [at, at+span] 里从 from 走到 to；
-//      还没到点的不参与，过了点的停在 to 上，直到被同一部件的下一段接走。
-//      motion 是 period/phase 的无限循环，写不出"先浮上来，停一下，再被吃掉"。
-//   2. 步骤按数组顺序应用，**同一部件多段时后一条覆盖前一条**。
-//      所以相邻两段的端点必须写成一样的值（a 的 to == b 的 from），否则会跳一下。
-// 校验思路和 motion 一致：名字走 PART_RE、时间与数量全部钳制、坏一条只丢一条。
-const MAX_GAGS = 4;
-const MAX_GAG_PARTS = 4;
-const MAX_GAG_STEPS = 8;
-const EASES = new Set(["out", "in", "inout"]);
-
-function normalizeGagSteps(raw, duration) {
-  if (!Array.isArray(raw)) return [];
-  const out = [];
-  for (const step of raw.slice(0, MAX_GAG_STEPS)) {
-    if (!isPlainObject(step)) continue;
-    if (typeof step.part !== "string" || !PART_RE.test(step.part)) continue;
-    if (!MOTION_TYPES.has(step.type) || step.type === "blink") continue;
-
-    const at = finiteOr(step.at, 0, duration) ?? 0;
-    // span 不能超出彩蛋本身：at + span > duration 的那一截演不到，提前夹住，
-    // 否则作者会以为"我写了 800ms 的抛出"，实际只播了 300ms。
-    const span = Math.min(finiteOr(step.span, 50, duration) ?? duration - at, duration - at) || 50;
-
-    const base = {
-      part: step.part,
-      type: step.type,
-      at,
-      span,
-      ease: EASES.has(step.ease) ? step.ease : "out",
-      pivot: pairOr(step.pivot, 0, 200) ?? [100, 100],
-    };
-
-    if (step.type === "rotate") {
-      const from = finiteOr(step.from, -180, 180);
-      const to = finiteOr(step.to, -180, 180);
-      if (from === null || to === null) continue;
-      out.push({ ...base, from, to });
-      continue;
-    }
-    const lim = step.type === "scale" ? [0.02, 3] : [-120, 120];
-    const from = pairOr(step.from, lim[0], lim[1]);
-    const to = pairOr(step.to, lim[0], lim[1]);
-    if (!from || !to) continue;
-    out.push({ ...base, from, to });
-  }
-  return out;
-}
-
-function normalizeGags(raw) {
-  if (!Array.isArray(raw)) return [];
-  const out = [];
-  for (const g of raw.slice(0, MAX_GAGS)) {
-    if (!isPlainObject(g)) continue;
-    if (typeof g.name !== "string" || !PART_RE.test(g.name)) continue;
-
-    const parts = Array.isArray(g.parts)
-      ? g.parts.filter((p) => typeof p === "string" && PART_RE.test(p)).slice(0, MAX_GAG_PARTS)
-      : [];
-    if (!parts.length) continue;
-
-    // every 是"多久来一次"的区间，取随机值。写反了就丢掉这条，
-    // 而不是自动 swap——作者笔误应该报出来，不该被悄悄纠正成另一种节奏。
-    const every = pairOr(g.every, 800, 120000) || [8000, 18000];
-    if (every[1] < every[0]) continue;
-
-    const duration = finiteOr(g.duration, 300, 10000) ?? 2500;
-    const steps = normalizeGagSteps(g.steps, duration);
-    if (!steps.length) continue;
-
-    out.push({ name: g.name, parts, every, duration, steps });
-  }
-  return out;
-}
 
 /**
  * 列出磁盘上真实存在的主题 id。**所有**对外接口都以这个结果为准，
@@ -287,6 +161,72 @@ function readAsset(id, name, budget) {
  *
  * 失败一律**整体拒绝**，不返回半个主题。
  */
+/**
+ * 归一化 timings（状态时长）。
+ *
+ * 三条约定，都是为了避免"写对了却什么都不发生"：
+ *   1. 主题**没写**就返回 null —— 默认值的真相只有一份，在 state.js 里。
+ *      这里再写一套默认，两边迟早分叉，而且分叉是静默的。
+ *   2. 只认 ONESHOT_STATES 那三个；写了别的（或在 oneshot 里塞 working）
+ *      一律**报进 warnings**，理由和 unknownStates 一样：静默丢弃的东西
+ *      作者永远不会发现。
+ *   3. 超出边界就钳，并且把"被钳了"说出来。
+ *
+ * @returns {{timings: object|null, warnings: string[], error?: string}}
+ */
+function normalizeTimings(raw) {
+  if (raw === undefined) return { timings: null, warnings: [] };
+  if (!isPlainObject(raw)) return { timings: null, warnings: [], error: "timings 必须是对象" };
+
+  const warnings = [];
+
+  let oneshotRaw = {};
+  if (raw.oneshot !== undefined) {
+    if (!isPlainObject(raw.oneshot)) return { timings: null, warnings, error: "timings.oneshot 必须是对象" };
+    oneshotRaw = raw.oneshot;
+  }
+
+  const oneshot = {};
+  for (const name of ONESHOT_STATES) {
+    const v = oneshotRaw[name];
+    if (v === undefined) continue;
+    if (!Number.isFinite(v)) {
+      warnings.push(`timings.oneshot.${name} 不是数字，已忽略`);
+      continue;
+    }
+    const ms = clamp(Math.round(v), MIN_ONESHOT_MS, MAX_ONESHOT_MS);
+    if (ms !== v) {
+      warnings.push(`timings.oneshot.${name} 被钳到 ${ms}ms（允许 ${MIN_ONESHOT_MS}~${MAX_ONESHOT_MS}）`);
+    }
+    oneshot[name] = ms;
+  }
+
+  // 主题写了状态机不认的 oneshot 键：它永远不会生效，必须说出来。
+  const unknownOneshot = Object.keys(oneshotRaw).filter((n) => !ONESHOT_STATES.includes(n));
+  if (unknownOneshot.length) {
+    warnings.push(`timings.oneshot 里有状态机不认识的状态（永不会生效）：${unknownOneshot.join(", ")}`);
+  }
+
+  let sleepAfterMs;
+  if (raw.sleepAfterMs !== undefined) {
+    if (!Number.isFinite(raw.sleepAfterMs)) {
+      warnings.push("timings.sleepAfterMs 不是数字，已忽略");
+    } else {
+      sleepAfterMs = clamp(Math.round(raw.sleepAfterMs), MIN_SLEEP_AFTER_MS, MAX_SLEEP_AFTER_MS);
+      if (sleepAfterMs !== raw.sleepAfterMs) {
+        warnings.push(`timings.sleepAfterMs 被钳到 ${sleepAfterMs}ms（允许 ${MIN_SLEEP_AFTER_MS}~${MAX_SLEEP_AFTER_MS}）`);
+      }
+    }
+  }
+
+  const unknownKeys = Object.keys(raw).filter((k) => k !== "oneshot" && k !== "sleepAfterMs");
+  if (unknownKeys.length) {
+    warnings.push(`timings 里有不认识的字段（已忽略）：${unknownKeys.join(", ")}`);
+  }
+
+  return { timings: { oneshot, sleepAfterMs }, warnings };
+}
+
 function loadTheme(id) {
   if (typeof id !== "string" || !ID_RE.test(id)) {
     return { ok: false, id: String(id), error: "主题 id 不合法" };
@@ -341,8 +281,6 @@ function loadTheme(id) {
       // 只有明确写 true 才开眼球追踪。默认关：
       // 开了但那一帧没有 <g class="pupils">，渲染层会拿到 null，属于"静默失效"。
       eyeTracking: def.eyeTracking === true,
-      motion: normalizeMotion(def.motion),
-      gags: normalizeGags(def.gags),
       frames,
     };
   }
@@ -353,15 +291,37 @@ function loadTheme(id) {
     if (!states[name]) states[name] = { ...states.idle, eyeTracking: false };
   }
 
+  // 主题里写了但状态机不认识的状态名：**报出来，别静默丢**。
+  // 这条是被踩出来的——有人给布偶猫写了 walking，加载一切正常、运行也对，
+  // 只是那 4 帧永远不可能被播到。静默丢弃的东西，作者永远不会发现。
+  const unknownStates = Object.keys(meta.states).filter((n) => !STATE_NAMES.includes(n));
+  const warnings = unknownStates.length
+    ? [`不认识的状态名（状态机没有，永不会触发）：${unknownStates.join(", ")}`]
+    : [];
+
+  // timings 类型写错直接拒绝，不静默回落：作者写了 `"timings": 5000` 期望它生效，
+  // 悄悄忽略的话他只会看到"没生效"，不知道是自己写错了。
+  const t = normalizeTimings(meta.timings);
+  if (t.error) return { ok: false, id, error: t.error };
+  warnings.push(...t.warnings);
+
   return {
     ok: true,
+    warnings,
     theme: {
       id,
       name: typeof meta.name === "string" ? meta.name.slice(0, 80) : id,
       author: typeof meta.author === "string" ? meta.author.slice(0, 80) : "",
       version: typeof meta.version === "string" ? meta.version.slice(0, 32) : "",
       description: typeof meta.description === "string" ? meta.description.slice(0, 300) : "",
+      // rigType 是主题自报的"我需要哪套渲染器"。透传出去，
+      // 渲染层才不用靠 id/name 字符串猜（原来只有 id==="ragdoll" 兜底，
+      // 意味着任何叫 ragdoll 的主题都会掉进同一个分支）。
+      rigType: typeof meta.rigType === "string" ? meta.rigType.slice(0, 40) : "",
       states,
+      // 主题没写 timings 就是 null，state.js 用自己那份默认值。
+      // 默认值的真相只有一份，不要在两边各写一套。
+      timings: t.timings,
     },
   };
 }

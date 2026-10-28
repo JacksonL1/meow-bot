@@ -299,7 +299,13 @@ function toggleDashboard() {
 }
 
 app.whenReady().then(() => {
-  const store = createStore({ onChange: broadcast });
+  // 状态时长来自**当前主题**，但此刻主题还没解析（下面第 331 行才定）。
+  // 所以传的是 getter 而不是值：store 每次判断时长都重新问一次，
+  // 换主题后新时长立刻生效，不用重建 store。
+  const store = createStore({
+    onChange: broadcast,
+    getTimings: () => (currentTheme && currentTheme.timings) || null,
+  });
 
   // ---- S5：权限裁决台 ----
   // onRequest 只管"显示"；回写全部收敛在 permission.js 的 settle() 里，

@@ -338,23 +338,38 @@ async function main() {
     );
     ok("主题帧数与 theme.json 一致", totalFrames === wantFrames, `实际=${totalFrames} 期望=${wantFrames}`);
 
-    // motion 声明的部件必须真的存在于那一帧里。写错一个 part 名的后果是
-    // "这条动画静默不生效"，画面上完全看不出来——所以要在结构上先卡住。
-    const missingParts = await R.eval(`(() => {
-      const bad = [];
-      const sec = window.VISUAL_STATES;
-      for (const [name, def] of Object.entries(sec)) {
-        if (!def.motion || !def.motion.length) continue;
-        const host = document.createElement('div');
-        host.innerHTML = def.frames[0];
-        const svg = host.querySelector('svg');
-        for (const rule of def.motion) {
-          if (!svg.querySelector('.m-' + rule.part)) bad.push(name + ':' + rule.part);
-        }
-      }
-      return bad.join(',');
-    })()`);
-    ok("motion 声明的部件在 SVG 里都存在", missingParts === "", `缺失：${missingParts}`);
+    // petDebug.timings() 必须返回**真的东西**（硬约束 23：有出口没货的窗口
+    // 会一直沉默）。ragdoll 写了 timings，所以这里不能是 null / {}。
+    const dbgTimings = await R.eval("window.petDebug.timings()");
+    ok(
+      "petDebug.timings() 返回当前主题的真时长（不是空对象）",
+      !!dbgTimings && dbgTimings.oneshot && dbgTimings.oneshot.attention === 800,
+      `timings=${JSON.stringify(dbgTimings)}`
+    );
+
+    // 这里原本还有两条「motion / gags 声明的部件在 SVG 里都存在」。
+    // 两个字段的消费者都没了（引擎随骨骼重写删、彩蛋随 working 改敲键盘删），
+    // 断言读到的 def.motion 永远是 undefined -> 循环一次都不进 -> **永远为真**。
+    // 永远为真的断言比没有更糟：它在报告里长得像一道防线。
+
+    // 硬约束 19 的机械检查：src/ 下的源码里不许出现 innerHTML。
+    // 这条以前只写在台账里没人查——而渲染层真的有一处 `innerHTML = createRigged…()`，
+    // 就这么一直待到今天。规则不落到断言上，等于没有。
+    const innerHtmlHits = [];
+    for (const f of fs.readdirSync(path.join(ROOT, "src"))) {
+      if (!/\.(js|html)$/.test(f)) continue;
+      const lines = fs.readFileSync(path.join(ROOT, "src", f), "utf8").split("\n");
+      lines.forEach((line, i) => {
+        const t = line.trim();
+        if (t.startsWith("//") || t.startsWith("*") || t.startsWith("/*")) return; // 注释里提到不算
+        if (line.includes("innerHTML")) innerHtmlHits.push(`${f}:${i + 1}`);
+      });
+    }
+    ok(
+      "src/ 下源码里 innerHTML 出现 0 次（硬约束 19）",
+      innerHtmlHits.length === 0,
+      innerHtmlHits.join(", ") || "0 处"
+    );
 
     // ---------- 2. 渲染进程隔离（SEC-06） ----------
     ok("contextIsolation 生效：渲染层拿不到 require", (await R.eval("typeof window.require")) === "undefined");
@@ -413,100 +428,182 @@ async function main() {
     const beforeBuilds = await R.eval("window.petDebug.builds()");
     await R.eval("window.petDebug.setState('working')");
 
-    // 轮询等它落定，而不是立刻读一次——交叉淡入本身有 160ms 过渡，
+    // 两条渲染路径要分开断言。
+    // 「骨骼弹簧」不换帧、不切图层——状态切换靠弹簧过冲，DOM 一次都不重建；
+    // 「帧序列」靠交叉淡入 + 逐帧替换。拿帧的尺子量骨骼，只会得到一片红。
+    const rigMode = (await R.eval("window.petDebug.theme().rig")) === "spring";
+
+    // 轮询等它落定，而不是立刻读一次——交叉淡入本身有过渡，
     // 单点采样会把"正在换"读成"没换"。
     let nowState = null;
     let afterLayer = beforeLayer;
     for (let i = 0; i < 20; i++) {
       nowState = await R.eval("window.petDebug.state()");
       afterLayer = await R.eval("document.querySelector('.layer.show')?.id");
-      if (nowState === "working" && afterLayer && afterLayer !== beforeLayer) break;
+      if (nowState === "working" && afterLayer) break;
       await sleep(50);
     }
     ok("setState 生效", nowState === "working", `state=${nowState}`);
-    ok("换状态时切换图层（交叉淡入的前提）", beforeLayer !== afterLayer, `${beforeLayer} → ${afterLayer}`);
 
-    // 换一次状态只该重建一次。多了就说明有东西在重复触发——
-    // 画面看不出区别（结果一样），但它是竞态的信号，而这轮真撞上过。
+    if (rigMode) {
+      ok("骨骼渲染不切图层（切换靠弹簧过冲，不靠交叉淡入）", afterLayer === "layerA", `after=${afterLayer}`);
+    } else {
+      ok("换状态时切换图层（交叉淡入的前提）", beforeLayer !== afterLayer, `${beforeLayer} → ${afterLayer}`);
+    }
+
+    // 换一次状态只该重建一次。骨骼渲染则**一次都不重建**：只改弹簧目标，
+    // DOM 从建好那一刻起就不再动——这也是它根本没有"交换动画"的原因。
     const afterBuilds = await R.eval("window.petDebug.builds()");
-    ok("换一次状态只重建一次", afterBuilds - beforeBuilds === 1, `重建 ${afterBuilds - beforeBuilds} 次`);
-    if (afterBuilds - beforeBuilds !== 1) {
-      // 失败时把推送时间线打出来，否则只能猜"是谁把状态推回去了"
+    const buildDelta = afterBuilds - beforeBuilds;
+    ok(
+      rigMode ? "骨骼渲染切状态不重建 DOM（只改弹簧目标）" : "换一次状态只重建一次",
+      rigMode ? buildDelta === 0 : buildDelta === 1,
+      `重建 ${buildDelta} 次`
+    );
+    if (!rigMode && buildDelta !== 1) {
       console.log("      [dbg] 状态推送记录：", JSON.stringify(await R.eval("window.petDebug.stateLog()")));
     }
-    // 旧层的清空挂在 220ms 的 setTimeout 上（等淡出结束），所以要轮询等它，不能立刻断言
-    let cleared = false;
-    for (let i = 0; i < 20; i++) {
-      cleared = (await R.eval(`document.getElementById('${beforeLayer}').childElementCount`)) === 0;
-      if (cleared) break;
+
+    if (rigMode) {
+      const layerBKids = await R.eval("document.getElementById('layerB').childElementCount");
+      ok("骨骼渲染只有一个图层在画（layerB 始终为空）", layerBKids === 0, `layerB 子节点=${layerBKids}`);
+    } else {
+      // 旧层的清空挂在 220ms 的 setTimeout 上（等淡出结束），要轮询等它
+      let cleared = false;
+      for (let i = 0; i < 20; i++) {
+        cleared = (await R.eval(`document.getElementById('${beforeLayer}').childElementCount`)) === 0;
+        if (cleared) break;
+        await sleep(100);
+      }
+      ok("旧图层在淡出后被清空", cleared);
+    }
+
+    // 动画在不在跑。这是"活猫感"的唯一可测证据：静态截图看不出区别，
+    // 只有连续采样才能证明帧循环真的在算。
+    //
+    // 两条路径看的地方不一样，而且这里有个真实的坑：
+    // **弹簧收敛之后读数就不变了**——拿 `petDebug.springs()` 当探针，
+    // 稳态（working）下 12 次快照会一模一样，于是"明明在呼吸"却被判成"没在动"。
+    // 真正的"每帧都在算"是呼吸：它是每帧由正弦直接推导、写进 transform 的，
+    // 不经过弹簧。所以骨骼路径要读的是每帧推导出来的 transform。
+    const probeExpr = rigMode
+      ? `(() => {
+           const ids = ['rig-body-group', 'rig-ruff', 'rig-head-group', 'rig-tail-main'];
+           return ids.map((id) => {
+             const el = document.getElementById(id);
+             if (!el) return 'missing:' + id;
+             return el.style.transform + ' / ' + el.getAttribute('d');
+           }).join('|');
+         })()`
+      : "JSON.stringify(window.petDebug.motion())";
+    const snaps = [];
+    for (let i = 0; i < 12; i++) {
+      snaps.push(String(await R.eval(probeExpr)));
       await sleep(100);
     }
-    ok("旧图层在淡出后被清空", cleared);
+    const animMoves = new Set(snaps).size;
+    ok(
+      rigMode ? "每帧都在重算（同一状态下 transform 持续变化）" : "部件动画在跑（同一状态下 transform 持续变化）",
+      animMoves >= 6,
+      `不同快照 ${animMoves}/12`
+    );
 
-    // 部件动画在不在动。这是"活猫感"的唯一可测证据：
-    // 静态截图看不出区别，只有连续采样 transform 才能证明插值在跑。
-    // 采样窗口 1.2s，覆盖最短周期（error 的抖动 160ms）和常规呼吸（3.4s 的一小段）。
-    const motionMoves = await R.eval(`(async () => {
-      const snaps = [];
-      for (let i = 0; i < 12; i++) {
-        snaps.push(JSON.stringify(window.petDebug.motion()));
-        await new Promise(r => setTimeout(r, 100));
-      }
-      return new Set(snaps).size;
-    })()`);
-    ok("部件动画在跑（同一状态下 transform 持续变化）", motionMoves >= 4, `不同快照 ${motionMoves}/12`);
+    // 弹簧本身要有货：这是"这身皮是二阶弹簧驱动"的结构证据。
+    if (rigMode) {
+      const springs = JSON.parse((await R.eval("JSON.stringify(window.petDebug.springs())")) || "{}");
+      const keys = Object.keys(springs);
+      ok(
+        "弹簧通道都建起来了（≥20 个且都是有限数）",
+        keys.length >= 20 && keys.every((k) => Number.isFinite(springs[k])),
+        `通道 ${keys.length} 个`
+      );
+    }
 
-    // 眨眼：眼睛部件会被压成 scale(1, <1)，而且是"闭上再睁开"，不是一直眯着。
-    // 间隔是随机 1.8~4.2s（thinking），所以采样窗口要盖过最大间隔。
-    // 注意：采样必须从 **Node 侧**逐次读，不能写成页面里的长循环——
-    // CDP 的 send() 有 5 秒超时，一次 5 秒以上的 eval 会静默返回 undefined。
+    // 眨眼。骨骼渲染的做法是"把睁眼层藏起来"，帧序列是"把眼睛压扁"。
+    // 间隔随机 1.8~4.2s（thinking），采样窗口要盖过最大间隔。
+    // **必须从 Node 侧逐次读**：CDP 的 send() 有 5 秒超时，页面里的长循环会静默返回 undefined。
     await R.eval("window.petDebug.setState('thinking')");
     await sleep(120);
     let blinkMin = 1;
+    let blinkSeen = false;
     for (let i = 0; i < 100; i++) {
-      const t = await R.eval("window.petDebug.motion().eyes || ''");
-      const m = /scale\(1 ([\d.]+)\)/.exec(t || "");
-      if (m) blinkMin = Math.min(blinkMin, Number(m[1]));
-      if (blinkMin < 0.5) break;
+      if (rigMode) {
+        const v = await R.eval("document.getElementById('rig-eyes-open')?.getAttribute('opacity')");
+        if (v === "0") { blinkSeen = true; break; }
+      } else {
+        const t = await R.eval("window.petDebug.motion().eyes || ''");
+        const m = /scale\(1 ([\d.]+)\)/.exec(t || "");
+        if (m) blinkMin = Math.min(blinkMin, Number(m[1]));
+        if (blinkMin < 0.5) break;
+      }
       await sleep(50);
     }
-    ok("会眨眼（眼睛被压扁过一次以上）", blinkMin < 0.5, `最小纵向比例 ${blinkMin}`);
-
-    // ---------- 3.5 彩蛋（gags）与 eyeTracking ----------
-    // 彩蛋是"隔一阵干一件一次性的事"（钓上鱼吃掉 / 钓上拖鞋扔掉）。
-    // 要能测的有四件事：声明得到、部件画了、放得出来、收得回去。
-    // 排期是随机 7~14 秒，回归等不起，所以用 petDebug.gag() 跳过排期——
-    // 播放走的还是同一条 runGag，测的仍然是真代码，只是不掷骰子。
-    await R.eval("window.petDebug.setState('working')");
-    await sleep(250);
-
-    const gagNames = JSON.parse((await R.eval("JSON.stringify(window.petDebug.gagNames())")) || "[]");
     ok(
-      "working 声明了两条彩蛋（fish / slipper）",
-      gagNames.includes("fish") && gagNames.includes("slipper"),
-      `gagNames=${JSON.stringify(gagNames)}`
+      rigMode ? "会眨眼（睁眼层被藏起来过一次以上）" : "会眨眼（眼睛被压扁过一次以上）",
+      rigMode ? blinkSeen : blinkMin < 0.5,
+      rigMode ? `seen=${blinkSeen}` : `最小纵向比例 ${blinkMin}`
     );
 
-    // 部件名写错在画面上表现为"这条彩蛋永远不出现"，静默且极难联想，所以先在结构上卡住。
-    const gagPartMissing = await R.eval(`(() => {
-      const bad = [];
-      for (const [name, def] of Object.entries(window.VISUAL_STATES)) {
-        if (!def.gags || !def.gags.length) continue;
-        const host = document.createElement('div');
-        host.innerHTML = def.frames[0];
-        const svg = host.querySelector('svg');
-        for (const g of def.gags) {
-          for (const step of g.steps) {
-            if (!svg.querySelector('.m-' + step.part)) bad.push(name + ':' + g.name + ':' + step.part);
-          }
-        }
-      }
-      return bad.join(',');
-    })()`);
-    ok("gags 的部件在 SVG 里都存在", gagPartMissing === "", `缺失：${gagPartMissing}`);
+    // ---------- 3.5 working 场景（敲键盘）与 eyeTracking ----------
+    // working 曾经是水边垂钓，还带鱼 / 拖鞋两条彩蛋；用户改回敲键盘后，
+    // 彩蛋连同部件和引擎一起删干净了（留着"暂时不排期"的版本等于留死路径）。
+    // 所以这里测的是桌面场景本身。
+    //
+    // 三样一起才读得出「在干活」：前爪在敲、代码行在长、键盘灯在呼吸。
+    // **只测爪子上下动是不够的**——那样它和「在抖」没法区分。
+    if (rigMode) {
+      await R.eval("window.petDebug.setState('working')");
+      await sleep(250);
 
-    // eyeTracking 以前是"写了不生效"的字段：主题声明了 false，渲染层照样写瞳孔 transform。
-    // 现在它真的管住 applyGaze。测两件事：开关值传到了渲染层、以及瞳孔确实不动。
+      const deskMissing = await R.eval(`(() => {
+        const miss = [];
+        for (const id of ['rig-work-desk', 'rig-monitor', 'rig-keyboard',
+                          'rig-code-1', 'rig-code-caret', 'rig-kb-glow']) {
+          if (!document.getElementById(id)) miss.push(id);
+        }
+        return miss.join(',');
+      })()`);
+      ok("敲键盘的部件在 SVG 里都存在", deskMissing === "", `缺失：${deskMissing}`);
+
+      ok(
+        "working 才亮出桌面",
+        (await R.eval("document.getElementById('rig-work-desk')?.getAttribute('opacity')")) === "1"
+      );
+      await R.eval("window.petDebug.setState('idle')");
+      await sleep(220);
+      ok(
+        "切走 working 桌面收起来（不会叠在别的状态上）",
+        (await R.eval("document.getElementById('rig-work-desk')?.getAttribute('opacity')")) === "0"
+      );
+      await R.eval("window.petDebug.setState('working')");
+      await sleep(250);
+
+      // 两只前爪交替敲：一只在上的时候另一只在下，同频会像做操
+      const pawSnaps = [];
+      for (let i = 0; i < 8; i++) {
+        pawSnaps.push(
+          await R.eval(
+            "document.getElementById('rig-paw-fl')?.style.transform + '|' + document.getElementById('rig-paw-fr')?.style.transform"
+          )
+        );
+        await sleep(90);
+      }
+      const uniqPaws = new Set(pawSnaps).size;
+      ok("两只前爪在交替敲（transform 持续变化）", uniqPaws >= 5, `不同快照 ${uniqPaws}/8`);
+
+      // 代码行在长 + 键盘灯在呼吸
+      const deskSnaps = [];
+      for (let i = 0; i < 8; i++) {
+        deskSnaps.push(await R.eval("JSON.stringify(window.petDebug.desk())"));
+        await sleep(120);
+      }
+      const uniqDesk = new Set(deskSnaps).size;
+      ok("代码行在长、键盘灯在呼吸", uniqDesk >= 5, `不同快照 ${uniqDesk}/8`);
+    }
+
+    // eyeTracking 曾经是"写了不生效"的字段：主题声明 false，渲染层照样写瞳孔。
+    // 现在它真的管住 applyGaze（两条渲染路径都管）。测两件事：开关值传到了渲染层、
+    // 以及瞳孔确实不跟着跑——后者才是"生效"的证据，前者只是"数值到了"。
     ok("working 的 eyeTracking 为 false", (await R.eval("window.petDebug.eyeTracking()")) === false);
     await R.eval("window.petDebug.setState('idle')");
     await sleep(150);
@@ -515,90 +612,72 @@ async function main() {
     await sleep(200);
 
     await R.eval("window.petDebug.gaze({x:1,y:1}, true)");
-    await sleep(420);
+    await sleep(600);
     const workPupils = await R.eval(
-      "document.querySelector('.layer.show svg.on .pupils')?.getAttribute('transform') ?? null"
+      "(() => { const p = document.querySelector('.layer.show svg.on .pupils'); return p ? (p.style.transform || p.getAttribute('transform')) : null; })()"
     );
-    ok("working 下瞳孔不跟鼠标（疲惫的猫不追光标）", workPupils === null || workPupils === "translate(0.00 0.00)", `transform=${workPupils}`);
+    const wp = (String(workPupils || "").match(/-?\d+(?:\.\d+)?/g) || []).map(Number);
+    // 骨骼渲染里 working 的瞳孔钉在左下角的屏幕上（-2.2 / 1.6），不跟鼠标。
+    // 判据走数值：style.transform 经 CSSOM 会把尾零吃掉（-2.20px 读成 -2.2px）。
+    ok(
+      "working 下瞳孔不跟鼠标（盯着屏幕，不追光标）",
+      rigMode
+        ? wp.length >= 2 && Math.abs(wp[0] + 2.2) < 0.06 && Math.abs(wp[1] - 1.6) < 0.06
+        : !workPupils || /translate\(-?0(\.00)?[, ]+\s*-?0(\.00)?\)/.test(workPupils),
+      `transform=${workPupils}`
+    );
     await R.eval("window.petDebug.unpinGaze()");
-
-    // 放出来 + 真的在动
-    await R.eval("window.petDebug.setState('working')");
-    await sleep(200);
-    await R.eval("window.petDebug.gag('fish')");
-    await sleep(120);
-    const gagA = JSON.parse((await R.eval("JSON.stringify(window.petDebug.gagState())")) || "{}");
-    await sleep(380);
-    const gagB = JSON.parse((await R.eval("JSON.stringify(window.petDebug.gagState())")) || "{}");
-    ok(
-      "彩蛋把藏着的部件放出来了（display 不再是 none）",
-      !!(gagA.fish && gagA.fish.display !== "none"),
-      `fish.display=${gagA.fish && gagA.fish.display}`
-    );
-    ok(
-      "彩蛋在动（同一部件的 transform 在变）",
-      !!(gagA.fish && gagB.fish && gagA.fish.transform !== gagB.fish.transform),
-      `${gagA.fish && gagA.fish.transform} → ${gagB.fish && gagB.fish.transform}`
-    );
-
-    // 收回去。这里同时守住一个真实踩过的坑：收尾不能一律 display:none，
-    // 瞳孔是"本来露着、被拉进彩蛋跟着看一眼"的部件，一律隐藏会把猫的眼睛抹掉。
-    let gagDone = false;
-    for (let i = 0; i < 40; i++) {
-      const st = JSON.parse(
-        (await R.eval(`JSON.stringify({
-          fish: document.querySelector('.layer.show svg.on .m-fish')?.getAttribute('display') ?? null,
-        })`)) || "{}"
-      );
-      if (st.fish === "none") {
-        gagDone = true;
-        break;
-      }
-      await sleep(150);
-    }
-    const restored = JSON.parse(
-      (await R.eval(`JSON.stringify({
-        pupilsDisplay: document.querySelector('.layer.show svg.on .pupils')?.getAttribute('display') ?? null,
-        pupilsTransform: document.querySelector('.layer.show svg.on .pupils')?.getAttribute('transform') ?? null,
-      })`)) || "{}"
-    );
-    ok("彩蛋演完把鱼收回（display 回到 none）", gagDone);
-    ok(
-      "彩蛋结束后瞳孔恢复原状（没被当成一次性部件一起藏掉）",
-      restored.pupilsDisplay === null && restored.pupilsTransform === null,
-      `display=${restored.pupilsDisplay} transform=${restored.pupilsTransform}`
-    );
 
     // ---------- 4. 眼球追踪 ----------
     // 结构前提：渲染层用 querySelector(".pupils") 拿第一个就驱动，
     // 所以**每帧最多只能有一个 .pupils 组**。左右眼各包一个组的话，
     // 只有一只眼会动，另一只永远定住——画上去看着正常，动起来才发现。
-    const multiPupils = await R.eval(`(() => {
-      const V = window.VISUAL_STATES;
-      const bad = [];
-      for (const s of Object.keys(V)) {
-        V[s].frames.forEach((f, i) => {
-          const n = (f.match(/class="pupils"/g) || []).length;
-          if (n > 1) bad.push(s + '#' + i + ':' + n);
-        });
-      }
-      return bad.join(',');
-    })()`);
-    ok("每帧最多一个 .pupils 组（否则只有一只眼会动）", multiPupils === "", `违规帧：${multiPupils}`);
+    const multiPupils = rigMode
+      ? String(await R.eval("document.querySelectorAll('.layer.show svg.on .pupils').length"))
+      : await R.eval(`(() => {
+          const V = window.VISUAL_STATES;
+          const bad = [];
+          for (const s of Object.keys(V)) {
+            V[s].frames.forEach((f, i) => {
+              const n = (f.match(/class="pupils"/g) || []).length;
+              if (n > 1) bad.push(s + '#' + i + ':' + n);
+            });
+          }
+          return bad.join(',');
+        })()`);
+    ok(
+      "每帧最多一个 .pupils 组（否则只有一只眼会动）",
+      rigMode ? multiPupils === "1" : multiPupils === "",
+      rigMode ? `pupils 组=${multiPupils}` : `违规帧：${multiPupils}`
+    );
 
     await R.eval("window.petDebug.setState('idle')");
     await sleep(200);
     // 第二个参数 pin=true：钉住，别让主进程按真实光标推的 gaze 把它盖掉。
-    // 这条断言测的是"渲染层会不会把给定坐标插值到瞳孔上"，不是"主进程算得准不准"，
+    // 这条测的是"渲染层会不会把给定坐标插值到瞳孔上"，不是"主进程算得准不准"，
     // 两者混在一起就会随机失败（实测读到过 translate(-0.98 0.81)，那是光标位置）。
     await R.eval("window.petDebug.gaze({x:1,y:-1}, true)");
+    // 判据是数值不是字符串：style.transform 经 CSSOM 序列化会把尾零吃掉
+    // （写进去的是 3.80px，读出来是 3.8px），按精确字符串比会稳定地假红。
+    const wantGaze = rigMode ? [3.8, -2.8] : [3.6, -2.6];
     let transform = null;
+    let gazeFull = false;
     for (let i = 0; i < 30; i++) {
-      transform = await R.eval("document.querySelector('.layer.show svg.on .pupils')?.getAttribute('transform') || null");
-      if (transform === "translate(3.60 -2.60)") break;
+      transform = await R.eval(
+        "(() => { const p = document.querySelector('.layer.show svg.on .pupils'); return p ? (p.style.transform || p.getAttribute('transform')) : null; })()"
+      );
+      const n = (String(transform || "").match(/-?\d+(?:\.\d+)?/g) || []).map(Number);
+      if (n.length >= 2 && Math.abs(n[0] - wantGaze[0]) < 0.06 && Math.abs(n[1] - wantGaze[1]) < 0.06) {
+        gazeFull = true;
+        break;
+      }
       await sleep(100);
     }
-    ok("gaze 收敛到满幅位移", transform === "translate(3.60 -2.60)", `transform=${transform}`);
+    ok(
+      "gaze 收敛到满幅位移",
+      gazeFull,
+      `transform=${transform} 期望≈translate(${wantGaze[0]}, ${wantGaze[1]})`
+    );
 
     // 两只眼必须一起动：pupils 组里瞳孔的数量要够（眼睛画法变了也不会漏）
     const pupilCount = await R.eval(
@@ -609,9 +688,15 @@ async function main() {
     // 回中
     await R.eval("window.petDebug.gaze({x:0,y:0}, true)");
     await sleep(900);
+    const wantCenter = rigMode ? "translate(0.00px, 2.20px)" : "translate(0.00 0.00)";
+    // 骨骼渲染里 idle 的瞳孔会回到呼吸带来的零点附近，容差放宽到 ±0.4
+    const centered = await R.eval(
+      "(() => { const p = document.querySelector('.layer.show svg.on .pupils'); const t = p ? (p.style.transform || p.getAttribute('transform')) : ''; return t; })()"
+    );
     ok(
       "gaze 能回中",
-      (await R.eval("document.querySelector('.layer.show svg.on .pupils')?.getAttribute('transform')")) === "translate(0.00 0.00)"
+      rigMode ? /translate\(0(\.00)?(px)?[, ]/.test(centered) : centered === wantCenter,
+      `transform=${centered} 期望≈${wantCenter}`
     );
     // 放开钉子，后面的断言要看到真实光标驱动的行为
     await R.eval("window.petDebug.unpinGaze()");
@@ -1230,6 +1315,74 @@ async function main() {
       ok("兜底画面也是 7 个状态齐全", Object.keys(fb.theme.states).length === 7);
       ok("兜底原因会被带出来（不是静默失败）", typeof fb.error === "string" && fb.error.length > 0);
 
+      if (savedDir === undefined) delete process.env.CLAWD_THEMES_DIR;
+      else process.env.CLAWD_THEMES_DIR = savedDir;
+      delete require.cache[require.resolve("../src/theme")];
+
+      // ---------- 7.x timings：主题可以改状态时长 ----------
+      // 只断言"字段被解析出来了"是不够的：那正是硬约束 25 要防的——
+      // 写对了、校验过了、加载成功了、什么都不发生。所以这里**驱动真的状态机**，
+      // 看主题的值有没有真的改变行为，并且每次都带一个"不写会怎样"的对照组
+      // （只测"变短了"是可疑的，可能它本来就短）。
+      const T3 = require("../src/theme");
+      const S = require("../src/state");
+
+      // 建一个真 store → 打一个事件 → 等 → 读 visual → 收掉定时器
+      async function drive(getTimings, event, waitMs) {
+        const st = S.createStore({ onChange: () => {}, getTimings });
+        st.apply({ session_id: "timing-probe", event });
+        await sleep(waitMs);
+        st.tick();
+        const v = st.snapshot().visual;
+        st.dispose();
+        return v;
+      }
+
+      const SHORT = { oneshot: { attention: 60 }, sleepAfterMs: 60 };
+
+      const vShort = await drive(() => SHORT, "Stop", 220);
+      ok("主题写的 oneshot 时长真的生效（60ms 就退回）", vShort === "idle", `visual=${vShort}`);
+      const vNone = await drive(() => null, "Stop", 220);
+      ok("对照组：没写就用内置 2400ms（220ms 时仍在 attention）", vNone === "attention", `visual=${vNone}`);
+
+      const vSleep = await drive(() => SHORT, "PreToolUse", 220);
+      ok("主题写的 sleepAfterMs 真的生效（60ms 就睡着）", vSleep === "sleeping", `visual=${vSleep}`);
+      const vNoSleep = await drive(() => null, "PreToolUse", 220);
+      ok("对照组：没写 sleepAfterMs 还是内置 60 秒（仍是 working）", vNoSleep === "working", `visual=${vNoSleep}`);
+
+      // 状态机的形状不能由主题改：给 working 写时长也不该把它变成 oneshot，
+      // 否则主题一改就是"working 播 2 秒就消失"，而且是静默的。
+      const vFake = await drive(() => ({ oneshot: { working: 60 } }), "PreToolUse", 220);
+      ok("主题不能凭空造 oneshot（给 working 写时长也还是 working）", vFake === "working", `visual=${vFake}`);
+
+      // 解析层：写了的能读出来、没写的如实返回 null（不替它编默认值）
+      const rag = T3.loadTheme("ragdoll");
+      const crb = T3.loadTheme("crab");
+      ok(
+        "ragdoll 声明的 timings 被读出来",
+        rag.ok && rag.theme.timings && rag.theme.timings.oneshot.attention === 800,
+        `timings=${JSON.stringify(rag.theme && rag.theme.timings)}`
+      );
+      ok("没写 timings 的主题读作 null（默认值只在 state.js 里有一份）", crb.ok && crb.theme.timings === null, `timings=${JSON.stringify(crb.theme && crb.theme.timings)}`);
+
+      // 在 oneshot 里塞一个状态机不认识的状态：作者会以为生效了，必须报出来。
+      fs.mkdirSync(themeFixture, { recursive: true });
+      const tf = path.join(themeFixture, "timings-warn");
+      fs.mkdirSync(path.join(tf, "assets"), { recursive: true });
+      fs.writeFileSync(path.join(tf, "assets", "idle-1.svg"), SVG);
+      fs.writeFileSync(
+        path.join(tf, "theme.json"),
+        JSON.stringify({ schemaVersion: 1, name: "tw", states: good.states, timings: { oneshot: { working: 60, sweeping: 60 } } })
+      );
+      process.env.CLAWD_THEMES_DIR = themeFixture;
+      delete require.cache[require.resolve("../src/theme")];
+      const T4 = require("../src/theme");
+      const tw = T4.loadTheme("timings-warn");
+      ok(
+        "oneshot 里塞非 oneshot 状态会被报出来（永不会生效）",
+        tw.ok && tw.warnings.some((w) => /不认识的状态/.test(w) && /working/.test(w)),
+        `warnings=${JSON.stringify(tw.warnings)}`
+      );
       if (savedDir === undefined) delete process.env.CLAWD_THEMES_DIR;
       else process.env.CLAWD_THEMES_DIR = savedDir;
       delete require.cache[require.resolve("../src/theme")];

@@ -44,14 +44,18 @@ const EVENT_STATE = {
   SessionEnd: null, // 特殊处理：移除会话
 };
 
-// 注意：IDLE_AFTER_MS 目前**没有被任何逻辑使用**。
-// 早期设想是"25 秒没动静就回 idle 发呆"，但接上会带来一个副作用：
-// 一次长工具调用（比如跑 40 秒的构建）期间没有任何事件，宠物会被误判成发呆。
-// 现在的实际行为是：working 会一直挂着，直到下一个事件到来、或 60 秒后直接睡着。
-// 要用它之前先想清楚"长工具调用"怎么区分，别直接把它塞进 tick()。
-const IDLE_AFTER_MS = 25_000;
+// 下面是**内置默认**，只有主题没写 timings 时才用。
+// 默认值的真相只放在这一处：theme.js 遇到没写 timings 的主题返回 null，
+// 而不是自己也存一份默认——两边各写一套，分叉是静默的。
 const SLEEP_AFTER_MS = 60_000; // 这么久没动静 → 睡着
 const TICK_MS = 250;
+
+// 曾经这里还有一个 IDLE_AFTER_MS = 25_000（25 秒没动静就回 idle 发呆），
+// **它从头到尾没有消费者**，连"配置项"都算不上，只是一段被注释掉的设想。
+// 它的设想本身有个没解决的问题：一次长工具调用（跑 40 秒的构建）期间
+// 没有任何事件，宠物会被误判成发呆。所以搬 timings 的时候没有顺手带上它——
+// 带上去就是一个"写对了也不会发生"的字段（硬约束 25）。
+// 真要做，先回答"长工具调用怎么和真的闲置区分"，再回来加消费者。
 
 // SEC-04：请求来自网络侧，任何字段都不能直接进内存结构。
 const MAX_SESSION_ID = 64;
@@ -100,11 +104,35 @@ function evictOldest(sessions) {
   if (oldestId !== null) sessions.delete(oldestId);
 }
 
-function createStore({ onChange } = {}) {
+function createStore({ onChange, getTimings } = {}) {
   /** @type {Map<string, {id:string,state:string,stateSince:number,lastAt:number,cwd?:string}>} */
   const sessions = new Map();
   let oneshot = null; // { state, until }
   let lastVisual = null;
+
+  // 主题时长是**运行时**才拿得到的（主进程里 store 先建、主题后解析），
+  // 所以这里存的是一个 getter 而不是一份拷进来的值。
+  function timings() {
+    const t = typeof getTimings === "function" ? getTimings() : null;
+    return t && typeof t === "object" ? t : null;
+  }
+
+  // oneshot 播放时长：主题可以改，但**只能改本来就属于 oneshot 的那三个**。
+  // 返回 undefined 就表示"这个状态不是 oneshot"——主题写了也不能凭空造一个，
+  // 否则 working 播 2 秒就消失，状态机的形状就被主题改掉了。
+  function oneshotMs(state) {
+    const base = ONESHOT[state];
+    if (base === undefined) return undefined;
+    const t = timings();
+    const v = t && t.oneshot && t.oneshot[state];
+    return Number.isFinite(v) ? v : base;
+  }
+
+  function sleepAfterMs() {
+    const t = timings();
+    const v = t && t.sleepAfterMs;
+    return Number.isFinite(v) ? v : SLEEP_AFTER_MS;
+  }
 
   function emit() {
     if (typeof onChange === "function") onChange(snapshot());
@@ -158,7 +186,8 @@ function createStore({ onChange } = {}) {
     if (target && target !== s.state) {
       s.state = target;
       s.stateSince = now;
-      if (ONESHOT[target]) oneshot = { state: target, until: now + ONESHOT[target] };
+      const ms = oneshotMs(target);
+      if (ms) oneshot = { state: target, until: now + ms };
     }
 
     tick();
@@ -174,13 +203,14 @@ function createStore({ onChange } = {}) {
       const sinceEvent = now - s.lastAt;
 
       // 1) oneshot 播完 → 回 idle（否则 attention 会永远挂在屏幕上）
-      if (ONESHOT[s.state] && sinceState > ONESHOT[s.state]) {
+      const ms = oneshotMs(s.state);
+      if (ms && sinceState > ms) {
         s.state = "idle";
         s.stateSince = now;
         continue;
       }
       // 2) 长时间没动静 → 睡着
-      if (s.state !== "sleeping" && sinceEvent > SLEEP_AFTER_MS) {
+      if (s.state !== "sleeping" && sinceEvent > sleepAfterMs()) {
         s.state = "sleeping";
         s.stateSince = now;
       }
