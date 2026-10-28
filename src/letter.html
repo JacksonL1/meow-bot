@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <!-- 和气泡窗口同一条 CSP：默认全禁，只开需要的。
+         信纸里只有文字，连 img 都没开 —— 用户写的内容不需要任何外部资源。 -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; form-action 'none'; connect-src 'none'"
+    />
+    <title>写一封信</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        /* 窗口透明，圆角由信纸自己画 */
+        background: transparent;
+        overflow: hidden;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        font-size: 13px;
+        color: #2f2e2b;
+      }
+      #paper {
+        background: #fffdf9;
+        border: 1px solid #ded8cc;
+        border-radius: 12px;
+        box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
+        padding: 12px 14px 10px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        height: 100%;
+        box-sizing: border-box;
+      }
+      .head {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+      }
+      .badge {
+        font-size: 11px;
+        color: #8a6d3b;
+        background: #fdf1d8;
+        border-radius: 5px;
+        padding: 2px 6px;
+        white-space: nowrap;
+      }
+      .title {
+        font-weight: 600;
+        font-size: 14px;
+      }
+      textarea {
+        flex: 1;
+        min-height: 0;
+        resize: none;
+        width: 100%;
+        box-sizing: border-box;
+        padding: 8px 10px;
+        border: 1px solid #ded8cc;
+        border-radius: 8px;
+        background: #fffefb;
+        font: inherit;
+        line-height: 1.55;
+        color: inherit;
+        /* 用户写的内容要能整段复制，所以 textarea 不能用 user-select:none */
+        user-select: text;
+        outline: none;
+      }
+      textarea:focus {
+        border-color: #b7c9a8;
+        background: #fff;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .count {
+        font-size: 11px;
+        color: #9a968c;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+      .count.over {
+        color: #b4553f;
+        font-weight: 600;
+      }
+      .spacer {
+        flex: 1;
+      }
+      button {
+        padding: 7px 12px;
+        border-radius: 8px;
+        border: 1px solid #cfc8b8;
+        background: #fff;
+        font: inherit;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #f6f2e9;
+      }
+      button.send {
+        border-color: #b7c9a8;
+        background: #f2f7ee;
+        font-weight: 600;
+      }
+      button:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+      .note {
+        font-size: 11px;
+        color: #9a968c;
+        line-height: 1.4;
+      }
+      /* 出错时用这一行替掉 note，不弹窗（弹窗会抢焦点，打断输入） */
+      .note.err {
+        color: #b4553f;
+        font-weight: 600;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="paper">
+      <div class="head">
+        <span class="title">写封信</span>
+        <span class="badge">原样转交 · 猫不回答</span>
+      </div>
+      <textarea id="text" placeholder="想让它知道的事，写在这里。猫不会回答你，只会把这封信原样带到 WorkBuddy。"></textarea>
+      <div class="row">
+        <span class="count" id="count">0 / 4000</span>
+        <span class="spacer"></span>
+        <button id="btnCancel">算了</button>
+        <button class="send" id="btnSend">寄出</button>
+      </div>
+      <div class="note" id="note">Ctrl+Enter 寄出 · Esc 算了。信会在你下次在 WorkBuddy 里说话时一起送到。</div>
+    </div>
+    <script src="./letter-renderer.js"></script>
+  </body>
+</html>

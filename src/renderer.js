@@ -15,11 +15,14 @@
  *    - error: 受惊后缩拱背 + 彻底压平飞机耳 + 瞳孔急剧收缩成细竖线 + 高频受惊颤抖 + 尾巴炸毛甩动
  *    - sleeping: 团身压扁成圆猫球 + 头部深埋枕在前爪上 + 温柔弯月闭眼 + 深慢睡眠呼吸与呼噜微震 + 动态飘升 zZz
  *    - walking: 四肢猫步相位交替迈步 + 躯干双倍频上下轻弹与重心摇摆 + 尾巴高翘平衡
- * 4. 保留对其他非骨骼主题 (如 crab 螃蟹) 的完整向后兼容。
+ * 4. 保留对其他非骨骼主题（没写 `rigType` 的第三方主题与内置兜底画面）的完整向后兼容。
  */
 
 const stage = document.getElementById("stage");
 const pet = document.getElementById("pet");
+const hint = document.getElementById("hint");
+const HINT_DEFAULT = hint ? hint.textContent : "";
+let hintTimer = null;
 const layers = [
   document.getElementById("layerA"),
   document.getElementById("layerB")
@@ -31,12 +34,18 @@ let currentState = "idle";
 let frameTimer = null;
 let frameIndex = 0;
 let lastGaze = { x: 0, y: 0 };
+// 表情变体：每个状态自己在「主资产 + 变体」这个列表里走到第几个。
+// 按状态存，所以 idle 走到第 2 套不会影响 thinking 的进度。
+const variantCursor = Object.create(null);
+// 当前实际在播的那套（主资产时为 null）。applyGaze 也看它——
+// 变体可以自己声明 eyeTracking，不能一律照抄主资产。
+let activeVariant = null;
 
 // ============================================================================
 // SVG 白名单清洗（主题资产的唯一出口）
 // ----------------------------------------------------------------------------
 // 骨骼引擎自己拼的 SVG 是**我们代码里的字符串**，可以直接进 DOM；
-// 但非骨骼主题（crab 等）的帧来自 themes/ 下的磁盘文件，是**不可信输入**，
+// 但非骨骼主题（没写 rigType 的第三方主题）的帧来自 themes/ 下的磁盘文件，是**不可信输入**，
 // 必须过这一关。曾经的写法是 `nextEl.innerHTML = frames.join("")`——
 // 一行代码就把白名单整个绕开了。这里把它补回来。
 //
@@ -1056,6 +1065,9 @@ function renderState(stateName) {
       clearInterval(frameTimer);
       frameTimer = null;
     }
+    // 骨骼路径不读 frames，也就没有"变体"这回事。留着上一次的 activeVariant
+    // 会让 applyGaze 拿帧序列主题的 def 去问 eyeTracking，属于张冠李戴。
+    activeVariant = null;
     layers[0].classList.add("show");
     layers[1].classList.remove("show");
     if (!ragdollRig) {
@@ -1067,7 +1079,7 @@ function renderState(stateName) {
     return;
   }
 
-  // 非布偶猫主题（如螃蟹主题 crab）保留双图层交叉淡入淡出逻辑
+  // 非骨骼主题（没写 rigType 的）保留双图层交叉淡入淡出逻辑
   if (ragdollRig) {
     ragdollRig.destroy();
     ragdollRig = null;
@@ -1077,6 +1089,20 @@ function renderState(stateName) {
   const def = states[currentState] || states.idle;
   if (!def || !Array.isArray(def.frames) || def.frames.length === 0) return;
 
+  // 表情变体：一个状态可以有多套资产，每次**进来**轮播到下一套。
+  // 用轮播而不是随机，是因为随机没法断言——测试要的是"多切几次一定不全一样"，
+  // 随机会偶发地连着两次选中同一套，那样的断言时红时不红。
+  // 只有主资产（variants 为空）时 pick 恒为 0，行为与以前完全一致。
+  // cursor 存的是**当前选中**的槽位（不是"下一个"）——存下一个的话，
+  // petDebug.variant() 读它会比实际画面超前一格，看起来像"说变体实际还是主资产"。
+  const variants = Array.isArray(def.variants) ? def.variants : [];
+  const slotCount = variants.length + 1;
+  const seen = variantCursor[currentState];
+  const pick = seen === undefined ? 0 : (seen + 1) % slotCount;
+  variantCursor[currentState] = pick;
+  activeVariant = pick === 0 ? null : variants[pick - 1];
+  const source = pick === 0 ? def : activeVariant;
+
   const nextLayerIdx = 1 - activeLayer;
   const nextEl = layers[nextLayerIdx];
   const prevEl = layers[activeLayer];
@@ -1085,7 +1111,7 @@ function renderState(stateName) {
   // 这里必须逐帧过 svgNode（DOMParser + 白名单），不能 innerHTML——
   // 一行 innerHTML 就把白名单整个绕开了，而且不报错、看不出来。
   const svgs = [];
-  for (const markup of def.frames) {
+  for (const markup of source.frames) {
     const node = svgNode(markup);
     if (!node) continue; // 坏帧单张丢弃，不连累整个状态
     node.classList.add("frame");
@@ -1108,7 +1134,7 @@ function renderState(stateName) {
 
   if (frameTimer) clearInterval(frameTimer);
   if (svgs.length > 1) {
-    const interval = Math.max(60, Math.round(1000 / (def.fps || 4)));
+    const interval = Math.max(60, Math.round(1000 / (source.fps || 4)));
     frameTimer = setInterval(() => {
       svgs[frameIndex].classList.remove("on");
       frameIndex = (frameIndex + 1) % svgs.length;
@@ -1125,7 +1151,9 @@ function applyGaze() {
   // 主题写 eyeTracking:false 就**真的**不跟。骨骼引擎的 gait 和瞳孔都吃这个开关——
   // 上一轮刚修过同一个 bug（字段被校验、被传输、就是没人读），
   // 这一版重写又把它带回来了：rig 分支原来无条件 setGaze。
-  const track = !!(def && def.eyeTracking === true);
+  // 变体可以覆写 eyeTracking，所以先看当前在播的那套，没有再看主资产。
+  const active = activeVariant || def;
+  const track = !!(active && active.eyeTracking === true);
   if (ragdollRig) {
     ragdollRig.setGaze(track ? lastGaze.x : 0, track ? lastGaze.y : 0);
     return;
@@ -1146,6 +1174,8 @@ function applyGaze() {
 // 这类"状态莫名弹回去"的问题，光看最终画面永远查不出来——
 // 必须知道**谁在什么时候推了什么**。
 const stateLog = [];
+// 主进程推来的最近 agent 事件（见 state.js 的 recentEvents）
+let lastEvents = [];
 let buildCount = 0;
 // pin 住 gaze：主进程每 100ms 推一次真实光标，本地 mousemove 又写一遍，
 // 会盖掉注入值。回归要断言"瞳孔朝哪"，就得先让注入值稳定成立。
@@ -1158,6 +1188,10 @@ if (window.clawd) {
   // 而失效的方式是 undefined 而不是报错，最容易被当成"功能没做"。
   const adoptTheme = (theme) => {
     currentTheme = theme;
+    // 换了主题，上一主题的变体游标就作废了——不清的话新主题会从一个
+    // 与它无关的偏移接着走（而且那个偏移可能超出它的变体数量）。
+    for (const k of Object.keys(variantCursor)) delete variantCursor[k];
+    activeVariant = null;
     window.VISUAL_STATES = (theme && theme.states) || null;
     renderState(currentState);
   };
@@ -1171,6 +1205,9 @@ if (window.clawd) {
   window.clawd.onState((snapshot) => {
     stateLog.push({ t: Math.round(performance.now()), visual: snapshot && snapshot.visual });
     if (stateLog.length > 20) stateLog.shift();
+    // 主进程把最近收到的 agent 事件也放在快照里一并带来。
+    // 没有它，排查"它为什么变成 idle"就只能靠猜——视觉层只看到结果，看不到是被哪个事件推的。
+    if (snapshot && Array.isArray(snapshot.recent)) lastEvents = snapshot.recent;
     if (snapshot && snapshot.visual) {
       renderState(snapshot.visual);
     }
@@ -1183,6 +1220,15 @@ if (window.clawd) {
       applyGaze();
     }
   });
+
+  // 信寄出去之后，让提示条自己显一下。
+  // 为什么不改宠物状态：状态机在主进程，这里硬改成 notification 会被
+  // 下一个 250ms 的 tick 顶回去，看起来就是"闪一下没了"。
+  if (typeof window.clawd.onLetterSent === "function") {
+    window.clawd.onLetterSent(() => {
+      showHint("信已封好 · 你下次说话时一起送到", 4000);
+    });
+  }
 } else {
   // 浏览器独立预览模式
   renderState("idle");
@@ -1231,8 +1277,10 @@ if (stage) {
   stage.addEventListener("dblclick", (e) => {
     const hit = document.elementFromPoint(e.clientX, e.clientY);
     if (hit && hit.closest && hit.closest("#pet")) {
-      if (window.clawd && typeof window.clawd.toggleDashboard === "function") {
-        window.clawd.toggleDashboard();
+      // 双击 = 写信。这是桌宠身上唯一"用户主动想说话"的入口，
+      // 而且双击这个手势本来就没有别的用途（看板挪进了右键菜单）。
+      if (window.clawd && typeof window.clawd.openLetter === "function") {
+        window.clawd.openLetter();
       }
     }
   });
@@ -1252,10 +1300,32 @@ window.addEventListener("blur", () => {
 
 window.addEventListener("contextmenu", (e) => {
   e.preventDefault();
-  if (window.clawd && typeof window.clawd.quit === "function") {
-    window.clawd.quit();
+  // 右键不再直接退出：给菜单。退出之前那一版是"右键即退、没有确认"，
+  // 对手滑的人（以及想找"怎么关掉这个东西"的人）都太危险了。
+  if (window.clawd && typeof window.clawd.petMenu === "function") {
+    window.clawd.petMenu();
   }
 });
+
+// ============================================================================
+// 状态提示条
+//
+// #hint 平时只在鼠标悬停时淡淡显出来（CSS 里 body:hover）。这里做的是
+// "临时顶掉它"：写一段话、强制显形几秒、然后还原。
+// 用 inline style 而不是加 class，是因为要压过 body:hover 那条规则，
+// 而还原的方式就是删掉 inline style —— 删了它自己会回到悬停才显示。
+// ============================================================================
+function showHint(text, ms = 3000) {
+  if (!hint) return;
+  if (hintTimer) clearTimeout(hintTimer);
+  hint.textContent = text;
+  hint.style.opacity = "0.92";
+  hintTimer = setTimeout(() => {
+    hintTimer = null;
+    hint.textContent = HINT_DEFAULT;
+    hint.style.removeProperty("opacity");
+  }, ms);
+}
 
 // ============================================================================
 // 调试入口
@@ -1302,6 +1372,17 @@ window.petDebug = {
   },
   states: () => Object.keys((currentTheme && currentTheme.states) || {}),
   state: () => currentState,
+  // 当前状态实际在播的是第几套资产（0 = 主资产，1..n = variants[0..]）。
+  // 「多套变体」不能只靠肉眼验证：静止一到同样的图上，看不出是第几套。
+  variant: () => {
+    const s = (currentTheme && currentTheme.states) || {};
+    const def = s[currentState] || s.idle;
+    return {
+      pick: variantCursor[currentState] || 0,
+      id: activeVariant ? activeVariant.id : "",
+      slots: def && Array.isArray(def.variants) ? def.variants.length + 1 : 1,
+    };
+  },
   // 当前主题声明的状态时长。**主题没写就是 null**（内置默认在 state.js 里，
   // 两份默认迟早会分叉，所以这里如实返回 null，不替它编一个）。
   timings: () => (currentTheme && currentTheme.timings) || null,
@@ -1327,5 +1408,8 @@ window.petDebug = {
       : {},
   builds: () => buildCount,
   stateLog: () => stateLog.slice(),
+  // 最近 30 条 agent 事件（主进程记录的）：每个事件叫什么、把会话从什么改成了什么，
+  // 还是压根没认出来（how:"ignored"）。查"那里明明在干活为什么显示 idle"先看这个。
+  events: () => (Array.isArray(lastEvents) ? lastEvents.slice() : []),
 };
 

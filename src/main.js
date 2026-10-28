@@ -14,7 +14,7 @@
 //   2. -webkit-app-region: drag 会让该区域收不到 mousemove → 自己实现拖拽
 // ============================================================
 
-const { app, BrowserWindow, ipcMain, screen, powerMonitor, clipboard } = require("electron");
+const { app, BrowserWindow, ipcMain, screen, powerMonitor, clipboard, Menu } = require("electron");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -23,6 +23,7 @@ const { createStore } = require("./state");
 const { createPermissionCenter } = require("./permission");
 const { portFilePath } = require("./port-file");
 const themes = require("./theme");
+const mailbox = require("./mailbox");
 
 // SEC-10：单实例锁。第二个实例直接退出，避免两个进程抢同一个端点文件。
 if (!app.requestSingleInstanceLock()) {
@@ -33,6 +34,8 @@ if (!app.requestSingleInstanceLock()) {
 const WIN_W = 240;
 const WIN_H = 240;
 const BUBBLE_W = 360;
+const LETTER_W = 360;
+const LETTER_H = 250;
 
 let win = null;
 let drag = null; // { cursorX, cursorY, winX, winY, timer }
@@ -91,6 +94,16 @@ let bubbleCurrent = null; // 当前显示中的请求 id
 let bubbleReady = false;
 let bubblePendingEntry = null;
 
+// ---- S8：信纸 ----
+// 和气泡一样懒创建。区别在于：气泡是"agent 要你立刻做决定"，信纸是"你自己想说句话"。
+// 所以信纸要抢焦点（你要打字），但不阻塞任何东西 —— 关掉窗口信就没了，不写盘。
+let letterWin = null;
+let letterReady = false;
+// 页面 ready 之前来的打开请求先存着，等 letter:ready 再补发。
+// 和气泡同一个坑：loadFile 是异步的，先 send 的话第一条消息会丢，
+// 表现是"双击了没反应，再双击一次才行"。
+let letterPendingOpen = false;
+
 const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
 
 function createWindow() {
@@ -132,6 +145,13 @@ function createWindow() {
 
   win.loadFile(path.join(__dirname, "index.html"));
   win.once("ready-to-show", () => win.show());
+  // 桌宠是无边框 + 不进任务栏的窗口，用户没法从菜单里开 DevTools，
+  // 而没有 DevTools 就打不开 petDebug（"它为什么变成 idle"唯一的现场窗口）。
+  // 所以给一个显式开关：npm run start:debug
+  // 两种写法都认：命令行 --devtools，或环境变量（npm script 跨平台更稳）
+  if (process.argv.includes("--devtools") || process.env.CLAWD_DEVTOOLS === "1") {
+    win.webContents.openDevTools({ mode: "detach" });
+  }
   win.on("closed", () => {
     win = null;
   });
@@ -298,6 +318,99 @@ function toggleDashboard() {
   d.focus();
 }
 
+// ------------------------------------------------------------
+// S8：信纸窗口
+// ------------------------------------------------------------
+
+function ensureLetter() {
+  if (letterWin && !letterWin.isDestroyed()) return letterWin;
+
+  letterWin = new BrowserWindow({
+    width: LETTER_W,
+    height: LETTER_H,
+    show: false,
+    frame: false,
+    transparent: true,
+    backgroundColor: "#00000000",
+    hasShadow: false,
+    resizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    // 和气泡一样置顶：信纸是从桌宠那儿"长出来"的，
+    // 藏在一堆窗口后面会让人以为双击没反应。
+    alwaysOnTop: true,
+    webPreferences: {
+      preload: path.join(__dirname, "letter-preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+    },
+  });
+
+  letterWin.setAlwaysOnTop(true, "screen-saver");
+  letterWin.loadFile(path.join(__dirname, "letter.html"));
+  // 用 did-finish-load 当"可以投递了"的信号，而不是让页面反手发一个 ready 握手。
+  // 区别在哪：握手的可靠性取决于页面脚本有没有跑到那一行，而信纸是用户点出来的，
+  // 页面一旦加载失败（脚本抛异常），握手就永远不来，表现是"双击毫无反应" ——
+  // 一个完全静默的失败。did-finish-load 是宿主管的，页面再烂也会触发。
+  letterWin.webContents.on("did-finish-load", () => {
+    letterReady = true;
+    if (letterPendingOpen) {
+      letterPendingOpen = false;
+      presentLetter();
+    }
+  });
+  letterWin.on("closed", () => {
+    letterWin = null;
+    letterReady = false;
+    letterPendingOpen = false;
+  });
+  return letterWin;
+}
+
+function positionLetter() {
+  if (!letterWin || letterWin.isDestroyed() || !win || win.isDestroyed()) return;
+  const area = screen.getPrimaryDisplay().workArea;
+  const [px, py] = win.getPosition();
+  let x = px + WIN_W / 2 - LETTER_W / 2;
+  let y = py - LETTER_H - 12;
+  if (y < area.y) y = py + WIN_H + 12;
+  letterWin.setPosition(
+    Math.round(clamp(x, area.x + 8, area.x + area.width - LETTER_W - 8)),
+    Math.round(y)
+  );
+}
+
+function presentLetter() {
+  if (!letterWin || letterWin.isDestroyed()) return;
+  letterWin.webContents.send("letter:open", { maxChars: mailbox.MAX_LETTER_CHARS });
+  positionLetter();
+  letterWin.show();
+  letterWin.focus();
+}
+
+function openLetter() {
+  ensureLetter();
+  if (letterReady) {
+    letterPendingOpen = false;
+    presentLetter();
+    return;
+  }
+  // 页面还在加载：先把"要打开"记下来，等 did-finish-load 补发。
+  // 直接 send 的话第一条消息会丢，表现是"第一次双击没反应，第二次才行"。
+  letterPendingOpen = true;
+}
+
+// 寄信成功之后告诉桌宠"信寄出去了"。
+// 为什么不让渲染层自己设状态：状态机在主进程手里，渲染层擅自改成 notification
+// 会在下一个 250ms 的 tick 里被真实状态顶掉，看起来就像"闪了一下又没了"。
+function flashLetterSent() {
+  if (win && !win.isDestroyed()) win.webContents.send("letter:sent");
+}
+
 app.whenReady().then(() => {
   // 状态时长来自**当前主题**，但此刻主题还没解析（下面第 331 行才定）。
   // 所以传的是 getter 而不是值：store 每次判断时长都重新问一次，
@@ -410,6 +523,44 @@ app.whenReady().then(() => {
 
   ipcMain.on("app:quit", () => app.quit());
 
+  // ---- S8：右键小菜单 ----
+  // 以前右键 = 直接退出。那是个很糟的设计：桌宠没有标题栏，
+  // 想找"怎么关掉它"的时候，唯一能试的就是右键，而它**没有确认**就退了。
+  // 现在右键给一个菜单，退出只是其中一项。
+  ipcMain.on("pet:menu", () => {
+    if (!win || win.isDestroyed()) return;
+    Menu.buildFromTemplate([
+      { label: "写封信…", click: openLetter },
+      { label: "会话看板", click: toggleDashboard },
+      { type: "separator" },
+      { label: "退出", click: () => app.quit() },
+    ]).popup({ window: win });
+  });
+
+  // ---- S8：信纸 ----
+  ipcMain.on("letter:open", openLetter);
+  ipcMain.on("letter:cancel", () => {
+    if (letterWin && !letterWin.isDestroyed()) letterWin.hide();
+  });
+
+  // 寄信是**唯一**会把用户写的东西落盘的动作，所以校验全部在这里做：
+  // 渲染层传来的只是一段文字，能存不能存由 mailbox.put 说了算。
+  ipcMain.handle("letter:send", (_e, text) => {
+    if (typeof text !== "string") return { ok: false, error: "信的内容必须是文字" };
+    const r = mailbox.put(text);
+    if (!r.ok) return r; // 失败原因原样回给信纸，让用户知道是太长还是信箱满
+    if (letterWin && !letterWin.isDestroyed()) letterWin.hide();
+    flashLetterSent();
+    // 顺手清一下已投递的历史（7 天），失败无所谓
+    try {
+      mailbox.prune();
+    } catch {}
+    return { ok: true, id: r.id };
+  });
+
+  // 看板想知道"信箱里还有几封没寄出去"，只读不取
+  ipcMain.handle("mailbox:pending", () => mailbox.listPending().length);
+
   // ---- S6：看板 ----
   ipcMain.on("dashboard:toggle", toggleDashboard);
 
@@ -449,6 +600,8 @@ app.whenReady().then(() => {
     if (bubble && !bubble.isDestroyed()) bubble.hide();
     // 看板会列出每个会话的项目目录名，锁屏时留在屏幕上就是信息泄露
     if (dashboard && !dashboard.isDestroyed()) dashboard.hide();
+    // 信纸上是用户自己写的字，可能比目录名更私密，锁屏必须一起收
+    if (letterWin && !letterWin.isDestroyed()) letterWin.hide();
   };
   const showAll = () => {
     if (win && !win.isDestroyed()) win.showInactive();

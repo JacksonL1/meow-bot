@@ -75,7 +75,6 @@
       "error": 1200,
       "notification": 1500,
       "attention": 800
-    },
-    "sleepAfterMs": 20000
+    }
   }
 }

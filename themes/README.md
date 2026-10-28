@@ -5,7 +5,6 @@
 ```text
 themes/
 ├── _template/          脚手架，复制走再改。**下划线开头 = 不是主题**，不会出现在列表里
-├── crab/               原版螃蟹
 └── ragdoll/            布偶猫（默认）
     ├── theme.json
     └── assets/
@@ -63,7 +62,31 @@ themes/
 | `states.<name>.fps` | 多帧时的轮播速度，钳在 1–30。不写就 4。**只有 1 帧就没意义** |
 | `states.<name>.eyeTracking` | 只有写 `true` 才开，**默认关**。开了就必须保证该状态**每一帧**都有 `<g class="pupils">`。写 `false` 时图里可以保留 `pupils`——它只是不会动（working 就是这样：眼睛钉在屏幕上敲键盘，不追鼠标，但眼睛还得有瞳孔） |
 | `states.<name>.frames` | 非空数组，最多 12 项。文件名相对 `assets/` |
+| `states.<name>.variants` | 可选。**同一个状态的多套表情变体**，每套结构和本表一样（`frames` 必填，`fps` / `eyeTracking` / `id` 可选），最多 4 套 |
 | `timings` | 可选。改状态时长，见下一节。**不写就用 `src/state.js` 里的内置默认** |
+
+### variants：一个状态的多套表情
+
+```json
+"idle": {
+  "fps": 8,
+  "eyeTracking": true,
+  "frames": ["idle-a.svg", "idle-b.svg"],
+  "variants": [
+    { "id": "stretch", "frames": ["idle-stretch.svg"] },
+    { "id": "stretch", "fps": 6, "eyeTracking": false, "frames": ["idle-slow.svg"] }
+  ]
+}
+```
+
+- **每次进入这个状态轮换一套**：主资产 → 第 1 套 → 第 2 套 → 回到主资产。
+  第一次进入播的一定是主资产，所以没写 `variants` 的主题行为完全不变。
+- **为什么是轮换不是随机**：随机没法断言。测试要的是"多切几次一定不全一样"，
+  随机却可能连着两次选中同一套，那样的断言会时红时绿——**那是测试在赌时序，不是在验功能**。
+- **没写的字段继承主资产**：`fps` / `eyeTracking` 自己写了就用自己那个。
+  主资产和变体走**同一套校验**（帧数上限、资产名、大小），不会分叉成"主资产钳了、变体没钳"。
+- **`id` 只是给你自己看的**（排查时 `petDebug.variant()` 会报出来），不是路由键，重复也不报错。
+- `variants` 和主资产**共用同一个 4MB 总量额度**，上限 4 套是为了绑住加载耗时。
 
 ### timings：主题能改的只有这四个数
 
@@ -75,7 +98,8 @@ themes/
 ```
 
 - `oneshot.<state>`：这三个状态播多久就退回 `idle`（否则 attention 会永远挂在屏幕上）。
-- `sleepAfterMs`：多久没动静就睡着。
+- `sleepAfterMs`：**闲着（idle）多久才睡着**。计时从进入 idle 开始，working / thinking 期间不累计 ——
+  agent 明明在干活时睡着是错的（一次跑 40 秒的构建期间一个事件都没有，但它在干活）。
 
 **主题没写就是没写**：不写 `timings` 时加载器如实返回 `null`，由 `src/state.js` 用它自己的默认。
 默认值的真相只放在一处，加载器不会替你编一个——两边各存一份默认，分叉是静默的。
@@ -103,7 +127,7 @@ themes/
 | 主题类型 | 靠什么动 | 帧的作用 |
 |---|---|---|
 | 骨骼弹簧（`rigType`） | 渲染层 28 个弹簧通道 + 呼吸 / 尾巴 / 眨眼 / 敲键，60fps | **完全不用**，只作为主题资产校验的素材 |
-| 帧序列（其余主题，如 crab） | 按 `fps` 轮播 `frames` | 就是画面本身 |
+| 帧序列（没写 `rigType` 的主题，如内置的兜底画面） | 按 `fps` 轮播 `frames` | 就是画面本身 |
 
 **`motion` / `gags` 两个字段已经不存在了**：motion 引擎随骨骼重写一起没了，
 一次性彩蛋（钓上鱼 / 扔拖鞋）随「working 改回敲键盘」一起删了。

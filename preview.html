@@ -81,7 +81,7 @@
     <h1>状态 → 姿势</h1>
     <p class="sub">
       这张图只拍<strong>静止的姿势</strong>，动画只能跑 <code>npm start</code> 看。<br />
-      <strong>两种主题，看图前先分清</strong>：帧序列主题（如 crab）就按 <code>fps</code> 轮播这些帧；
+      <strong>两种渲染路径，看图前先分清</strong>：帧序列主题（没写 <code>rigType</code> 的）就按 <code>fps</code> 轮播这些帧；
       而 <strong>ragdoll 是骨骼弹簧主题</strong>
       （<code>rigType: ragdoll-spring-v2</code>），运行时由 <code>renderer.js</code> 直接拼 SVG + 二阶弹簧通道驱动，
       <strong>根本不读这些帧</strong>——本页给它展示的是备用帧，只能当「七个状态大致各是什么姿势」的粗对照，
@@ -188,7 +188,7 @@
           opt.textContent = `${themes[id].name || id}（${id}）`;
           sel.appendChild(opt);
         }
-        // 地址栏 ?theme=crab 可以直连某个主题，截图脚本就是这么指定主题的
+        // 地址栏 ?theme=ragdoll 可以直连某个主题，截图脚本就是这么指定主题的
         const want = new URLSearchParams(location.search).get("theme");
         sel.value = ids.includes(want) ? want : ids.includes("ragdoll") ? "ragdoll" : ids[0];
         sel.addEventListener("change", () => renderTheme(themes, sel.value));

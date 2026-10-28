@@ -6,6 +6,7 @@
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
+    "start:debug": "electron . --devtools",
     "feed": "node scripts/fake-feed.js",
     "verify:electron": "node scripts/verify-electron.js",
     "preview:states": "node scripts/preview-shot.js",

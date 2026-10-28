@@ -1,14 +1,15 @@
 # clawd-starter
 
-从零重搭 Clawd 桌宠的 **S1–S7** 骨架：一个能自己出现在桌面上、能被真实 agent 事件驱动、**还能替你回答权限确认**、能一眼看到所有会话在干什么、形象还能换主题的透明窗口。
+从零重搭 Clawd 桌宠的 **S1–S8** 骨架：一个能自己出现在桌面上、能被真实 agent 事件驱动、**还能替你回答权限确认**、能一眼看到所有会话在干什么、形象还能换主题、**还能替你给 agent 递一封信**的透明窗口。
 
 目标不是"做一个好看的桌宠"，而是**把核心数据链路跑通**——之后每一阶段都是往这条链路上加东西，而不是推倒重来。
 
 ```text
 事件流：agent 事件 → hook（短命进程，async）→ 本地 HTTP → 状态机 → IPC → 动画
 裁决流：agent 要执行工具 → HTTP hook（阻塞）→ 气泡等你点 → 同一个 socket 回 200/204
-看板流：双击桌宠 → 独立窗口 → 1s 轮询快照 → 列表（cwd 只有 basename）
+看板流：右键桌宠 → 独立窗口 → 1s 轮询快照 → 列表（cwd 只有 basename）
 主题流：启动 → 读 themes/<id>/ → 校验 → IPC → 渲染层换帧数据（白名单在这里才生效）
+送信流：双击桌宠 → 信纸 → mailbox/ → 下次 UserPromptSubmit 时 hook 把信写进 additionalContext
 ```
 
 ## 跑起来
@@ -18,7 +19,7 @@ npm install
 npm start
 ```
 
-窗口会出现在屏幕右下角。**拖动它换个位置，双击它打开会话看板**，右键退出。端点（端口 + token）写在 userData 里，不在项目目录：
+窗口会出现在屏幕右下角。**拖动它换个位置，双击它写封信，右键打开菜单（写信 / 会话看板 / 退出）**。端点（端口 + token）写在 userData 里，不在项目目录：
 
 ```bash
 # 看端点：Windows 下是 %APPDATA%\clawd-starter\clawd-starter.port
@@ -71,17 +72,18 @@ node scripts/fake-feed.js                     # 完整剧本： thinking → wor
 node scripts/fake-feed.js Stop                # 单个事件
 node scripts/fake-feed.js --hold working 10   # 保持某个状态 10 秒
 
-npm run verify:electron                       # 112 项回归（当前 112 PASS / 0 FAIL，剪贴板那条在无剪贴板环境会走 warn）
+npm run verify:electron                       # 159 项回归（当前 159 PASS / 0 FAIL）
+
+npm run start:debug                           # 带 DevTools 启动（桌宠无边框、不进任务栏，平时打不开）
+                                              #   然后在 Console 里敲 petDebug.events() 看 agent 推来的每个事件
 
 npm run preview:states                        # 七状态对照图 → docs/ragdoll-states.png
-node scripts/preview-shot.js --theme=crab     # 换主题 → docs/crab-states.png
 npm run build:preview                         # 改完 themes/ 后更新 preview.html 的数据包
 ```
 
 主题也能从命令行指定，优先级是 `CLAWD_THEME` 环境变量 → `--theme=` → 上次在看板里选的 → `ragdoll`：
 
 ```bash
-npm start -- --theme=crab
 ```
 
 `verify:electron` 同时开两个调试端口：`--inspect=9229` 看主进程（窗口属性、IPC 接线），
@@ -103,7 +105,7 @@ npm start -- --theme=crab
 - `POST /state` 接收器，固定端口 23333 + 端点文件发现（端口与 token 一起写 userData）
 - 接口四道锁 + 渲染层 SVG 白名单（见下方「安全边界」）
 - 单会话状态机：事件 → 状态 → 优先级仲裁 → oneshot 播完自动退回 → 闲置发呆 / 睡着
-- **主题系统（S7）**：形象不再是代码，而是 `themes/<id>/theme.json` + 一堆 SVG。`ragdoll`（默认）和 `crab` 两个内置主题，双击看板底部就能换
+- **主题系统（S7）**：形象不再是代码，而是 `themes/<id>/theme.json` + 一堆 SVG。内置 `ragdoll` 一个主题（早期还有个 crab，已删——暂时不需要更多主题）。自己加主题：复制 `themes/_template`
 - **形象是布偶猫**：奶油白长毛 + 深棕重点色 + 蓝宝石竖瞳。**七个状态是七种不同姿势**，
   不是同一张图加个贴纸：idle 端坐、thinking 蹲低歪头、attention 拔高张嘴、working 桌前敲键盘、
   error 炸毛泛红、notification 抬头举信封、sleeping 侧躺垫爪。截图见 `docs/ragdoll-states.png`
@@ -111,7 +113,7 @@ npm start -- --theme=crab
   - **骨骼弹簧**（`ragdoll`，默认）：`renderer.js` 直接拼一只猫 + 28 个二阶弹簧阻尼通道，
     60fps 每帧重算；状态切换是过冲与滞后跟随，不是换图。working 里还有键盘和编辑器窗口，
     代码行一行一行长出来
-  - **帧序列**（`crab` 等）：按 `fps` 轮播 `frames`，双图层交叉淡入
+  - **帧序列**（没写 `rigType` 的主题，第三方主题默认走这条）：按 `fps` 轮播 `frames`，双图层交叉淡入
   为什么主题里写不了 CSS 动画：白名单拒了 `<style>` 和 SMIL。而多帧轮播是**离散**的——
   6~8fps 一定频闪，看起来就是"卡顿式切换"。**帧数多 ≠ 流畅**
 - **眼球追踪**：主进程读全局光标 → 归一化成 gaze → 渲染层插值移动瞳孔。
@@ -121,9 +123,12 @@ npm start -- --theme=crab
   安装器支持 `--agent claude|codebuddy|workbuddy`，三家的事件名 / matcher 取值 / async 支持各不相同
 - **权限气泡（S5）**：桌宠替你在屏幕上问一句「这条命令放不放行」，点一下就把决定回写给 agent；
   不点 / 关掉 / 退出 / 超时一律返回 **204 不做决定**，自动回落到终端原生提示
-- **会话看板（S6）**：双击桌宠弹出列表，一条会话一行——状态徽标、目录名、会话 id、闲了多久，
+- **会话看板（S6）**：右键菜单里打开，一条会话一行——状态徽标、目录名、会话 id、闲了多久，
   正在演的那条用左侧色条标出；按「最吵的排前面」排序（error 优先）。
   目录**只显示最后一段**，完整路径只能点「复制路径」单独取（见下方 SEC-09 说明）
+- **跟桌宠说话（S8）**：**双击桌宠写封信**，猫把它原样收下，在你下次跟 agent 说话时一起送到。
+  猫**不回答任何问题**——它只做搬运工，不代答、不总结、不润色。信落在
+  `%APPDATA%\clawd-starter\mailbox\`，24 小时没寄出就作废，最多积 5 封
 - 调试入口：DevTools 里 `petDebug.setState('working')` / `petDebug.gaze({x:1,y:-1})` / `petDebug.state()`
 
 ## 故意的简化（去原项目对照时会遇到的差异）
@@ -385,7 +390,7 @@ themes/ragdoll/
 主进程读 `themes/` → 校验 → IPC → 渲染层换帧数据。主题是**拉**回来的（`getTheme`），
 不是推的，因为 S5 的第一个权限气泡就是"推早了被静默丢弃"。
 
-有两个内置主题：`ragdoll`（默认）和 `crab`（原版螃蟹，从 git 历史里取回来的）。
+内置主题现在只有一个：`ragdoll`（默认，骨骼弹簧版）。早期的第二个内置主题 `crab`（原版螃蟹，帧序列）已于 2026-10-28 删除——暂时不需要更多主题。
 第二个主题的意义是**证明这套东西能换形象**，而不只是能换几个参数。双击看板底部就能切。
 `themes/_template/` 是脚手架，下划线开头所以不会出现在主题列表里。
 
@@ -413,8 +418,58 @@ Chrome 对超大模糊半径是同步算的，一个 `9999` 就是一次卡死�
   加载失败导致空白的话，用户看到的是一个**看得见进程、找不到窗口、不知道点哪里退出**的东西——比报错难处理得多。
 - **失败是整个主题拒绝，不是部分加载**。半个主题的表现是"看着有点怪"，作者根本不会发现。
 
-回归 112 PASS / 0 FAIL，其中主题与白名单 24 项、渲染与动画 13 项、状态时长 9 项。`npm run preview:states` 出对照图（`--theme=crab` 换主题），
+回归 159 PASS / 0 FAIL，其中主题与白名单 24 项、渲染与动画 13 项、状态时长 11 项、表情变体 4 项、信箱与送信 22 项。`npm run preview:states` 出对照图，
 `npm run build:preview` 更新预览页的数据包。
+
+## S8 已完成：跟桌宠说话（猫只做邮差）
+
+用户的原话：**「不回答我任何问题，只做消息的搬运工。猫只是把我说的话，用写信的方式传递给了 agent。」**
+这句话框定了整个功能——**猫不生成任何文字**。
+
+```text
+双击桌宠 → 信纸（360×250，置顶）→ 点「寄出」→ mailbox/pending/<uuid>.json
+                                                        │
+                            ┌───────────────────────────┘
+                            │  下一次你在 WorkBuddy / Claude Code / CodeBuddy 里提交消息
+                            ▼
+              hook: UserPromptSubmit → 读信箱 → stdout 写 {"hookSpecificOutput":
+                                          {"hookEventName":"UserPromptSubmit",
+                                           "additionalContext":"【桌宠转交 …】…【信完】"}}
+                            │
+                            ▼
+                    宿主把这段并进这一轮的用户消息
+```
+
+### 为什么是 hook 的 stdout，而不是"直接调 CLI"
+
+先把前两条路试死了，理由都写下来（否则下个人会重走一遍）：
+
+| 路 | 不通的理由 |
+|---|---|
+| `codebuddy -p "…"` | CLI 本身能用（`--version` → 2.165.0），但要**单独登录一次**——桌面端登录态在 Electron 的加密存储里，CLI 读不到。而且就算登录，`-p` 只**开一个新会话**，进不了你正在看的那个 |
+| POST `127.0.0.1:51650` | 端口属主确实是 `WorkBuddy.exe`，但那是**未公开的内部接口**：一次更新就崩，还等于绕开它自己的鉴权 |
+| **hook 的 stdout** | 官方文档写死的契约：「退出码 0：stdout 一般只显示给用户，但 `UserPromptSubmit` 和 `SessionStart` 是例外，其中 stdout 会添加到上下文中」 |
+
+代价是诚实的：**信要到下一次提交才送达**。这条写进了信纸的说明行，不藏着。
+
+### 四个不显然的实现点
+
+- **没信的时候必须一个字节都不输出。** `UserPromptSubmit` 的 stdout 会被并进用户这一轮的消息，多打一个换行就是污染**每一次**对话。回归用真子进程数 `out.length === 0`。
+- **`process.exit(0)` 会截断没 flush 的 stdout。** 截断的 JSON 在宿主那边等于"没有输出"——信白寄且零报错。所以输出改成 `await new Promise(r => process.stdout.write(payload, r))`，写完再退。
+- **送信不依赖桌宠在跑。** 信是桌宠写的，但寄的时候它可能已经关了。`deliverLetters()` 排在 `readPortFile()` **之前**，且 stdin 也必须在探端口之前读（原来反着，省一次等待，但那样桌宠关着就永远寄不了信）。
+- **别的 hook 事件不许偷信。** 信只能在"用户说话"那一刻进上下文；要是 `PreToolUse` 把信取走了，它就白白消失在一次工具调用里。
+
+### 落盘的东西只有信，所以边界要画清楚
+
+- `%APPDATA%\clawd-starter\mailbox\{pending,sent}\<uuid>.json`，`0600`；`pending` 24h 过期，`sent` 留 7 天
+- 上限 5 封 / 4000 字；空信、超长、信箱满都在信纸上就地报错，不静默丢弃
+- 文件名和 `id` 字段都必须过 `ID_RE` 才拼路径——`take()` 会用 `` `${id}.json` `` 去 `rename`，一个没校验的 `../../x` 就能把文件搬出信箱
+- 信的内容包上 `【桌宠转交 · 时间 · …原样转交】…【信完】` 边界，**只声明来源、不写任何祈使句**：猫是邮差，不是代笔，更不是下指令的人
+
+### 顺手修掉的一个手感问题
+
+右键原来是**直接退出**。桌宠没有标题栏、也不进任务栏，所以"怎么关掉它"这个问题唯一能试的动作就是右键——而它没有确认就退了。
+现在右键是一个原生菜单：**写信 / 会话看板 / 退出**。看板从双击挪进这里（双击归写信）。
 
 ## 对照阅读
 

@@ -4,7 +4,7 @@
 
 | 项 | 内容 |
 |---|---|
-| 状态 | ACTIVE（S1–S7 完成） |
+| 状态 | ACTIVE（S1–S8 完成） |
 | 路径 | `E:\JacksonLee\project\clawd-starter` |
 | 技术栈 | Electron 45.0.0（`nodeIntegration: false` + `contextIsolation: true` + `sandbox: true`）、Node 原生 `http` + `fs`、渲染层纯手写 SVG 无框架、无构建工具 |
 | 入口 | `src/main.js`（主进程） |
@@ -13,7 +13,7 @@
 | 端点文件 | `%APPDATA%\clawd-starter\clawd-starter.port`，内容 `{port, token}`，权限 0600 |
 | 依赖服务 | 无。不连任何外部服务，只在本机开一个 HTTP 端口接收事件 |
 | 版本控制 | git，**5 次提交**（截至 `修改一下形象，添加会话看板窗口`）。**S7 主题系统 + 这批台账改动尚未提交** |
-| 体积 | 22 个源文件，约 6150 行（`src/` 3562 + `hooks/` 427 + `scripts/` 2157），另有 `themes/` 下 41 个 SVG 资产（ragdoll 21 / crab 19 / _template 1） |
+| 体积 | 25 个源文件，约 7401 行（`src/` 4478 + `hooks/` 480 + `scripts/` 2443），另有 `themes/` 下 22 个 SVG 资产（ragdoll 21 / _template 1；crab 的 19 个与两个一次性脚本已删） |
 
 ## 它解决什么问题
 
@@ -36,8 +36,9 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 | S3 | 渲染层：状态→帧序列、双图层交叉淡入、眼球追踪插值 | 已完成 | SVG 白名单就位，S7 接外部主题前必须回归 |
 | S4 | 接真 hook：解析 stdin JSON、往 `~/.claude/settings.json` 增量合并 8 个观察型事件 | 已完成 | 补了预判漏项：观察型 hook 必须 `async` |
 | S5 | 权限气泡：`type:"http"` 阻塞回包，让桌宠替用户批准确认 | 已完成 | 五条要求全部落地；`/permission` 不校 token 是架构固有属性 |
-| S6 | 多会话看板：双击桌宠弹出窗口，把内存里那张仲裁表摊开成人能看的列表 | 已完成 | SEC-09 分层兑现：存储层留完整路径、快照层只出 basename、完整路径只在显式点击时单条释放 |
+| S6 | 多会话看板：右键菜单里打开窗口，把内存里那张仲裁表摊开成人能看的列表 | 已完成 | SEC-09 分层兑现：存储层留完整路径、快照层只出 basename、完整路径只在显式点击时单条释放 |
 | S7 | 主题系统：`themes/<id>/theme.json` + `assets/*.svg`，**删掉写死的 `visuals.js`** | 已完成 | 白名单先于加载器；放行 3 个标签 + 9 个图元，拒 5 类；校验分主进程（文件/格式）与渲染层（内容）两段 |
+| S8 | 跟桌宠说话：双击写信 → 落磁盘信箱 → 下次 `UserPromptSubmit` 由 hook 写进 `additionalContext`。**猫只搬运，不代答** | 已完成 | SEC-12：信是唯一落盘的用户内容，也是唯一能改写 agent 上下文的输入通道。三条明确不做：不代答、信里不带命令、不碰桌面端未公开端口 |
 
 安全问题全部记录在 [SECURITY.md](./SECURITY.md)，每阶段开工前先看对应小节。
 
@@ -55,11 +56,11 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 | 主题 | 扫目录、校验 schema 与资产、校验 `motion`/`gags` 规则、缺状态补齐、全坏兜底（主进程）；换主题 = 换帧数据 + 重画 | `src/theme.js` + `themes/<id>/theme.json` |
 | 进程间桥 | 只暴露具体动作，不泄漏 `ipcRenderer` | `src/preload.js`（主窗口 9 个）+ `src/dashboard-preload.js`（看板 5 个）|
 | 调试 | 假数据源，三种用法（完整剧本 / 单事件 / 保持某状态）；形象对照截图；主题打包 | `scripts/fake-feed.js`、`preview-shot.js`、`build-preview-bundle.js` |
-| 回归闸门 | 主进程 inspector + 渲染进程 CDP，**112 条断言；当前 112 PASS / 0 FAIL**（剪贴板那条环境不可读时 `[warn]` 降级）；两条渲染路径用同一批断言、`rigMode` 分叉判据 | `scripts/verify-electron.js` |
+| 回归闸门 | 主进程 inspector + 渲染进程 CDP，**123 条断言；当前 123 PASS / 0 FAIL**（剪贴板那条环境不可读时 `[warn]` 降级）；两条渲染路径用同一批断言、`rigMode` 分叉判据 | `scripts/verify-electron.js` |
 
 ## 已知限制
 
-- **真实 agent 会话一次都没跑过**（本机无 `claude` CLI，WorkBuddy/CodeBuddy 也没实测过 hook 是否真触发），这是贯穿 S4/S5/S6 的最大缺口
+- **真实 agent 会话验证刚开始**：用户在 WorkBuddy 上实测过 S1–S7 的链路（hook 确实触发了，状态会跟着变），并报回三个问题——其中"working 中途睡着"已修，"thinking 显示成 idle"根因未定（诊断口 `petDebug.events()` 已就位）。**"WorkBuddy 把 `UserPromptSubmit` 的 stdout 并进消息"这一步仍未经证实**
 - 事件名以 Claude Code 为基准；`hooks/install.js` 已能装到 CodeBuddy / WorkBuddy，但**WorkBuddy 是否支持 hooks 未经证实**（官方文档无 hooks 章节，装的是按 CodeBuddy 契约推的）
 - 会话只存内存 `Map`，没有持久化与掉电恢复
 - 每 250ms 统一 tick，不是事件驱动定时器
@@ -75,10 +76,14 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 - **working 的桌面场景只存在于骨骼渲染器里**（键盘 + 编辑器窗口 + 代码行生长），是 `renderer.js` 里写死的，不是主题数据。彩蛋（`gags`）已经整体删除：用户把 working 从「钓鱼」改回「敲键盘」之后，鱼和拖鞋就没有存在的理由了，留着只会变成没人走的死路径
 - ~~状态时长写死在 `state.js`~~ → 已进 `theme.json.timings`（2026-10-28）。**主题只能改已有的四个数，改不了状态机的形状**
 - 没有在线主题目录，主题只能手工放进 `themes/`。换来的是供应链攻击面为零
+- **信要到下一次提交才送达**。这是选 hook 通道的代价：`UserPromptSubmit` 的 stdout 才有"进上下文"的契约，没有"主动推一条新消息"的契约。要做到立刻送达只能走 CLI（要单独登录，且 `-p` 只开新会话）或桌面端未公开端口（一次更新就崩），两条都不划算
+- **信送给"下一个提交消息的 agent"，不区分项目**。猫在写信时不知道你脑子里想把它发给哪个会话——它的世界里没有"会话"这个概念。所以 A 项目写的信可能在 B 项目的下一次提交里出现。缓解手段是 24h 过期 + 每封只投一次
+- 信箱上限 5 封 / 4000 字。超过就写不进去了（会在信纸上明确报错，不静默丢）
+- **没验到"WorkBuddy 真的把 stdout 并进了消息"**：hook 侧的输出格式按官方文档实现并有断言，但 WorkBuddy 桌面端那一步是本功能唯一"按文档实现、没亲眼看见"的环节
 
 ## 硬约束（改代码前先看）
 
-1. **`preload.js` / `bubble-preload.js` 只暴露动作，不暴露 `ipcRenderer`**——这是 Electron 的安全边界，加功能时最容易顺手破坏。
+1. **`preload.js` / `bubble-preload.js` / `dashboard-preload.js` / `letter-preload.js` 只暴露动作，不暴露 `ipcRenderer`**——这是 Electron 的安全边界，加功能时最容易顺手破坏。
 2. **状态名必须存在于 `VISUAL_STATES`**，渲染层靠白名单挡住任意字符串进 DOM。
 3. **`transparent: true` 必须同时给 `backgroundColor: '#00000000'` 和 `hasShadow: false`**，缺一个就露底色。
 4. 环境里若有 `ELECTRON_RUN_AS_NODE=1`，`electron .` 会退化成纯 Node，表现为 `require('electron')` 返回字符串。启动前 `env -u ELECTRON_RUN_AS_NODE npm start`。
@@ -103,3 +108,7 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 23. **每个 `petDebug` 出口都要有一条断言证明它自己有货**。`ragdollRig.springs` vs 实际的 `this.sp` 只差一个名字，结果是 `return {}`——不报错、不崩溃、调用方看不出来。观测窗口没有自检，它就只是装饰（见 SECURITY「骨骼弹簧重写」第四节）。
 24. **断言的期望值不要按精确字符串比中间层会改写的量**。`style.transform` 经 CSSOM 序列化会把尾零吃掉（写 `3.80px`、读 `3.8px`），凡是经过 Web API 序列化的值，一律用**数值 + 容差**判据。
 25. **一个功能下线，要把它的「校验层」和「文档」一起删**。彩蛋删掉之后，`theme.js` 里还在校验 `gags`、`themes/README.md` 里还写着完整的 `gags` schema——主题作者照着写会**校验通过、加载成功、什么都不发生**。比删掉更难查，因为它长得像能用。判据只有一个：**这个字段还有消费者吗**。没有就连校验带文档一起删。
+26. **`UserPromptSubmit` 的 stdout 是协议，不是日志**。铁律「hook 绝不打日志」防的是把用户 prompt 打进控制台，不是禁止和宿主通信。但要反过来守住另一半：**没有信的时候一个字节都不输出**——那段 stdout 会被并进用户这一轮的消息，多一个换行就是污染每一次对话。
+27. **送信的代码必须排在 `readPortFile()` 之前，stdin 也要排在探端口之前**。原来反过来是为了"桌宠没开就立刻退"省一次等待；但那样一来桌宠关着就永远寄不出信。顺带：输出要 `await` 写完再 `process.exit(0)`，管道上会被截断，而截断的 JSON 在宿主那边等于"没有输出"——信白寄且零报错。
+28. **信箱拼路径必须过 `ID_RE`（文件名和 `id` 字段都要过）**。`take()` 用 `` `${letter.id}.json` `` 去 `rename`，一个没校验的 `../../x` 就能把文件搬出信箱。信箱目录是普通目录，谁都能往里放文件。
+29. **信里不写祈使句**。`format()` 只声明来源（谁写的、什么时候），一句"请这样那样"都不能加。一旦猫开始"帮你整理成一封信"，那封信就不再是用户的话，而 agent 会把它当成用户说的话——中间没有任何人能分辨。

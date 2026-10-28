@@ -109,6 +109,7 @@ function createStore({ onChange, getTimings } = {}) {
   const sessions = new Map();
   let oneshot = null; // { state, until }
   let lastVisual = null;
+  let lastUnknown = null; // 未知事件只报一次，避免每轮刷屏
 
   // 主题时长是**运行时**才拿得到的（主进程里 store 先建、主题后解析），
   // 所以这里存的是一个 getter 而不是一份拷进来的值。
@@ -138,6 +139,15 @@ function createStore({ onChange, getTimings } = {}) {
     if (typeof onChange === "function") onChange(snapshot());
   }
 
+  // 事件日志（环形，最多 30 条）。排查"它为什么变成 idle"只能靠这个——
+  // 视觉层只知道自己现在是什么状态，不知道是被哪个事件推过去的。
+  // 环形是为了有界：agent 一次会话能推几千个事件，全留着内存不肯往下掉。
+  const recentEvents = [];
+  function logEvent(rec) {
+    recentEvents.push(rec);
+    if (recentEvents.length > 30) recentEvents.shift();
+  }
+
   function snapshot() {
     return {
       visual: lastVisual,
@@ -147,6 +157,7 @@ function createStore({ onChange, getTimings } = {}) {
         cwd: publicCwd(s.cwd),
         idleMs: Date.now() - s.lastAt,
       })),
+      recent: recentEvents.slice(),
     };
   }
 
@@ -168,6 +179,8 @@ function createStore({ onChange, getTimings } = {}) {
     const now = Date.now();
 
     if (event === "SessionEnd") {
+      // 删会话是最容易被忽略的"变 idle"元凶：没有会话时 dominant() 直接返回 idle。
+      logEvent({ t: now, event, sid: id.slice(0, 8), from: "(session)", to: "(removed)", how: "session-end" });
       sessions.delete(id);
       tick();
       return snapshot();
@@ -182,13 +195,25 @@ function createStore({ onChange, getTimings } = {}) {
     s.lastAt = now;
     if (cwd) s.cwd = cwd;
 
+    const prevState = s.state;
     const target = EVENT_STATE[event];
+    let how = "ignored";
     if (target && target !== s.state) {
       s.state = target;
       s.stateSince = now;
       const ms = oneshotMs(target);
       if (ms) oneshot = { state: target, until: now + ms };
+      how = "mapped";
+    } else if (target) {
+      how = "same"; // 映射了但状态没变
+    } else if (lastUnknown !== event) {
+      // 只报一次：未知事件通常是每一轮都发的，刷屏会把别的告警淹掉。
+      // 出现这条意味着 EVENT_STATE 漏了一种 agent 真的会发的事件——
+      // 那时候宠物的表现就是"该有反应的时候没反应"，而且看不出来为什么。
+      lastUnknown = event;
+      console.warn(`[state] 未知事件 ${JSON.stringify(event)}（没在 EVENT_STATE 里，它不会改变任何状态）`);
     }
+    logEvent({ t: now, event, sid: id.slice(0, 8), from: how === "mapped" ? prevState : s.state, to: s.state, how });
 
     tick();
     return snapshot();
@@ -200,7 +225,6 @@ function createStore({ onChange, getTimings } = {}) {
 
     for (const s of sessions.values()) {
       const sinceState = now - s.stateSince;
-      const sinceEvent = now - s.lastAt;
 
       // 1) oneshot 播完 → 回 idle（否则 attention 会永远挂在屏幕上）
       const ms = oneshotMs(s.state);
@@ -209,8 +233,16 @@ function createStore({ onChange, getTimings } = {}) {
         s.stateSince = now;
         continue;
       }
-      // 2) 长时间没动静 → 睡着
-      if (s.state !== "sleeping" && sinceEvent > sleepAfterMs()) {
+      // 2) 闲得太久 → 睡着。
+      //
+      // 计时从**进入 idle 多久**算（`stateSince`），不是"多久没收到事件"（`lastAt`）。
+      // 这两者差得很远：一次跑 40 秒的构建期间一个事件都没有，
+      // 按 lastAt 算就是"闲置"→ agent 明明在干活却被判睡着，
+      // 下一个事件一来又醒、一会儿又睡，看起来像在抽搐。
+      //
+      // 而且只认 idle：working / thinking / error 期间不累计睡意。
+      // "没新事件推过来"不等于"没在做事"。
+      if (s.state !== "sleeping" && s.state === "idle" && now - s.stateSince > sleepAfterMs()) {
         s.state = "sleeping";
         s.stateSince = now;
       }

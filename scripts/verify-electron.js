@@ -221,8 +221,229 @@ class Cdp {
   }
 }
 
+// ------------------------------------------------------------
+// S8：把 hook 当成真宿主来调用
+//
+// 为什么不用 require 调用内部函数，而是真起一个子进程喂 stdin：
+// 投递的**唯一**生效方式是 hook 往 stdout 写 JSON，那段文本会被宿主
+// 当作上下文收下。真起进程才能证明"stdout 上到底出现了什么字节"——
+// 而"没信的时候一个字节都没有"恰恰是这个功能最重要的那条边界。
+// ------------------------------------------------------------
+function runHook(event, stdinObj, env) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [path.join(ROOT, "hooks", "clawd-hook.js"), event], {
+      cwd: ROOT,
+      env: { ...cleanEnv(), ...env },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (c) => (out += c));
+    child.stderr.on("data", (c) => (err += c));
+    child.on("close", (code) => resolve({ out, err, code }));
+    child.stdin.end(JSON.stringify(stdinObj));
+  });
+}
+
+async function verifyMailbox() {
+  // 每个断言都用一个干净的信箱目录：共用一个的话，
+  // 上一条断言留下的信会让下一条的"应该是 0 封"变成假失败。
+  const base = path.join(TMP_ROOT, "mailbox");
+  process.env.CLAWD_MAILBOX_DIR = path.join(base, "main");
+  delete require.cache[require.resolve("../src/mailbox")];
+  const mailbox = require("../src/mailbox");
+
+  ok("全新信箱里一封信都没有", mailbox.listPending().length === 0);
+
+  const written = mailbox.put("帮我把 docs/ 里的旧截图删掉。\n第二行要保留。");
+  ok("写一封普通信成功", written.ok === true, written.ok ? `id=${written.id.slice(0, 8)}` : written.error);
+  ok("写完能读到 1 封待投递", mailbox.listPending().length === 1);
+
+  ok("空白信被拒（只有空格换行不算信）", mailbox.put("  \n\t \n ").ok === false);
+  ok("非字符串被拒", mailbox.put({ text: "x" }).ok === false);
+  ok(
+    "超过上限一个字就被拒",
+    mailbox.put("字".repeat(mailbox.MAX_LETTER_CHARS + 1)).ok === false
+  );
+  ok(
+    "刚好等于上限可以寄",
+    mailbox.put("字".repeat(mailbox.MAX_LETTER_CHARS)).ok === true
+  );
+
+  // 上限是 5，此时已有 2 封（普通一封 + 满长一封），补到 5 就满了
+  mailbox.put("第三封");
+  mailbox.put("第四封");
+  mailbox.put("第五封");
+  const overflow = mailbox.put("第六封");
+  ok(
+    "信箱满 5 封后拒绝新信（不无限堆积）",
+    overflow.ok === false && /封/.test(overflow.error || ""),
+    overflow.error
+  );
+
+  const first = mailbox.take();
+  // 顺序这一条要验两件事：
+  //   1. 先写的排前面（用户唯一能感知到的语义）
+  //   2. createdAt 严格递增 —— 这是 1 能成立的原因。
+  //      只验 1 不够：几封信落在同一毫秒里时，1 也可能碰巧对。
+  ok(
+    "取信按写入顺序、一封不漏",
+    first.letters.length === mailbox.MAX_PENDING &&
+      String(first.letters[0].text).indexOf("帮我把 docs/") === 0,
+    `n=${first.letters.length} first=${String(first.letters[0] && first.letters[0].text).slice(0, 12)}`
+  );
+  ok(
+    "同一毫秒连写的几封信也严格有序（不是按随机 UUID 排）",
+    first.letters.every((l, i, a) => i === 0 || l.createdAt > a[i - 1].createdAt),
+    first.letters.map((l) => l.createdAt).join(",")
+  );
+  ok("取走后待投递清零", mailbox.listPending().length === 0);
+  ok(
+    "取走的信挪进了 sent/（留证据，不是直接删）",
+    fs.readdirSync(path.join(base, "main", "sent")).length === mailbox.MAX_PENDING
+  );
+  ok("再取一次是空的（不会重复投递）", mailbox.take().letters.length === 0);
+
+  // ---- 过期 ----
+  // 造一封 25 小时前的信：TTL 是 24h，它不该被取走。
+  // 这条不是在测"代码能跑"，是在测"隔几天突然冒出一封旧信"会不会发生。
+  const staleDir = path.join(base, "stale");
+  process.env.CLAWD_MAILBOX_DIR = staleDir;
+  fs.mkdirSync(path.join(staleDir, "pending"), { recursive: true });
+  fs.writeFileSync(
+    path.join(staleDir, "pending", "stale0001.json"),
+    JSON.stringify({ id: "stale0001", createdAt: Date.now() - 25 * 3600 * 1000, text: "三天前的旧信" })
+  );
+  const staleTake = mailbox.take();
+  ok("超过 24h 的信不会被投递（也不会诈尸）", staleTake.letters.length === 0 && staleTake.expired === 1);
+
+  // ---- 坏文件与路径穿越 ----
+  // 信箱目录是磁盘上的普通目录，谁都能往里放文件。所以读的一侧必须假设
+  // "这里面可能有不认识的东西"：坏 JSON、以及最要命的那种——id 里带 ../。
+  // take() 会用 `${letter.id}.json` 拼路径去 rename，一个没校验的 id
+  // 就能把文件从信箱搬到任意位置。
+  const badDir = path.join(base, "bad");
+  process.env.CLAWD_MAILBOX_DIR = badDir;
+  fs.mkdirSync(path.join(badDir, "pending"), { recursive: true });
+  fs.writeFileSync(path.join(badDir, "pending", "broken0001.json"), "{ 这不是 JSON");
+  fs.writeFileSync(
+    path.join(badDir, "pending", "evil00001.json"),
+    JSON.stringify({ id: "../../../../etc/passwd", createdAt: Date.now(), text: "想跑出信箱" })
+  );
+  fs.writeFileSync(
+    path.join(badDir, "pending", "okokok01.json"),
+    JSON.stringify({ id: "okokok01", createdAt: Date.now(), text: "正常的一封" })
+  );
+  const survived = mailbox.listPending();
+  ok(
+    "坏 JSON 与非法 id 的信被跳过，正常的照收",
+    survived.length === 1 && survived[0].id === "okokok01",
+    `n=${survived.length} ids=${survived.map((l) => l.id).join(",")}`
+  );
+  mailbox.take();
+  const afterTake = fs.readdirSync(path.join(badDir, "pending"));
+  ok(
+    "非法 id 的信没被挪走（借它把文件搬出信箱这条路走不通）",
+    afterTake.includes("evil00001.json") && afterTake.includes("broken0001.json"),
+    afterTake.join(",")
+  );
+
+  // ---- 边界标记 ----
+  process.env.CLAWD_MAILBOX_DIR = path.join(base, "fmt");
+  mailbox.put("正文第一行\n正文第二行");
+  const fmt = mailbox.format(mailbox.take().letters);
+  ok(
+    "信的正文前后有清楚边界（不和用户此刻说的话混在一起）",
+    fmt.includes("【桌宠转交") && fmt.includes("【信完】") && fmt.includes("正文第一行\n正文第二行")
+  );
+
+  // ---- hook：没有信的时候必须一个字节都不输出 ----
+  // 这条是整个功能最危险的一条：UserPromptSubmit 的 stdout 会被塞进
+  // 用户的消息里，多打一个换行都是在污染每一次对话。
+  process.env.CLAWD_MAILBOX_DIR = path.join(base, "empty");
+  const hookEnv = {
+    CLAWD_MAILBOX_DIR: path.join(base, "empty"),
+    // 指一个不存在的端点文件 = 桌宠没开。信必须照样能寄出去。
+    CLAWD_PORT_FILE: path.join(base, "no-such.port"),
+  };
+  const quiet = await runHook("UserPromptSubmit", { hook_event_name: "UserPromptSubmit", prompt: "hi" }, hookEnv);
+  ok("没信时 hook 的 stdout 是 0 字节", quiet.out === "", `len=${quiet.out.length}`);
+  ok("没信时 hook 退出码 0", quiet.code === 0);
+
+  // ---- hook：有信时投递 ----
+  const sendDir = path.join(base, "send");
+  process.env.CLAWD_MAILBOX_DIR = sendDir;
+  mailbox.put("今晚把 README 的截图换掉");
+  const sent = await runHook(
+    "UserPromptSubmit",
+    { hook_event_name: "UserPromptSubmit", prompt: "帮我看看这个 bug" },
+    { ...hookEnv, CLAWD_MAILBOX_DIR: sendDir }
+  );
+
+  let parsed = null;
+  try {
+    parsed = JSON.parse(sent.out);
+  } catch {}
+  ok(
+    "有信时 hook 输出的是合法 JSON（半截 JSON 等于信没寄出去）",
+    !!parsed && parsed.continue === true,
+    sent.out.slice(0, 60)
+  );
+  ok(
+    "投递走的是 UserPromptSubmit 的 additionalContext（官方支持的注入口）",
+    !!parsed &&
+      parsed.hookSpecificOutput &&
+      parsed.hookSpecificOutput.hookEventName === "UserPromptSubmit" &&
+      String(parsed.hookSpecificOutput.additionalContext).includes("今晚把 README 的截图换掉"),
+    parsed && parsed.hookSpecificOutput ? parsed.hookSpecificOutput.hookEventName : "(无)"
+  );
+  ok(
+    "桌宠没开也能寄信（投递不依赖端口文件）",
+    !!parsed && String(parsed.hookSpecificOutput.additionalContext).includes("今晚把 README 的截图换掉"),
+    `portFileExists=${fs.existsSync(hookEnv.CLAWD_PORT_FILE)}`
+  );
+
+  const again = await runHook(
+    "UserPromptSubmit",
+    { hook_event_name: "UserPromptSubmit", prompt: "再说一句" },
+    { ...hookEnv, CLAWD_MAILBOX_DIR: sendDir }
+  );
+  ok("同一封信不会被投递第二次", again.out === "", `len=${again.out.length}`);
+
+  // ---- 别的钩子事件不许把信吃掉 ----
+  // 信只能在"用户说话"的那一刻送进上下文。要是 PreToolUse 把信取走了，
+  // 它就白白消失在一次工具调用里，用户永远等不到它。
+  const poachDir = path.join(base, "poach");
+  process.env.CLAWD_MAILBOX_DIR = poachDir;
+  mailbox.put("这封信只能等用户说话时再送");
+  const poach = await runHook(
+    "PreToolUse",
+    { hook_event_name: "PreToolUse", tool_name: "Bash" },
+    { ...hookEnv, CLAWD_MAILBOX_DIR: poachDir }
+  );
+  process.env.CLAWD_MAILBOX_DIR = poachDir;
+  ok(
+    "PreToolUse 不会把信取走（也不会往 stdout 多写东西）",
+    poach.out === "" && mailbox.listPending().length === 1,
+    `outLen=${poach.out.length} pending=${mailbox.listPending().length}`
+  );
+
+  // 收尾：别把测试造出来的信留在环境里影响后面
+  process.env.CLAWD_MAILBOX_DIR = path.join(base, "main");
+}
+
 async function main() {
   console.log("Electron 升级回归\n" + "=".repeat(56));
+
+  // ============================================================
+  // 0. 信箱与投递（S8）
+  //
+  // 这一段**不需要 Electron**，所以放在起进程之前跑：
+  //   1. 快 —— 不用等窗口
+  //   2. 干净 —— 此刻端点文件还不存在，正好是"桌宠没开"的真实场景，
+  //      而"桌宠关着也能寄信"就是这套设计必须成立的前提
+  // ============================================================
+  await verifyMailbox();
 
   // 前置：不能有别的实例在跑，否则单实例锁会让本次启动直接退出
   const existing = await getJson(MAIN_PORT, "/json/list");
@@ -239,7 +460,13 @@ async function main() {
 
   // CLAWD_PERMISSION_TIMEOUT_MS：只为了让回归能真的测到"超时回落 204"。
   // 正常运行时不设这个变量，默认是 120 秒。
-  const childEnv = { ...cleanEnv(), CLAWD_PERMISSION_TIMEOUT_MS: "6000" };
+  // CLAWD_MAILBOX_DIR：信箱必须隔离，否则回归会往用户真实的信箱里写信，
+  // 而"信"是会进 agent 上下文的东西 —— 让测试往那儿塞字是最不该发生的事。
+  const childEnv = {
+    ...cleanEnv(),
+    CLAWD_PERMISSION_TIMEOUT_MS: "6000",
+    CLAWD_MAILBOX_DIR: path.join(TMP_ROOT, "mailbox", "app"),
+  };
 
   const child = spawn(
     ELECTRON_BIN,
@@ -375,9 +602,10 @@ async function main() {
     ok("contextIsolation 生效：渲染层拿不到 require", (await R.eval("typeof window.require")) === "undefined");
     ok("contextIsolation 生效：渲染层拿不到 process", (await R.eval("typeof window.process")) === "undefined");
     ok("preload 没有泄漏 ipcRenderer", (await R.eval("typeof window.ipcRenderer")) === "undefined");
-    // 动作数是安全闸门：S6 加了 toggleDashboard（6→7），S7 加了 getTheme / onTheme（7→9）。
+    // 动作数是安全闸门：S6 加了 toggleDashboard（6→7），S7 加了 getTheme / onTheme（7→9），
+    // S8 加了 openLetter / petMenu / onLetterSent（9→12）。
     // 以后每次加 IPC 都要顺手改这里，改的时候问自己一句"这个动作真的需要吗"。
-    ok("preload 只暴露 9 个具名动作", (await R.eval("Object.keys(window.clawd||{}).length")) === 9);
+    ok("preload 只暴露 12 个具名动作", (await R.eval("Object.keys(window.clawd||{}).length")) === 12);
 
     // ---------- 3. 状态切换 ----------
     // 必须先等主进程把首次状态推下来（main.js 里是启动后 300ms 的一次 broadcast）。
@@ -495,7 +723,11 @@ async function main() {
              return el.style.transform + ' / ' + el.getAttribute('d');
            }).join('|');
          })()`
-      : "JSON.stringify(window.petDebug.motion())";
+      // 帧序列路径：没有部件动画那套东西了（motion 引擎随骨骼重写一起删了），
+      // 它剩下的"每帧在算"就是按 fps 换 .on 的那张帧——所以探针读的是索引。
+      // 这里原来写的是 window.petDebug.motion()，而那个出口早就删了：
+      // 默认主题是骨骼路径，这段从来没执行过，真跑到它会直接 TypeError。
+      : "Array.from(document.querySelectorAll('svg.frame')).findIndex((e)=>e.classList.contains('on'))";
     const snaps = [];
     for (let i = 0; i < 12; i++) {
       snaps.push(String(await R.eval(probeExpr)));
@@ -519,30 +751,26 @@ async function main() {
       );
     }
 
-    // 眨眼。骨骼渲染的做法是"把睁眼层藏起来"，帧序列是"把眼睛压扁"。
+    // 眨眼。骨骼渲染的做法是"把睁眼层藏起来"。
     // 间隔随机 1.8~4.2s（thinking），采样窗口要盖过最大间隔。
     // **必须从 Node 侧逐次读**：CDP 的 send() 有 5 秒超时，页面里的长循环会静默返回 undefined。
+    //
+    // 这里原来还有一个 else 分支：帧序列主题"把眼睛压扁" —— 那是 motion 引擎干的，
+    // 而 motion 引擎已经删了，那条分支调用 window.petDebug.motion() 会直接 TypeError
+    // （它靠 rigMode 恒为 true 才一直没暴露）。眨眼现在是骨骼引擎的能力，
+    // 所以只在骨骼路径下断言，别再保留一个"测不存在的能力"的假分支。
     await R.eval("window.petDebug.setState('thinking')");
     await sleep(120);
-    let blinkMin = 1;
     let blinkSeen = false;
     for (let i = 0; i < 100; i++) {
-      if (rigMode) {
-        const v = await R.eval("document.getElementById('rig-eyes-open')?.getAttribute('opacity')");
-        if (v === "0") { blinkSeen = true; break; }
-      } else {
-        const t = await R.eval("window.petDebug.motion().eyes || ''");
-        const m = /scale\(1 ([\d.]+)\)/.exec(t || "");
-        if (m) blinkMin = Math.min(blinkMin, Number(m[1]));
-        if (blinkMin < 0.5) break;
+      const v = await R.eval("document.getElementById('rig-eyes-open')?.getAttribute('opacity')");
+      if (v === "0") {
+        blinkSeen = true;
+        break;
       }
       await sleep(50);
     }
-    ok(
-      rigMode ? "会眨眼（睁眼层被藏起来过一次以上）" : "会眨眼（眼睛被压扁过一次以上）",
-      rigMode ? blinkSeen : blinkMin < 0.5,
-      rigMode ? `seen=${blinkSeen}` : `最小纵向比例 ${blinkMin}`
-    );
+    ok("会眨眼（睁眼层被藏起来过一次以上）", blinkSeen, `seen=${blinkSeen}`);
 
     // ---------- 3.5 working 场景（敲键盘）与 eyeTracking ----------
     // working 曾经是水边垂钓，还带鱼 / 拖鞋两条彩蛋；用户改回敲键盘后，
@@ -722,7 +950,8 @@ async function main() {
       ok("不可缩放", (await M.eval("require('electron').BrowserWindow.getAllWindows()[0].isResizable()")) === false);
 
       // 四条 IPC 通道是否都接上了：从主进程数监听器，比从渲染层猜可靠
-      for (const ch of ["drag:start", "drag:end", "mouse:ignore", "app:quit"]) {
+      // （letter:send 是 invoke/handle，不在 listenerCount 里，另有断言覆盖）
+      for (const ch of ["drag:start", "drag:end", "mouse:ignore", "app:quit", "pet:menu", "letter:open"]) {
         ok(
           `IPC ${ch} 已接线`,
           (await M.eval(`require('electron').ipcMain.listenerCount('${ch}')`)) >= 1
@@ -895,6 +1124,15 @@ async function main() {
         await sleep(100);
       }
       ok("POST /state 真的驱动了渲染层", rendered === "working", `渲染层当前=${rendered}`);
+
+      // 事件日志要真的流到渲染层才算数：主进程记了但没推过去，
+      // 排查的时候打开 DevTools 仍然是一片空白——那和没记一样。
+      const evLog = await R.eval("window.petDebug.events()");
+      ok(
+        "petDebug.events() 拿到了主进程的事件日志（不是空数组）",
+        Array.isArray(evLog) && evLog.length > 0 && typeof evLog[evLog.length - 1].event === "string",
+        `${evLog.length} 条，最新=${JSON.stringify(evLog[evLog.length - 1])}`
+      );
     }
 
     // ---------- 7.5 权限端点（S5） ----------
@@ -1163,31 +1401,154 @@ async function main() {
           }
         }
 
-        // S7：看板里的主题下拉框。列表由主进程给，所以能点到的每一项都真的加载得起来。
-        const themeList = await D.eval(
-          "window.dashboard.listThemes().then(d => ({ current: d.current, ok: d.themes.filter(t=>t.ok).map(t=>t.id).join(','), bad: d.themes.filter(t=>!t.ok).length }))"
+        // S7：看板里的主题下拉框。crab 删掉之后只剩 ragdoll 一个主题，
+        // 而"能换形象"这件事必须有**第二个主题**才测得出来——这两条覆盖面
+        // 之前是靠 crab 撑着的，删它不能顺手把防线一起删了。
+        // 所以回归运行时往 themes/ 里临时塞一个 `probe` 主题（帧序列、多帧、
+        // 不写 timings），测完在 finally 里删掉。
+        // 它对运行时是可见的：`listThemeIds()` 每次都 readdirSync，
+        // 不像 THEMES_DIR 那样只在模块加载时算一次。
+        const probeDir = path.join(ROOT, "themes", "probe");
+        const PROBE_SVG =
+          '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">' +
+          '<rect x="40" y="60" width="120" height="80" rx="10" fill="#7FB3D5"/>' +
+          '<g class="pupils"><ellipse cx="80" cy="100" rx="9" ry="12" fill="#123"/>' +
+          '<ellipse cx="120" cy="100" rx="9" ry="12" fill="#123"/></g></svg>';
+        fs.mkdirSync(path.join(probeDir, "assets"), { recursive: true });
+        // 3 张不同颜色的主资产（为了测"多帧在轮播"），
+        // 再加 2 张专属颜色的变体（为了测"切回来换的是另一套"）。
+        // 同一个形状只是换了填充色，肉眼分得出第几套，回归也能按 id 读。
+        const probeFrame = (fill) =>
+          '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">' +
+          `<rect id="probe-swatch" x="40" y="60" width="120" height="80" rx="10" fill="${fill}"/>` +
+          '<g class="pupils"><ellipse cx="80" cy="100" rx="9" ry="12" fill="#123"/>' +
+          '<ellipse cx="120" cy="100" rx="9" ry="12" fill="#123"/></g></svg>';
+        fs.writeFileSync(path.join(probeDir, "assets", "p1.svg"), probeFrame("#7FB3D5"));
+        fs.writeFileSync(path.join(probeDir, "assets", "p2.svg"), probeFrame("#D57F7F"));
+        fs.writeFileSync(path.join(probeDir, "assets", "p3.svg"), probeFrame("#7FD59B"));
+        fs.writeFileSync(path.join(probeDir, "assets", "v1.svg"), probeFrame("#C07FD5"));
+        fs.writeFileSync(path.join(probeDir, "assets", "v2.svg"), probeFrame("#D5C47F"));
+        fs.writeFileSync(
+          path.join(probeDir, "theme.json"),
+          JSON.stringify({
+            schemaVersion: 1,
+            name: "回归探针",
+            description: "回归运行时临时创建，用完即删",
+            states: {
+              idle: {
+                fps: 8,
+                eyeTracking: true,
+                frames: ["p1.svg", "p2.svg", "p3.svg"],
+                // 一套变体 → 连同主资产一共 2 个槽位
+                variants: [{ id: "alt", frames: ["v1.svg", "v2.svg"] }],
+              },
+            },
+          })
         );
-        ok(
-          "看板列出了主题（且都加载成功）",
-          !!themeList && themeList.ok === "crab,ragdoll" && themeList.bad === 0,
-          `ok=${themeList && themeList.ok} 坏的=${themeList && themeList.bad}`
-        );
+        try {
+          const themeList = await D.eval(
+            "window.dashboard.listThemes().then(d => ({ current: d.current, ok: d.themes.filter(t=>t.ok).map(t=>t.id).join(','), bad: d.themes.filter(t=>!t.ok).length }))"
+          );
+          ok(
+            "看板列出了主题（且都加载成功）",
+            !!themeList && themeList.ok === "probe,ragdoll" && themeList.bad === 0,
+            `ok=${themeList && themeList.ok} 坏的=${themeList && themeList.bad}`
+          );
 
-        const switched = await D.eval("window.dashboard.setTheme('crab')");
-        let afterThemeId = null;
-        for (let i = 0; i < 20; i++) {
-          afterThemeId = await R.eval("window.petDebug.theme().id");
-          if (afterThemeId === "crab") break;
-          await sleep(100);
+          const switched = await D.eval("window.dashboard.setTheme('probe')");
+          let afterThemeId = null;
+          for (let i = 0; i < 20; i++) {
+            afterThemeId = await R.eval("window.petDebug.theme().id");
+            if (afterThemeId === "probe") break;
+            await sleep(100);
+          }
+          ok("看板切主题后桌宠立刻换形象", switched && switched.ok === true && afterThemeId === "probe", `id=${afterThemeId}`);
+
+          // 探针主题只声明了 idle 的 3 帧，缺的 6 个状态由 idle 补齐 → 7×3=21
+          const probeFrames = await R.eval(
+            "Object.values(window.VISUAL_STATES).reduce((n, s) => n + s.frames.length, 0)"
+          );
+          ok("换主题后缺失状态被 idle 补齐（7×3=21）", probeFrames === 21, `帧数=${probeFrames}`);
+
+          // probe 是**帧序列**主题（没有 rigType），正好承接删掉 crab 之后
+          // 帧序列这条渲染路径的端到端覆盖——它现在的活消费者只剩内置兜底画面和第三方主题。
+          const probeMode = await R.eval("window.petDebug.theme().rig");
+          ok("没有 rigType 的主题走帧序列路径", probeMode !== "spring", `rig=${probeMode}`);
+
+          const probeShots = [];
+          for (let i = 0; i < 10; i++) {
+            probeShots.push(
+              await R.eval(
+                "(() => { const l = document.querySelector('.layer.show'); if (!l) return -1;" +
+                " return Array.from(l.querySelectorAll('svg.frame')).findIndex((e)=>e.classList.contains('on')); })()"
+              )
+            );
+            await sleep(90);
+          }
+          ok(
+            "帧序列真的在轮播（.on 索引持续变化）",
+            new Set(probeShots).size >= 3,
+            `不同索引 ${new Set(probeShots).size}/10`
+          );
+
+          // ---------- 表情变体：一个状态的多套资产 ----------
+          // 只断言"states.idle.variants 被解析出来了"是不够的——那是硬约束 25 的形状：
+          // 字段到了、校验过了、渲染层没看它一眼。所以这里要读**屏幕上真在播的那块颜色**：
+          // 变体用的是另一组填充色，颜色变了才说明真的换了资产。
+          // 必须限定 .layer.show：旧图层的帧还要挂 240ms 才清，
+          // 直接 querySelector 会抓到正在淡出的那一套，读出来的颜色是"上一套"的。
+          const readSwatch = () =>
+            R.eval(
+              "(() => { const l = document.querySelector('.layer.show'); if (!l) return null;" +
+              " const e = l.querySelector('svg.frame.on #probe-swatch'); return e ? e.getAttribute('fill') : null; })()"
+            );
+          //
+          // 用"轮询到目标为止"，而不是"切两次就该是第 2 套"：主进程每 250ms 推一次 state，
+          // 推送本身也会触发 renderState，两次手动 setState 之间可能夹进额外轮换。
+          // 断言写成"第 2 次必须 pick===1"就会时红时绿——那是测试在赌时序，不是在验功能。
+          const MAIN_COLORS = ["#7FB3D5", "#D57F7F", "#7FD59B"];
+          const ALT_COLORS = ["#C07FD5", "#D5C47F"];
+          const v0 = await R.eval("window.petDebug.variant()");
+
+          ok(
+            "petDebug.variant() 返回真的槽位信息（不是空对象）",
+            !!v0 && v0.slots === 2 && typeof v0.pick === "number",
+            JSON.stringify(v0)
+          );
+
+          let alt = null;
+          let back = null;
+          for (let round = 0; round < 8 && !(alt && back); round++) {
+            await R.eval("window.petDebug.setState('thinking')");
+            await sleep(150);
+            await R.eval("window.petDebug.setState('idle')");
+            await sleep(150);
+            const v = await R.eval("window.petDebug.variant()");
+            const color = await readSwatch();
+            if (v.pick === 1 && v.id === "alt" && alt === null) alt = color;
+            if (alt !== null && v.pick === 0 && v.id === "" && back === null) back = color;
+          }
+          ok(
+            "切走再切回来会轮换到另一套表情变体",
+            ALT_COLORS.includes(alt),
+            `轮换到的变体色=${alt}`
+          );
+          ok(
+            "换上去的确实是另一套资产（不是主资产那三种色）",
+            ALT_COLORS.includes(alt) && !MAIN_COLORS.includes(alt),
+            `变体色=${alt}`
+          );
+          ok(
+            "再切一轮回到主资产（轮播能循环，不会卡在变体上）",
+            MAIN_COLORS.includes(back),
+            `回到主资产的色=${back}`
+          );
+        } finally {
+          // 无论上面有没有挂，都不能在仓库里留一个 probe 主题
+          fs.rmSync(probeDir, { recursive: true, force: true });
         }
-        ok("看板切主题后桌宠立刻换形象", switched && switched.ok === true && afterThemeId === "crab", `id=${afterThemeId}`);
 
-        const crabFrames = await R.eval(
-          "Object.values(window.VISUAL_STATES).reduce((n, s) => n + s.frames.length, 0)"
-        );
-        ok("换主题后帧数依然完整（19）", crabFrames === 19, `帧数=${crabFrames}`);
-
-        // 切回默认，别给下一次运行留一个"上次选了螃蟹"的偏好
+        // 切回默认，别给下一次运行留一个"上次选了 probe"的偏好
         await D.eval("window.dashboard.setTheme('ragdoll')");
         await sleep(200);
 
@@ -1345,19 +1706,72 @@ async function main() {
       const vNone = await drive(() => null, "Stop", 220);
       ok("对照组：没写就用内置 2400ms（220ms 时仍在 attention）", vNone === "attention", `visual=${vNone}`);
 
-      const vSleep = await drive(() => SHORT, "PreToolUse", 220);
-      ok("主题写的 sleepAfterMs 真的生效（60ms 就睡着）", vSleep === "sleeping", `visual=${vSleep}`);
-      const vNoSleep = await drive(() => null, "PreToolUse", 220);
-      ok("对照组：没写 sleepAfterMs 还是内置 60 秒（仍是 working）", vNoSleep === "working", `visual=${vNoSleep}`);
+      // 睡意从 idle 开始累计，所以用 SessionStart（→idle）当样本。
+      // 早先用 PreToolUse（→working）验证"会睡"，那是旧语义；改口径后它必然失败——
+      // 断言在这里起到的作用就是逼我把"到底该验什么"重新想一遍。
+      const vSleep = await drive(() => SHORT, "SessionStart", 220);
+      ok("主题写的 sleepAfterMs 真的生效（idle 60ms 就睡着）", vSleep === "sleeping", `visual=${vSleep}`);
+      const vNoSleep = await drive(() => null, "SessionStart", 220);
+      ok("对照组：没写 sleepAfterMs 就用内置 60 秒（idle 220ms 还醒着）", vNoSleep === "idle", `visual=${vNoSleep}`);
 
       // 状态机的形状不能由主题改：给 working 写时长也不该把它变成 oneshot，
       // 否则主题一改就是"working 播 2 秒就消失"，而且是静默的。
       const vFake = await drive(() => ({ oneshot: { working: 60 } }), "PreToolUse", 220);
       ok("主题不能凭空造 oneshot（给 working 写时长也还是 working）", vFake === "working", `visual=${vFake}`);
 
+      // sleepAfterMs 的口径是「idle 持续多久」，不是「多久没收到事件」。
+      // 这两者的差别被真实场景狠狠教了一次：给主题配了 20 秒之后，
+      // 一次跑超过 20 秒的工具调用会让宠物在 agent 干活时睡着，
+      // 下一个事件一来又醒、一会儿又睡，看起来像在抽搐。
+      // 所以这里必须有一条断言盯着"working 期间不许睡"。
+      {
+        const st = S.createStore({ onChange: () => {}, getTimings: () => ({ sleepAfterMs: 60 }) });
+        st.apply({ session_id: "sleep-probe", event: "PreToolUse" }); // → working
+        await sleep(300);
+        st.tick();
+        const vWork = st.snapshot().visual;
+        st.apply({ session_id: "sleep-probe", event: "SessionStart" }); // → idle
+        await sleep(300);
+        st.tick();
+        const vIdle = st.snapshot().visual;
+        st.dispose();
+        ok("agent 在干活时不会睡着（working 期间不累计睡意）", vWork === "working", `visual=${vWork}`);
+        ok("idle 累计够久就睡着（睡意确实还是会生效）", vIdle === "sleeping", `visual=${vIdle}`);
+      }
+
+      // 事件日志：排查"它为什么变成 idle"只能靠它——视觉层只看到结果，看不到是被哪个事件推的。
+      {
+        const st = S.createStore({ onChange: () => {} });
+        st.apply({ session_id: "log-probe", event: "UserPromptSubmit" });
+        st.apply({ session_id: "log-probe", event: "NopeNotARealEvent" });
+        const log = st.snapshot().recent;
+        st.dispose();
+        const mapped = log.filter((r) => r.how === "mapped");
+        const ignored = log.filter((r) => r.how === "ignored");
+        ok(
+          "事件日志记下了 agent 推来的每个事件与去向",
+          mapped.length === 1 && mapped[0].event === "UserPromptSubmit" && mapped[0].to === "thinking",
+          JSON.stringify(log)
+        );
+        ok(
+          "认不出来的事件会被标成 ignored（不静默失效）",
+          ignored.length === 1 && ignored[0].event === "NopeNotARealEvent",
+          JSON.stringify(ignored)
+        );
+      }
+
       // 解析层：写了的能读出来、没写的如实返回 null（不替它编默认值）
       const rag = T3.loadTheme("ragdoll");
-      const crb = T3.loadTheme("crab");
+      // 对照组本来用的是 crab（它没写 timings），但 crab 作为"多余的主题"被删了。
+      // 改用 Node 侧夹具里的 good —— 它同样没写 timings。
+      // 删主题可以，这条对照不能跟着消失：没有它，上面那几条"生效了"都不可信。
+      // 注意 good 住在 fixtures 目录里，得先把 CLAWD_THEMES_DIR 切回去才读得到。
+      process.env.CLAWD_THEMES_DIR = themeFixture;
+      delete require.cache[require.resolve("../src/theme")];
+      const crb = require("../src/theme").loadTheme("good");
+      if (savedDir === undefined) delete process.env.CLAWD_THEMES_DIR;
+      else process.env.CLAWD_THEMES_DIR = savedDir;
+      delete require.cache[require.resolve("../src/theme")];
       ok(
         "ragdoll 声明的 timings 被读出来",
         rag.ok && rag.theme.timings && rag.theme.timings.oneshot.attention === 800,
@@ -1386,6 +1800,108 @@ async function main() {
       if (savedDir === undefined) delete process.env.CLAWD_THEMES_DIR;
       else process.env.CLAWD_THEMES_DIR = savedDir;
       delete require.cache[require.resolve("../src/theme")];
+    }
+
+    // ---------- 7.95 信纸（S8） ----------
+    // 走的是完整链路：渲染层的 openLetter → IPC → 主进程建窗 → 页面注入文字
+    // → 点「寄出」→ ipcRenderer.invoke → mailbox.put 落盘。
+    // 任何一环断了，最后那条"信真的躺在信箱里"就不会成立。
+    {
+      const appMailbox = childEnv.CLAWD_MAILBOX_DIR;
+
+      // 用 preload 暴露的通道，而不是直接在渲染层 import：
+      // 这样"preload 到底有没有把这条能力开口"也一并验了。
+      ok(
+        "preload 暴露了 openLetter（渲染层才够得着写信）",
+        (await R.eval("typeof window.clawd.openLetter")) === "function"
+      );
+
+      R.send("Runtime.evaluate", { expression: "window.clawd.openLetter()", returnByValue: true });
+      await sleep(1200);
+
+      const letterInfo = await M.eval(`(() => {
+        const W = require('electron').BrowserWindow;
+        const w = W.getAllWindows().find((x) => String(x.webContents.getURL()).includes('letter.html'));
+        if (!w) return null;
+        const p = w.webContents.getLastWebPreferences() || {};
+        return JSON.stringify({
+          visible: w.isVisible(),
+          onTop: w.isAlwaysOnTop(),
+          w: w.getBounds().width,
+          h: w.getBounds().height,
+          ctx: p.contextIsolation,
+          node: p.nodeIntegration,
+          sandbox: p.sandbox,
+        });
+      })()`);
+      const li = letterInfo ? JSON.parse(letterInfo) : null;
+
+      ok("双击桌宠能开出信纸窗口", !!li && li.visible === true, letterInfo || "没找到 letter.html 窗口");
+      ok("信纸置顶（否则会被以为是双击没反应）", !!li && li.onTop === true);
+      ok(
+        "信纸的安全基线和主窗口一致（contextIsolation / 无 node / sandbox）",
+        !!li && li.ctx === true && li.node === false && li.sandbox === true,
+        li ? `ctx=${li.ctx} node=${li.node} sandbox=${li.sandbox}` : ""
+      );
+
+      // 连到信纸那一页，真的打几个字再点「寄出」
+      const letterList = await getJson(RENDERER_PORT, "/json/list");
+      const letterTarget = (letterList || []).find((t) => String(t.url).includes("letter.html"));
+      ok("信纸页面能在 CDP 里看到（说明它真的加载了，不是空窗口）", !!letterTarget);
+
+      if (letterTarget) {
+        const L = await Cdp.connect(letterTarget.webSocketDebuggerUrl);
+        await L.send("Runtime.enable");
+
+        const before = fs.existsSync(path.join(appMailbox, "pending"))
+          ? fs.readdirSync(path.join(appMailbox, "pending")).length
+          : 0;
+
+        // 「寄出」按钮在空信时是禁用的，这条先确认一下——不然下面点了没反应会像 bug
+        ok(
+          "空信时「寄出」是禁用的（不会寄出空白信）",
+          (await L.eval("document.getElementById('btnSend').disabled")) === true
+        );
+
+        await L.eval(
+          "(() => { const t = document.getElementById('text'); t.value = '回归写的一封信：把 README 的截图换成新的';" +
+            " t.dispatchEvent(new Event('input')); return document.getElementById('btnSend').disabled; })()"
+        );
+        ok(
+          "打了字之后「寄出」才可用",
+          (await L.eval("document.getElementById('btnSend').disabled")) === false
+        );
+
+        await L.eval("document.getElementById('btnSend').click()");
+        await sleep(700);
+
+        const pendingDir = path.join(appMailbox, "pending");
+        const files = fs.existsSync(pendingDir) ? fs.readdirSync(pendingDir).filter((f) => f.endsWith(".json")) : [];
+        const body = files.length ? JSON.parse(fs.readFileSync(path.join(pendingDir, files[0]), "utf8")) : null;
+
+        ok(
+          "点「寄出」后信真的落盘了（不是只关了个窗口）",
+          files.length === before + 1 && !!body && String(body.text).includes("回归写的一封信"),
+          `files=${files.length} before=${before}`
+        );
+
+        const stillVisible = await M.eval(`(() => {
+          const w = require('electron').BrowserWindow.getAllWindows()
+            .find((x) => String(x.webContents.getURL()).includes('letter.html'));
+          return w ? w.isVisible() : 'gone';
+        })()`);
+        ok("寄出后信纸收起（不挡着屏幕，也不留一份草稿在别人眼里）", stillVisible === false, String(stillVisible));
+
+        // 用户必须得到反馈。静默成功等于让用户重复寄好几遍。
+        const hintText = await R.eval("document.getElementById('hint').textContent");
+        ok(
+          "寄出后桌宠会明确说一句（不是静默成功）",
+          typeof hintText === "string" && hintText.includes("信已封好"),
+          String(hintText)
+        );
+
+        L.close();
+      }
     }
 
     // ---------- 8. 单实例锁（SEC-10） ----------
@@ -1465,7 +1981,7 @@ async function main() {
         resolve(true);
       });
     });
-    ok("右键退出能正常关闭进程", exited, `exitCode=${child.exitCode}`);
+    ok("quit() 能正常关闭进程（右键菜单里『退出』走的就是它）", exited, `exitCode=${child.exitCode}`);
     await sleep(300);
     ok("退出后端点文件已删除（before-quit 清理）", !fs.existsSync(PORT_FILE));
 

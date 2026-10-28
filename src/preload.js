@@ -10,7 +10,12 @@ contextBridge.exposeInMainWorld("clawd", {
   dragEnd: () => ipcRenderer.send("drag:end"),
   setIgnoreMouse: (ignore) => ipcRenderer.send("mouse:ignore", ignore),
   quit: () => ipcRenderer.send("app:quit"),
-  // S6：双击桌宠开关会话看板
+  // S8：双击桌宠 = 写封信。右键 = 小菜单（写信 / 看板 / 退出）。
+  // 看板原来是双击的入口，现在挪进右键菜单 —— 桌宠没有标题栏，
+  // 右键菜单是唯一能"把功能都摆出来"的地方。
+  openLetter: () => ipcRenderer.send("letter:open"),
+  petMenu: () => ipcRenderer.send("pet:menu"),
+  onLetterSent: (cb) => ipcRenderer.on("letter:sent", () => cb()),
   toggleDashboard: () => ipcRenderer.send("dashboard:toggle"),
   // S7：主题。getTheme 是**拉**（启动时拉一次，绕开"推早了丢失"），
   // onTheme 是**推**（看板里切主题后立刻生效）。

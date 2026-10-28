@@ -56,6 +56,10 @@ const MAX_SLEEP_AFTER_MS = 3_600_000;
 // 那是状态机的形状，不是外观参数，交给主题改会让"working 播 2 秒就消失"成为可能。
 const ONESHOT_STATES = ["error", "notification", "attention"];
 
+// 一个状态最多几套表情变体。上限是为了绑住 budget：
+// 变体和主资产共用同一份 4MB 总量，没有上限的话写 50 套就能把加载拖垮。
+const MAX_VARIANTS = 4;
+
 // 资产名：字母数字开头，只允许 字母数字 . _ -，必须以 .svg 结尾，最长 64。
 // 这个正则同时挡掉了 `../x`、`/etc/x`、`C:\x`、`a\b`、带空格的名字。
 const ASSET_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.svg$/;
@@ -257,31 +261,69 @@ function loadTheme(id) {
 
     if (!isPlainObject(def)) return { ok: false, id, error: `状态 ${name} 必须是对象` };
 
-    const list = def.frames;
-    if (!Array.isArray(list) || list.length === 0) {
-      return { ok: false, id, error: `状态 ${name} 的 frames 必须是非空数组` };
-    }
-    if (list.length > MAX_FRAMES_PER_STATE) {
-      return { ok: false, id, error: `状态 ${name} 帧数超限（${list.length} > ${MAX_FRAMES_PER_STATE}）` };
-    }
-
     // fps 钳制而不是拒绝：写错的 fps 不该让整个主题挂掉，
     // 但 0 或 1000 会让帧轮播变成死循环或假死，所以要拉回区间。
-    const fps = Number.isFinite(def.fps) ? clamp(Math.round(def.fps), MIN_FPS, MAX_FPS) : 4;
+    //
+    // 主资产和变体走**同一个 readSet**：规则必须一模一样，
+    // 否则会分叉成"主资产钳了、变体没钳"，而那种 bug 只在换到第 2 套时才看得见。
+    const readSet = (raw, label, fallbackFps, fallbackTrack) => {
+      const set = raw.frames;
+      if (!Array.isArray(set) || set.length === 0) {
+        return { error: `状态 ${label} 的 frames 必须是非空数组` };
+      }
+      if (set.length > MAX_FRAMES_PER_STATE) {
+        return { error: `状态 ${label} 帧数超限（${set.length} > ${MAX_FRAMES_PER_STATE}）` };
+      }
+      const fps = Number.isFinite(raw.fps) ? clamp(Math.round(raw.fps), MIN_FPS, MAX_FPS) : fallbackFps;
+      const frames = [];
+      for (const fileName of set) {
+        const r = readAsset(id, fileName, budget);
+        if (!r.ok) return { error: `状态 ${label}：${r.error}` };
+        frames.push(r.markup);
+      }
+      return {
+        fps,
+        eyeTracking: typeof raw.eyeTracking === "boolean" ? raw.eyeTracking : fallbackTrack,
+        frames,
+      };
+    };
 
-    const frames = [];
-    for (const fileName of list) {
-      const r = readAsset(id, fileName, budget);
-      if (!r.ok) return { ok: false, id, error: `状态 ${name}：${r.error}` };
-      frames.push(r.markup);
+    const main = readSet(def, name, 4, false);
+    if (main.error) return { ok: false, id, error: main.error };
+
+    // 变体：同一个状态的多套资产，渲染层每次进来轮播到下一套。
+    // 继承主资产的 fps / eyeTracking，自己写了就用自己的。
+    const variants = [];
+    if (def.variants !== undefined) {
+      if (!Array.isArray(def.variants)) {
+        return { ok: false, id, error: `状态 ${name} 的 variants 必须是数组` };
+      }
+      if (def.variants.length > MAX_VARIANTS) {
+        return { ok: false, id, error: `状态 ${name} 变体超限（${def.variants.length} > ${MAX_VARIANTS}）` };
+      }
+      for (let i = 0; i < def.variants.length; i++) {
+        const v = def.variants[i];
+        if (!isPlainObject(v)) {
+          return { ok: false, id, error: `状态 ${name} 的第 ${i + 1} 个变体必须是对象` };
+        }
+        const vs = readSet(v, `${name} 变体#${i + 1}`, main.fps, main.eyeTracking);
+        if (vs.error) return { ok: false, id, error: vs.error };
+        variants.push({
+          id: typeof v.id === "string" ? v.id.slice(0, 32) : "",
+          fps: vs.fps,
+          eyeTracking: vs.eyeTracking,
+          frames: vs.frames,
+        });
+      }
     }
 
     states[name] = {
-      fps,
+      fps: main.fps,
       // 只有明确写 true 才开眼球追踪。默认关：
       // 开了但那一帧没有 <g class="pupils">，渲染层会拿到 null，属于"静默失效"。
-      eyeTracking: def.eyeTracking === true,
-      frames,
+      eyeTracking: main.eyeTracking,
+      frames: main.frames,
+      variants,
     };
   }
 
