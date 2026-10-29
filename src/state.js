@@ -31,6 +31,10 @@ const ONESHOT = {
 };
 
 // agent 事件 → 逻辑状态。这张表的权威版本是原项目 docs/guides/state-mapping.md
+// 注意：`SessionStart` 这里的 "idle" 是**新建会话时的初值**，
+// **不是**"把已有会话切回 idle"。apply() 里有一条前置判断专门管它——
+// 把这一行当成普通映射读回去，就会复发那个 bug：WorkBuddy 每轮补发的
+// SessionStart 把刚进入的 thinking 打回 idle（详见 apply() 里的注释）。
 const EVENT_STATE = {
   SessionStart: "idle",
   UserPromptSubmit: "thinking",
@@ -184,6 +188,32 @@ function createStore({ onChange, getTimings } = {}) {
       sessions.delete(id);
       tick();
       return snapshot();
+    }
+
+    // ---- SessionStart：只给**新会话**定初值，不许碰已经存在的会话 ----
+    //
+    // 为什么非得例外：WorkBuddy 每一轮都会在 UserPromptSubmit 之后约 0.1 秒
+    // **补发**一个 SessionStart（首轮 source=startup，之后全是 resume）。
+    // 这段事实不是猜的，主仓库 hooks/workbuddy-hook.js:264 把它写在注释里，
+    // 那里的解法是给 body 加 preserve_state 让服务端保留。
+    // 按普通映射处理的结果是一条等宽的 Bug：
+    //   UserPromptSubmit → thinking → 0.1s → SessionStart → idle → 一直挂 idle
+    //   → 直到 PreToolUse（working）才有反应。
+    // 用户看到的就是"明明在 thinking，桌宠却显示 idle"。
+    // Claude Code 只在真正开会话时发一次，所以这个误会错得很久也不暴露。
+    //
+    // starter 这里直接在语义上修对：**一条已经存在的会话收到"开始了"，
+    // 本来就不该被清空**。落到下面 = 全新会话，用 EVENT_STATE 的 idle 建。
+    if (event === "SessionStart") {
+      const existing = sessions.get(id);
+      if (existing) {
+        existing.lastAt = now;
+        if (cwd) existing.cwd = cwd;
+        // how 记成 preserved：排查时能在 events() 里一眼看出"它来了，但没动手"。
+        logEvent({ t: now, event, sid: id.slice(0, 8), from: existing.state, to: existing.state, how: "preserved" });
+        tick();
+        return snapshot();
+      }
     }
 
     let s = sessions.get(id);

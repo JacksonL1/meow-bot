@@ -38,6 +38,7 @@ process.env.CLAWD_PORT_FILE = path.join(TMP_ROOT, "clawd-starter.port");
 
 const ELECTRON_BIN = require("electron"); // 纯 Node 下 require('electron') 返回可执行文件路径
 const PORT_FILE = require("../src/port-file").portFilePath();
+const { writePortFile } = require("../src/port-file");
 
 let pass = 0;
 let fail = 0;
@@ -432,6 +433,69 @@ async function verifyMailbox() {
   process.env.CLAWD_MAILBOX_DIR = path.join(base, "main");
 }
 
+// ------------------------------------------------------------
+// 没有 session_id 的事件必须被丢弃，不能给它合成占位会话
+//
+// 为什么值得单独立一段、而不是顺手加一条：**这条 bug 的表象在状态机、
+// 病根在 hook**。"thinking 时显示 idle" 是状态机的现象，但根子在 hook 把所有
+// 缺 session_id 的事件塞进同一个 "unknown" 会话里——多条真实会话因此互相覆盖。
+// 只在状态机一侧加断言永远发现不了它，所以必须在 hook 真的转发之前拦住。
+//
+// 只用 stderr 的警告做判据是不够的（那只能证明走了那个分支），
+// 所以这里起一个真的 server 数它收到了几个请求：0 个才是真的没转发。
+// ------------------------------------------------------------
+async function verifyHookSessionId() {
+  const http = require("node:http");
+  const received = [];
+
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      received.push(body);
+      res.writeHead(204);
+      res.end();
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+
+  const portFile = path.join(TMP_ROOT, "hook-port.json");
+  writePortFile(portFile, { port: server.address().port, token: "t".repeat(64) });
+  const env = { CLAWD_PORT_FILE: portFile };
+
+  // 对照组：带了 session_id → 必须真的发出去。
+  // 少了这条，"0 个请求"可能只是 hook 根本没能连上 server。
+  await runHook("PreToolUse", { hook_event_name: "PreToolUse", session_id: "hook-sid-1" }, env);
+  await sleep(120);
+  const withSid = received.length;
+
+  received.length = 0;
+  const missing = await runHook("PreToolUse", { hook_event_name: "PreToolUse" }, env);
+  await sleep(120);
+  const withoutSid = received.length;
+
+  // 空白字符串同样算没有：后端 discard 的是 trim 之后为空的情况
+  received.length = 0;
+  await runHook("PreToolUse", { hook_event_name: "PreToolUse", session_id: "   " }, env);
+  await sleep(120);
+  const blankSid = received.length;
+
+  server.close();
+
+  ok("带了 session_id 的事件会真的发出去（对照组：不是连不上 server）", withSid === 1, `收到 ${withSid} 个`);
+  ok(
+    "没有 session_id 的事件被丢弃（不合成占位会话）",
+    withoutSid === 0,
+    `收到 ${withoutSid} 个`
+  );
+  ok("session_id 只有空格也算没有", blankSid === 0, `收到 ${blankSid} 个`);
+  ok(
+    "丢弃时往 stderr 说了一句（不往 stdout —— 那会被宿主收进上下文）",
+    missing.out === "" && /session_id/.test(missing.err),
+    `outLen=${missing.out.length} err=${JSON.stringify(missing.err.slice(0, 60))}`
+  );
+}
+
 async function main() {
   console.log("Electron 升级回归\n" + "=".repeat(56));
 
@@ -444,6 +508,7 @@ async function main() {
   //      而"桌宠关着也能寄信"就是这套设计必须成立的前提
   // ============================================================
   await verifyMailbox();
+  await verifyHookSessionId();
 
   // 前置：不能有别的实例在跑，否则单实例锁会让本次启动直接退出
   const existing = await getJson(MAIN_PORT, "/json/list");
@@ -1807,18 +1872,52 @@ async function main() {
       // 下一个事件一来又醒、一会儿又睡，看起来像在抽搐。
       // 所以这里必须有一条断言盯着"working 期间不许睡"。
       {
-        const st = S.createStore({ onChange: () => {}, getTimings: () => ({ sleepAfterMs: 60 }) });
-        st.apply({ session_id: "sleep-probe", event: "PreToolUse" }); // → working
+        const stWork = S.createStore({ onChange: () => {}, getTimings: () => ({ sleepAfterMs: 60 }) });
+        stWork.apply({ session_id: "sleep-probe", event: "PreToolUse" }); // → working
         await sleep(300);
-        st.tick();
-        const vWork = st.snapshot().visual;
-        st.apply({ session_id: "sleep-probe", event: "SessionStart" }); // → idle
+        stWork.tick();
+        const vWork = stWork.snapshot().visual;
+        stWork.dispose();
+
+        // 对照组必须换**另一个 store**，不能在同一条会话上洗回来。
+        // 原来这里在同一条会话上发 SessionStart 制造 idle，那依赖的是旧语义
+        // （SessionStart = 切回 idle）——它正是 WorkBuddy 那个"thinking 被打回 idle"
+        // 的同一个机制。语义修对之后它必然会红，改口径不是迁就，是纠正：
+        // 真实链路上"开一条新会话"就是新 session_id，而不是给旧会话发 SessionStart。
+        //
+        // 分成两个 store 也是必须的：dominant() 取优先级最高的那条会话，
+        // 同一个 store 里只要还留着 working 的会话，idle 就永远赢不了仲裁。
+        const stIdle = S.createStore({ onChange: () => {}, getTimings: () => ({ sleepAfterMs: 60 }) });
+        stIdle.apply({ session_id: "sleep-probe-idle", event: "SessionStart" }); // 新会话 → idle
         await sleep(300);
-        st.tick();
-        const vIdle = st.snapshot().visual;
-        st.dispose();
+        stIdle.tick();
+        const vIdle = stIdle.snapshot().visual;
+        stIdle.dispose();
+
         ok("agent 在干活时不会睡着（working 期间不累计睡意）", vWork === "working", `visual=${vWork}`);
-        ok("idle 累计够久就睡着（睡意确实还是会生效）", vIdle === "sleeping", `visual=${vIdle}`);
+        ok("idle 累计够久就睡着（睡意确实还是会生效，不是被整个关掉了）", vIdle === "sleeping", `visual=${vIdle}`);
+      }
+
+      // WorkBuddy 每一轮的真实事件序列（实测，且主仓库 hooks/workbuddy-hook.js
+      // 把这条写死在注释里了）：每一轮都是 UserPromptSubmit 先到、SessionStart
+      // 后补发约 0.1 秒（首轮 source=startup，之后全是 resume）。
+      //
+      // 于是只要 SessionStart 仍然被当成"切回 idle"，真实链路上的样子就是：
+      //   UserPromptSubmit → thinking → 0.1s 后 SessionStart → idle → 一直挂 idle
+      //   → 直到 PreToolUse（working）才有反应。
+      // 用户看到的就是"明明在 thinking，桌宠却显示 idle"。
+      {
+        const st = S.createStore({ onChange: () => {}, getTimings: () => null });
+        st.apply({ session_id: "wb-turn", event: "UserPromptSubmit" });
+        const vThinking = st.snapshot().visual;
+        st.apply({ session_id: "wb-turn", event: "SessionStart" }); // 迟到 0.1s 的那一下
+        const vLate = st.snapshot().visual;
+        st.dispose();
+        ok(
+          "迟到的 SessionStart 不会把刚进入的 thinking 打回 idle（WorkBuddy 每轮都补发它）",
+          vThinking === "thinking" && vLate === "thinking",
+          `${vThinking} → ${vLate}`
+        );
       }
 
       // S9：鼠标把猫弄醒。终点在状态机里——「醒」也只有这一个地方能改，

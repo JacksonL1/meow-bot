@@ -72,7 +72,7 @@ node scripts/fake-feed.js                     # 完整剧本： thinking → wor
 node scripts/fake-feed.js Stop                # 单个事件
 node scripts/fake-feed.js --hold working 10   # 保持某个状态 10 秒
 
-npm run verify:electron                       # 171 项回归（当前 171 PASS / 0 FAIL）
+npm run verify:electron                       # 176 项回归（当前 176 PASS / 0 FAIL）
 
 npm run start:debug                           # 带 DevTools 启动（桌宠无边框、不进任务栏，平时打不开）
                                               #   然后在 Console 里敲 petDebug.events() 看 agent 推来的每个事件
@@ -420,7 +420,7 @@ Chrome 对超大模糊半径是同步算的，一个 `9999` 就是一次卡死�
   加载失败导致空白的话，用户看到的是一个**看得见进程、找不到窗口、不知道点哪里退出**的东西——比报错难处理得多。
 - **失败是整个主题拒绝，不是部分加载**。半个主题的表现是"看着有点怪"，作者根本不会发现。
 
-回归 171 PASS / 0 FAIL，其中主题与白名单 24 项、渲染与动画 13 项、状态时长 11 项、表情变体 4 项、信箱与送信 22 项、唤醒与睁眼过渡 12 项。`npm run preview:states` 出对照图，
+回归 176 PASS / 0 FAIL，其中主题与白名单 24 项、渲染与动画 13 项、状态时长 11 项、表情变体 4 项、信箱与送信 22 项、唤醒与睁眼过渡 12 项。`npm run preview:states` 出对照图，
 `npm run build:preview` 更新预览页的数据包。
 
 ## S8 已完成：跟桌宠说话（猫只做邮差）

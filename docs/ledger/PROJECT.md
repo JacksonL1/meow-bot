@@ -13,7 +13,7 @@
 | 端点文件 | `%APPDATA%\clawd-starter\clawd-starter.port`，内容 `{port, token}`，权限 0600 |
 | 依赖服务 | 无。不连任何外部服务，只在本机开一个 HTTP 端口接收事件 |
 | 版本控制 | git，**5 次提交**（截至 `修改一下形象，添加会话看板窗口`）。**S7 主题系统 + 这批台账改动尚未提交** |
-| 体积 | **21 个源文件，7028 行**（`src/` 3987 + `hooks/` 480 + `scripts/` 2561），另有 `themes/` 下 22 个 SVG 资产（ragdoll 21 / _template 1；crab 的 19 个与两个一次性脚本已删）。**这个数是 2026-10-29 重新跑出来的**——原来写「25 个 / 7625 行（src 4584）」，实数是 src 只有 3987 行，凭印象写的数最多撑到下一次有人 `wc -l` |
+| 体积 | **21 个源文件，7178 行**（`src/` 4017 + `hooks/` 501 + `scripts/` 2660），另有 `themes/` 下 22 个 SVG 资产（ragdoll 21 / _template 1；crab 的 19 个与两个一次性脚本已删）。**这个数是 2026-10-29 重新跑出来的**（同日第二次——修完两个"变 idle"的 bug 之后再数了一遍）——原来写「25 个 / 7625 行（src 4584）」，实数是 src 只有 3987 行，凭印象写的数最多撑到下一次有人 `wc -l` |
 
 ## 它解决什么问题
 
@@ -57,7 +57,7 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 | 主题 | 扫目录、校验 schema 与资产、校验 `motion`/`gags` 规则、缺状态补齐、全坏兜底（主进程）；换主题 = 换帧数据 + 重画 | `src/theme.js` + `themes/<id>/theme.json` |
 | 进程间桥 | 只暴露具体动作，不泄漏 `ipcRenderer` | `src/preload.js`（主窗口 13 个）+ `src/dashboard-preload.js`（看板 5 个）|
 | 调试 | 假数据源，三种用法（完整剧本 / 单事件 / 保持某状态）；形象对照截图；主题打包 | `scripts/fake-feed.js`、`preview-shot.js`、`build-preview-bundle.js` |
-| 回归闸门 | 主进程 inspector + 渲染进程 CDP，**171 条断言；当前 171 PASS / 0 FAIL**（剪贴板那条环境不可读时 `[warn]` 降级）；两条渲染路径用同一批断言、`rigMode` 分叉判据 | `scripts/verify-electron.js` |
+| 回归闸门 | 主进程 inspector + 渲染进程 CDP，**176 条断言；当前 176 PASS / 0 FAIL**（剪贴板那条环境不可读时 `[warn]` 降级）；两条渲染路径用同一批断言、`rigMode` 分叉判据 | `scripts/verify-electron.js` |
 
 ## 已知限制
 

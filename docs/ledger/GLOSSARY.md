@@ -507,6 +507,16 @@ form-action 'none'; connect-src 'none'
 
 ---
 
+### F10. `SessionStart` 不等于「闲下来了」
+
+**一句话**：`SessionStart` 的语义是「有一条会话开始了」，所以它只负责给**新会话**定初值 idle；一条已经存在的会话收到它，不该被清空。
+
+**本项目**：`state.js` 的 `apply()` 里有一条前置判断专门管它（会话已存在时 `how: "preserved"` 直接返回），`EVENT_STATE` 表里那行 `SessionStart: "idle"` 因此**不代表**普通映射——表上方的注释专门防它被人读回去。
+
+**为什么**：WorkBuddy 每一轮都会在 `UserPromptSubmit` 之后约 0.1 秒补发一个 SessionStart（首轮 source=startup，之后全是 resume，主仓库 `hooks/workbuddy-hook.js:264` 有实测注释）。按「看到 SessionStart 就切 idle」处理，`thinking` 会立刻被打回 `idle` 并挂到下一个事件才恢复。Claude Code 只在真正开会话时发一次，所以这个错在参考实现上完全看不出来。
+
+**坑**：① 别把 `EVENT_STATE` 当纯数据表读——它是「语义注释 + 特例」的混合体，已经有 `SessionEnd`（删会话）和 `SessionStart`（只定初值）两个特例了。② **`field(x) || "unknown"` 这类占位兜底在会话号上是错的**：缺 id 时必须丢弃而不是合成，否则多条真实会话会被合并成一条幽灵会话、事件互相覆盖（主仓库这条挂着 #618 / #648 的事故编号）。③ 判空前要 `trim()`，`"   "` 是 truthy 字符串。
+
 ## G. 渲染层：SVG、动画与性能
 
 ### G1. SVG 作为桌宠的载体
@@ -693,7 +703,8 @@ form-action 'none'; connect-src 'none'
 | `pet:hover` | S9 的上行通道：无载荷，唯一效果是 sleep→idle |
 | `eyeOpen` | 睁眼程度 0~1 的弹簧通道，睡眠过渡与 zZz 共用它 |
 | 为什么眨眼不走弹簧 | 150ms 的事，慢下来看着像卡住 |
-| 正椭圆躯干为什么显胖 | `<ellipse>` 的曲率本身写着"圆"，缩放改不掉，得换 path |
+| `SessionStart` 为什么不再等于 idle | WorkBuddy 每轮都在 UserPromptSubmit 后 0.1s 补发它，会把刚进入的 thinking 打回 idle |
+| 缺 session_id 为什么丢弃而不是兜底 | 合成占位 id 会让多条真实会话合并，事件互相覆盖（A 的 thinking 被 B 的 Stop 带塌） |
 | 改主形状要连带看什么 | 后爪、前爪、working 键盘这三处邻居 |
 | 心跳 tick | 所有时间驱动的变化收敛到一个函数 |
 | timer.unref() | 定时器不阻止进程退出 |

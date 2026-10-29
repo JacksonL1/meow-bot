@@ -147,10 +147,31 @@ async function main() {
     return;
   }
 
+  // 缺 session_id 的事件**不报**，绝不给它合成一个占位 id。
+  //
+  // 原来写的是 `field(payload.session_id) || "unknown"`，后果有两层，第二层才要命：
+  //   ① 多条真实会话的事件被塞进同一条叫 "unknown" 的会话，Dashboard 上只剩一个幽灵；
+  //   ② 它们的事件互相覆盖——A 正在 thinking，B 结束了发一个 Stop →
+  //      attention 播完 800ms 回 idle，**A 的画面就变成 idle**。
+  //      这正是用户报的"thinking 时显示 idle"的第二个可能来源。
+  // 主仓库 hooks/workbuddy-hook.js 这条是带着 bug 编号的（#618 / #648）：
+  // 合成 id 会造出一个"后面的事件既更新不了、也清除不掉"的幻影会话。
+  // 会话不见了还有 MAX_SESSIONS 的淘汰兜底，状态互相污染没有兜底。
+  //
+  // 警告走 stderr：stdout 在 UserPromptSubmit 上是**协议**（会进上下文），不能碰。
+  // trim 过后再判空：`"   "` 是 truthy 字符串，不 trim 就会被当成有效会话号，
+  // 于是几条来自不同会话的事件照样会合并到同一条 `"   "` 会话里。
+  const rawSid = field(payload.session_id);
+  const sid = rawSid ? rawSid.trim() : undefined;
+  if (!sid) {
+    console.error(`[clawd-hook] 事件 ${event} 没带 session_id，已丢弃（不合成占位会话）`);
+    return;
+  }
+
   // 4) 只取需要的字段，其余一律丢弃（不落盘、不打日志）
   const body = JSON.stringify({
     agent: "claude-code",
-    session_id: field(payload.session_id) || "unknown",
+    session_id: sid,
     event,
     cwd: field(payload.cwd, MAX_CWD),
     tool_name: field(payload.tool_name),
