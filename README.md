@@ -106,7 +106,7 @@ npm run build:preview                         # 改完 themes/ 后更新 preview
 - 接口四道锁 + 渲染层 SVG 白名单（见下方「安全边界」）
 - 单会话状态机：事件 → 状态 → 优先级仲裁 → oneshot 播完自动退回 → 闲置 60s 睡着 → 鼠标停在它身上把它叫醒（带过渡）
 - **主题系统（S7）**：形象不再是代码，而是 `themes/<id>/theme.json` + 一堆 SVG。内置 `ragdoll` 一个主题（早期还有个 crab，已删——暂时不需要更多主题）。自己加主题：复制 `themes/_template`
-- **形象是布偶猫**：奶油白长毛 + 深棕重点色 + 蓝宝石竖瞳。**七个状态是七种不同姿势**，
+- **形象是布偶猫**：奶油白长毛 + 深棕重点色 + 蓝宝石竖瞳。身子是**蹲坐的梨形**（手绘 path，不是椭圆——正椭圆加上那个大头读起来就是一颗球）。**七个状态是七种不同姿势**，
   不是同一张图加个贴纸：idle 端坐、thinking 蹲低歪头、attention 拔高张嘴、working 桌前敲键盘、
   error 炸毛泛红、notification 抬头举信封、sleeping 侧躺垫爪。截图见 `docs/ragdoll-states.png`
 - **两条渲染路径**，主题用 `rigType` 自己选：

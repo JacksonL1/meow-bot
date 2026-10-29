@@ -177,12 +177,24 @@ function createRiggedRagdollSVG() {
   <!-- 3. 躯干与后爪组 (#rig-body-group) -->
   <g id="rig-body-group" style="transform-origin: 100px 156px;">
     <!-- 左后爪与右后爪 -->
-    <ellipse id="rig-paw-bl" cx="52" cy="158" rx="10" ry="7" fill="#FFFFFF" stroke="#524338" stroke-width="2.5"/>
-    <ellipse id="rig-paw-br" cx="152" cy="158" rx="10" ry="7" fill="#FFFFFF" stroke="#524338" stroke-width="2.5"/>
+    <ellipse id="rig-paw-bl" cx="57" cy="168" rx="11" ry="7.5" fill="#FFFFFF" stroke="#524338" stroke-width="2.5"/>
+    <ellipse id="rig-paw-br" cx="143" cy="168" rx="11" ry="7.5" fill="#FFFFFF" stroke="#524338" stroke-width="2.5"/>
 
-    <!-- 身体后半部分椭圆 + 背部柔毛轮廓 -->
-    <ellipse id="rig-torso" cx="100" cy="142" rx="54" ry="32" fill="#FAF6F0" stroke="#524338" stroke-width="3.5"/>
-    <ellipse id="rig-torso-patch" cx="112" cy="134" rx="34" ry="18" fill="#EFE6DC" opacity="0.65"/>
+    <!-- 蹲坐的躯体（手绘 path，不是椭圆）。
+         原来是 rx54×ry32 的正椭圆，观感是一颗球：头宽 104、身体宽 108，上下一样粗就成了雪人。
+         而**完美椭圆弧本身就是「圆」的来源**——动物身上没有一条纯椭圆轮廓。
+         现在是：肩在 y112 处宽 56（整个被头盖住）、腰在 y146 处最宽 100、底部 y177 收成略平的圆角。
+         头宽 104 ≈ 身体最宽 100，头压住肩，读起来才是「坐着的一只猫」。
+         动这条要连着看三处：后爪（cx 57/143，只在底部露出一牙月牙）、
+         前爪（cx 68/132，必须落在身体内）、working 的键盘（y162 起，压在身体下沿）。 -->
+    <path id="rig-torso"
+          d="M72 112 C59 114 50 130 50 146 C50 162 54 172 66 174 C80 177 120 177 134 174 C146 172 150 162 150 146 C150 130 141 114 128 112 Z"
+          fill="#FAF6F0" stroke="#524338" stroke-width="3.5" stroke-linejoin="round"/>
+
+    <!-- 原来这里还有一块 #rig-torso-patch（cx112 cy134 rx34 ry18 的米色椭圆，opacity 0.65），
+         注释写的是"背部柔毛轮廓"，实际读起来是肚子上一块**污渍**：硬边、没有描边、
+         颜色比身体暗一档、位置还偏右上（不在身体中心）。
+         删掉。体积感有描边、呼吸缩放和地面阴影三样就够，白猫的肚子本来就该是白的。 -->
   </g>
 
   <!-- 4. 工作状态专属：桌前敲键盘 (#rig-work-desk)
