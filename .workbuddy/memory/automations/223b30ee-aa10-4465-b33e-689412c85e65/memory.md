@@ -13,6 +13,12 @@
 - audit 由 high 1 → 0（SEC-08 已修，electron 45.0.0），SECURITY.md 安全状态表已标 ✅；无新发现。FILE_MAP 无漏记。
 - 处理：未改动任何台账内容，仅脚本刷新 `.last-check.json`。
 
+## 2026-10-28 16:50
+- daily-check.js 退出码 0，结论「无实质变化」；HEAD `88a414d`，工作区 6 个未提交（README/verify-electron/main/preload/renderer/state）。
+- 交叉核实「基线静默前移」：上次基线 HEAD 已是 88a414d，故 7d27f21..HEAD 的 3 次提交（动作细节、配置项消费者、S8 写信+删 crab）未被报出，但台账已全部覆盖——这 3 次提交本身就带着 docs/ledger 的更新（88a414d 内含 PROGRESS/FILE_MAP/SECURITY 等改动）。
+- 未提交改动（+449/-59，含 S9 鼠标叫醒、删 #rig-ruff、眼睑弹簧）在台账工作区副本里同样已入账：PROGRESS 有 S9 条目与安全状态表，SECURITY 有对应新增，时间戳台账 16:45 ≥ 源码 16:36。
+- audit 0/0/0 维持；FILE_MAP 无漏记。处理：未改任何文件（脚本自身刷新 .last-check.json）。
+
 ## 经验
 - 脚本的 dirty 对比是「相对上次基线」，首次/滞后基线下会把已入账的改动重报一次。判断关键：比对源码 mtime 与台账 mtime，台账晚于源码即说明已记录。
 - 基线存在**静默前移**风险：若台账在两次体检之间被手工更新并跑过脚本，prev.head 已等于当前 HEAD，之后的新提交就不会被报出。所以每天不能只看「结论」一行，还要用 `git log --since` 与台账 mtime 交叉验证。

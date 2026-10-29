@@ -4,13 +4,13 @@
  * 解决原版痛点：
  * 1. 彻底告别 `setInterval` (2~8fps) 硬切跳帧与 `#layerA/#layerB` 160ms 透明度重影叠化。
  * 2. 引入 60fps 二阶胡克定律弹簧阻尼骨骼引擎 (RagdollSpringRig)：
- *    - 身体、头部、左右耳、左右前爪、后爪、胸口毛领、瞳孔缩放、上下眼睑各自拥有独立的弹簧刚度(k)与阻尼(c)。
+ *    - 身体、头部、左右耳、左右前爪、后爪、瞳孔缩放、上下眼睑各自拥有独立的弹簧刚度(k)与阻尼(c)。
  *    - 状态切换时产生自然的预备微缩、重心转移、惯性过冲 (Overshoot) 与次级动作滞后跟随 (Follow-through)。
  * 3. 8 大状态全部具备截然不同的全身姿态 (Full-Body Pose)：
- *    - idle: 柔和呼吸起伏 + 尾巴双频 S 型摆动 + 随机自然眨眼(含双连眨) + 偶发单耳抖动 + 视线带动头部/毛领/胡须立体视差
+ *    - idle: 柔和呼吸起伏 + 尾巴双频 S 型摆动 + 随机自然眨眼(含双连眨) + 偶发单耳抖动 + 视线带动头部/胡须立体视差
  *    - thinking: 歪头 14° + 身体微倾 + 右爪抬起托腮思考 + 眼珠斜上看左右扫视 + 浮动思考气泡
  *    - working: 伏案重心压低 + 半飞机耳 + 左右前爪 10Hz 交替高速敲击发光小键盘 + 头部随打字扫视
- *    - attention: 警觉立姿挺胸 (重心拔高) + 毛领蓬松 + 双耳高竖 + 蓝宝石瞳孔瞬间放大发亮 + 尾巴竖直微颤
+ *    - attention: 警觉立姿挺胸 (重心拔高) + 双耳高竖 + 蓝宝石瞳孔瞬间放大发亮 + 尾巴竖直微颤
  *    - notification: 轻快歪头 + 左爪高抬挥手招猫 (露出粉色肉垫) + 张嘴“喵~”叫 + 弯月笑眼/亮眼切换
  *    - error: 受惊后缩拱背 + 彻底压平飞机耳 + 瞳孔急剧收缩成细竖线 + 高频受惊颤抖 + 尾巴炸毛甩动
  *    - sleeping: 团身压扁成圆猫球 + 头部深埋枕在前爪上 + 温柔弯月闭眼 + 深慢睡眠呼吸与呼噜微震 + 动态飘升 zZz
@@ -174,7 +174,7 @@ function createRiggedRagdollSVG() {
     <path id="rig-tail-tip" d="M168 143 C182 136 189 128 184 118" fill="none" stroke="#FAF6F0" stroke-width="11" stroke-linecap="round"/>
   </g>
 
-  <!-- 3. 躯干与后爪、胸口大毛领组 (#rig-body-group) -->
+  <!-- 3. 躯干与后爪组 (#rig-body-group) -->
   <g id="rig-body-group" style="transform-origin: 100px 156px;">
     <!-- 左后爪与右后爪 -->
     <ellipse id="rig-paw-bl" cx="52" cy="158" rx="10" ry="7" fill="#FFFFFF" stroke="#524338" stroke-width="2.5"/>
@@ -183,19 +183,11 @@ function createRiggedRagdollSVG() {
     <!-- 身体后半部分椭圆 + 背部柔毛轮廓 -->
     <ellipse id="rig-torso" cx="100" cy="142" rx="54" ry="32" fill="#FAF6F0" stroke="#524338" stroke-width="3.5"/>
     <ellipse id="rig-torso-patch" cx="112" cy="134" rx="34" ry="18" fill="#EFE6DC" opacity="0.65"/>
-
-    <!-- 胸口大毛领 (#rig-ruff) -->
-    <g id="rig-ruff" style="transform-origin: 100px 132px;">
-      <path d="M60 115 C45 130 55 155 75 160 C85 163 115 163 125 160 C145 155 155 130 140 115 C125 125 115 128 100 128 C85 128 75 125 60 115 Z"
-            fill="#FFFFFF" stroke="#524338" stroke-width="3.5" stroke-linejoin="round"/>
-      <!-- 胸毛柔顺细节纹理 -->
-      <path d="M84 142 Q100 150 116 142" fill="none" stroke="#E8DFD5" stroke-width="2.2" stroke-linecap="round"/>
-    </g>
   </g>
 
   <!-- 4. 工作状态专属：桌前敲键盘 (#rig-work-desk)
        左边立着深色编辑器窗口（代码一行一行长出来），身前横一只键盘，两只前爪交替敲。
-       位置取舍：窗口避开脸（y>122）和胸口毛领，键盘压在身前——
+       位置取舍：窗口避开脸（y>122），键盘压在身前——
        前爪画在更后面，所以爪子会盖在键上，读起来就是「按着键」。 -->
   <g id="rig-work-desk" opacity="0">
     <!-- 4a. 编辑器窗口 -->
@@ -234,7 +226,7 @@ function createRiggedRagdollSVG() {
     </g>
   </g>
 
-  <!-- 5. 头部总成 (#rig-head-group)：放置在毛领上方、前爪根据动作可在前后切换 -->
+  <!-- 5. 头部总成 (#rig-head-group)：压在躯干上沿、前爪根据动作可在前后切换 -->
   <g id="rig-head-group" style="transform-origin: 100px 104px;">
     <!-- 左耳 (#rig-ear-l) -->
     <g id="rig-ear-l" style="transform-origin: 68px 54px;">
@@ -557,7 +549,6 @@ class RagdollRigController {
       bodyGroup: this.svg.querySelector("#rig-body-group"),
       pawBL: this.svg.querySelector("#rig-paw-bl"),
       pawBR: this.svg.querySelector("#rig-paw-br"),
-      ruff: this.svg.querySelector("#rig-ruff"),
       desk: this.svg.querySelector("#rig-work-desk"),
       code1: this.svg.querySelector("#rig-code-1"),
       code2: this.svg.querySelector("#rig-code-2"),
@@ -632,7 +623,15 @@ class RagdollRigController {
       tailFreq: new SpringChannel(1.8, 80, 12),
 
       mouthOpenRx: new SpringChannel(0, 190, 18),
-      mouthOpenRy: new SpringChannel(0, 190, 18)
+      mouthOpenRy: new SpringChannel(0, 190, 18),
+
+      // 「睁眼程度」0 = 睡着闭眼，1 = 完全睁开（S9）。
+      //
+      // 为什么眼睛要单独走弹簧：`eyeMode` 是个字符串（open / sleep / happy），
+      // 按它直接切 opacity 就是硬跳——那不是猫醒过来，那是显示器通电。
+      // 临界阻尼（ζ = c/2√k = 21/21 ≈ 1），不会过冲到"睁得比平时还大"，
+      // 大约 0.5 秒走完，正好配上躯干从团成一球慢慢撑起来的那个节奏。
+      eyeOpen: new SpringChannel(1, 110, 21)
     };
 
     this.state = "idle";
@@ -691,6 +690,10 @@ class RagdollRigController {
       }
     }
 
+    // 眼睛的睁开程度不写进 STATE_POSES：那张表是"姿势数值"，而这一项是
+    // 从 eyeMode 推导出来的（eyeMode 本身不是数值，塞不进弹簧通道表）。
+    // 所以每次换状态时手动给它一个目标，剩下的交给弹簧慢慢走。
+    this.sp.eyeOpen.setTarget(pose.eyeMode === "sleep" ? 0 : 1);
   }
 
   setGaze(nx, ny) {
@@ -786,6 +789,10 @@ class RagdollRigController {
       channel.step(safeDt);
     }
 
+    // 睁眼程度（0 = 睡着闭眼，1 = 完全睁开）。眼睛组和头顶的 zZz 都读这一个值——
+    // 两处各算一遍的话，醒来时很容易出现"眼睛已经睁开了、Z 还挂在头上"。
+    const eyeOpen = Math.min(1, Math.max(0, this.sp.eyeOpen.pos));
+
     // 4. 连续次级周期运动计算 (呼吸、尾巴波、状态专属微动作)
     this.breathPhase += safeDt * pose.breathFreq * Math.PI * 2;
     this.tailPhase += safeDt * this.sp.tailFreq.pos * Math.PI * 2;
@@ -873,10 +880,9 @@ class RagdollRigController {
     this.els.bodyGroup.style.transform =
       `translate(0px, ${finalBodyY.toFixed(2)}px) rotate(${finalBodyRot.toFixed(2)}deg) scale(${finalBodyScaleX.toFixed(3)}, ${finalBodyScaleY.toFixed(3)})`;
 
-    // 胸口大毛领具有滞后于呼吸的蓬松缩放感
-    const ruffScale = 1 + breathCos * (pose.breathAmp * 1.45);
-    this.els.ruff.style.transform =
-      `translate(${(gx * 1.6).toFixed(2)}px, ${(breathSin * 1.2).toFixed(2)}px) scale(${ruffScale.toFixed(3)})`;
+    // （原本这里还有一块「胸口大毛领」的滞后蓬松缩放，2026-10-28 连同 SVG 一起删了：
+    //   它是只跟呼吸联动的装饰件，删掉后躯干本身仍在呼吸，视觉上没有落差，
+    //   反而少了每帧一次 style.transform 写入。）
 
     // 后爪步伐
     this.els.pawBL.style.transform = `translate(0px, ${dynPawBLY.toFixed(2)}px)`;
@@ -933,20 +939,29 @@ class RagdollRigController {
     this.els.pupilR.setAttribute("rx", this.sp.pupilRx.pos.toFixed(2));
     this.els.pupilR.setAttribute("ry", this.sp.pupilRy.pos.toFixed(2));
 
-    if (pose.eyeMode === "sleep") {
-      this.els.eyesOpen.setAttribute("opacity", "0");
-      this.els.eyesClosed.setAttribute("opacity", "1");
-      this.els.eyesHappy.setAttribute("opacity", "0");
-    } else if (isEnjoyingPet) {
-      this.els.eyesOpen.setAttribute("opacity", "0");
-      this.els.eyesClosed.setAttribute("opacity", "0");
-      this.els.eyesHappy.setAttribute("opacity", "1");
-    } else {
-      const showClosedForBlink = blinkCloseRatio > 0.72;
-      this.els.eyesOpen.setAttribute("opacity", showClosedForBlink ? "0" : "1");
-      this.els.eyesClosed.setAttribute("opacity", showClosedForBlink ? "1" : "0");
-      this.els.eyesHappy.setAttribute("opacity", "0");
+    // 睁开程度由 eyeOpen 弹簧决定，所以「睡着 ↔ 醒着」是一段交叉淡入淡出，
+    // 不是布尔切换。三个眼睛图层（睁眼 / 弯月闭眼 / 笑眼）各自算一个权重，
+    // 谁都不是"啪"地一下顶替别人：
+    let wOpen = eyeOpen;
+    let wSleepArc = 1 - eyeOpen;
+    let wHappy = 0;
+    if (isEnjoyingPet) {
+      // 撸猫时的笑眼跟着 eyeOpen 一起淡入：半醒着被撸，先睁一半再眯起来最自然。
+      wHappy = eyeOpen;
+      wOpen = 0;
+    } else if (pose.eyeMode !== "sleep" && blinkCloseRatio > 0.72) {
+      // 眨眼是 150ms 的事，这里必须硬切——慢慢眨眼的猫看起来像卡住了。
+      wOpen = 0;
+      wSleepArc = 1;
+    }
+    this.els.eyesOpen.setAttribute("opacity", wOpen.toFixed(3));
+    this.els.eyesClosed.setAttribute("opacity", wSleepArc.toFixed(3));
+    this.els.eyesHappy.setAttribute("opacity", wHappy.toFixed(3));
 
+    // 眼睑只长在睁眼组里（闭眼组本身是弧线，没有眼睑可压）。
+    // 用 wOpen 判断而不是 pose.eyeMode：过渡途中眼睛已经露出一点点，
+    // 这时不画眼睑的话，瞳孔会从一片空白里"浮"出来。
+    if (wOpen > 0.01) {
       const lidDrop = Math.max(pose.eyelidTop, blinkCloseRatio * 15);
       const lidPathL = `M58 76 L90 76 L90 ${(76 + lidDrop).toFixed(1)} Q74 ${(76 + lidDrop + 2.5).toFixed(1)} 58 ${(76 + lidDrop).toFixed(1)} Z`;
       const lidPathR = `M110 76 L142 76 L142 ${(76 + lidDrop).toFixed(1)} Q126 ${(76 + lidDrop + 2.5).toFixed(1)} 110 ${(76 + lidDrop).toFixed(1)} Z`;
@@ -1019,8 +1034,12 @@ class RagdollRigController {
       this.els.fxError.style.transform = `translate(${(Math.sin(this.time * 35) * 2).toFixed(2)}px, 0px)`;
     }
 
-    this.els.fxSleeping.setAttribute("opacity", this.state === "sleeping" ? "1" : "0");
-    if (this.state === "sleeping") {
+    // zZz 跟着"睡意"一起散：睡意就是 1 - eyeOpen，和眼睛是同一条曲线的两端。
+    // 醒来的那 0.5 秒里三个 Z 会边飘边淡出——如果按 state 硬切，
+    // 会出现"眼睛已经睁开、Z 还挂在头上然后瞬间消失"的穿帮。
+    const sleepFade = 1 - eyeOpen;
+    this.els.fxSleeping.setAttribute("opacity", sleepFade.toFixed(3));
+    if (sleepFade > 0.01) {
       const zFloat = (offset) => {
         const p = (this.time * 0.55 + offset) % 1;
         const dy = -p * 18;
@@ -1177,6 +1196,11 @@ const stateLog = [];
 // 主进程推来的最近 agent 事件（见 state.js 的 recentEvents）
 let lastEvents = [];
 let buildCount = 0;
+// 「鼠标把它弄醒」这条上行链路一共发了几次（S9）。
+// 只记数不打日志：hover 期间它最多 500ms 一条，日志会把 stateLog 挤满，
+// 而 stateLog 挤满之后就查不出"状态到底为什么变"——那才是它存在的理由。
+let wakeSends = 0;
+let lastWakeAt = 0;
 // pin 住 gaze：主进程每 100ms 推一次真实光标，本地 mousemove 又写一遍，
 // 会盖掉注入值。回归要断言"瞳孔朝哪"，就得先让注入值稳定成立。
 let gazePinned = false;
@@ -1261,6 +1285,25 @@ window.addEventListener("mousemove", (e) => {
 
   if (onPet && ragdollRig) {
     ragdollRig.onMouseStroke(e.clientX);
+  }
+
+  // 鼠标停在睡着的猫身上 → 请求主进程把它弄醒。
+  //
+  // 为什么只在 `currentState === "sleeping"` 时发：醒着的猫不该为每一次
+  // mousemove 付一条 IPC。正常情况下发一条、主进程醒来、下一帧推回 idle，
+  // 这里的条件就不再成立，自己就停了；500ms 上限只是给"没那么快推回来"兜底。
+  //
+  // 为什么不能在这里直接 renderState("idle")：状态机在主进程，
+  // 这里改完会被下一个 250ms 的状态推送顶回去，表现是"闪一下又睡"。
+  if (onPet && currentState === "sleeping") {
+    const now = performance.now();
+    if (now - lastWakeAt > 500) {
+      lastWakeAt = now;
+      if (window.clawd && typeof window.clawd.wake === "function") {
+        wakeSends++;
+        window.clawd.wake();
+      }
+    }
   }
 });
 
@@ -1407,6 +1450,12 @@ window.petDebug = {
         }
       : {},
   builds: () => buildCount,
+  // 醒猫请求发出去多少次。回归靠它证明 S9 那条上行链路是通的——
+  // 光看画面证明不了"是渲染层真的发了请求"还是"主进程自己转回了 idle"。
+  wakeSends: () => wakeSends,
+  // 睁眼程度（0 = 睡着闭眼，1 = 完全睁开）。断言"有过渡"只能靠它：
+  // 一张静态截图里，慢慢睁开和瞬间睁开长得一模一样。
+  eyeOpen: () => (ragdollRig ? Math.min(1, Math.max(0, ragdollRig.sp.eyeOpen.pos)) : null),
   stateLog: () => stateLog.slice(),
   // 最近 30 条 agent 事件（主进程记录的）：每个事件叫什么、把会话从什么改成了什么，
   // 还是压根没认出来（how:"ignored"）。查"那里明明在干活为什么显示 idle"先看这个。

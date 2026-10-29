@@ -9,6 +9,9 @@ contextBridge.exposeInMainWorld("clawd", {
   dragStart: () => ipcRenderer.send("drag:start"),
   dragEnd: () => ipcRenderer.send("drag:end"),
   setIgnoreMouse: (ignore) => ipcRenderer.send("mouse:ignore", ignore),
+  // S9：鼠标停到猫身上时把它弄醒。渲染层只能"请求"，改状态的是主进程的状态机——
+  // 这里刻意不做成"直接改画面"，否则会被下一个 250ms 的状态推送顶回去。
+  wake: () => ipcRenderer.send("pet:hover"),
   quit: () => ipcRenderer.send("app:quit"),
   // S8：双击桌宠 = 写封信。右键 = 小菜单（写信 / 看板 / 退出）。
   // 看板原来是双击的入口，现在挪进右键菜单 —— 桌宠没有标题栏，

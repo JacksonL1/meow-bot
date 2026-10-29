@@ -219,6 +219,34 @@ function createStore({ onChange, getTimings } = {}) {
     return snapshot();
   }
 
+  // 用户把鼠标停到它身上 = 把它弄醒（S9）。
+  //
+  // 为什么这一件事必须落在状态机里：`sleeping` 是 tick() 按"idle 持续了多久"
+  // 推出来的结果，渲染层擅自把画面改成 idle，下一个 250ms 的推送就把它顶回去，
+  // 看起来是"闪一下又睡"。真相只有这一个地方能改。
+  //
+  // 只动 sleeping：working / thinking / error 是 agent 的真实进展，
+  // 用户的鼠标不该改写它们（"碰一下就把干活中的猫弄成 idle"是 bug 不是特性）。
+  //
+  // 返回"是否真的有东西被弄醒"，让调用方（和回归）能区分
+  // "醒了"和"本来就没睡"，而不是都得再读一次快照去猜。
+  function wake() {
+    const now = Date.now();
+    let woke = 0;
+    for (const s of sessions.values()) {
+      if (s.state !== "sleeping") continue;
+      s.state = "idle";
+      // stateSince 必须一起重置。不重置的话它已经"闲了很久"，
+      // 下一个 tick 立刻判定又该睡了——表现是碰一下就醒、随即又睡，像抽搐。
+      s.stateSince = now;
+      woke++;
+    }
+    if (woke === 0) return false;
+    logEvent({ t: now, event: "Hover", sid: "-", from: "sleeping", to: "idle", how: "woke" });
+    tick();
+    return true;
+  }
+
   // 心跳：所有"随时间发生的状态变化"都收敛到这一个函数，不散落在定时器里。
   function tick() {
     const now = Date.now();
@@ -270,6 +298,7 @@ function createStore({ onChange, getTimings } = {}) {
     apply,
     snapshot,
     tick,
+    wake,
     // SEC-09 的兑现点：完整 cwd 永远不进快照、不进渲染层。
     // 只有"用户对某一条会话显式做了动作"（点复制路径）时，
     // 由主进程按 id 取出这一条，直接塞进剪贴板。

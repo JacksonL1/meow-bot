@@ -4,7 +4,7 @@
 
 | 项 | 内容 |
 |---|---|
-| 状态 | ACTIVE（S1–S8 完成） |
+| 状态 | ACTIVE（S1–S9 完成） |
 | 路径 | `E:\JacksonLee\project\clawd-starter` |
 | 技术栈 | Electron 45.0.0（`nodeIntegration: false` + `contextIsolation: true` + `sandbox: true`）、Node 原生 `http` + `fs`、渲染层纯手写 SVG 无框架、无构建工具 |
 | 入口 | `src/main.js`（主进程） |
@@ -13,7 +13,7 @@
 | 端点文件 | `%APPDATA%\clawd-starter\clawd-starter.port`，内容 `{port, token}`，权限 0600 |
 | 依赖服务 | 无。不连任何外部服务，只在本机开一个 HTTP 端口接收事件 |
 | 版本控制 | git，**5 次提交**（截至 `修改一下形象，添加会话看板窗口`）。**S7 主题系统 + 这批台账改动尚未提交** |
-| 体积 | 25 个源文件，约 7401 行（`src/` 4478 + `hooks/` 480 + `scripts/` 2443），另有 `themes/` 下 22 个 SVG 资产（ragdoll 21 / _template 1；crab 的 19 个与两个一次性脚本已删） |
+| 体积 | 25 个源文件，约 7614 行（`src/` 4573 + `hooks/` 480 + `scripts/` 2561），另有 `themes/` 下 22 个 SVG 资产（ragdoll 21 / _template 1；crab 的 19 个与两个一次性脚本已删） |
 
 ## 它解决什么问题
 
@@ -39,6 +39,7 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 | S6 | 多会话看板：右键菜单里打开窗口，把内存里那张仲裁表摊开成人能看的列表 | 已完成 | SEC-09 分层兑现：存储层留完整路径、快照层只出 basename、完整路径只在显式点击时单条释放 |
 | S7 | 主题系统：`themes/<id>/theme.json` + `assets/*.svg`，**删掉写死的 `visuals.js`** | 已完成 | 白名单先于加载器；放行 3 个标签 + 9 个图元，拒 5 类；校验分主进程（文件/格式）与渲染层（内容）两段 |
 | S8 | 跟桌宠说话：双击写信 → 落磁盘信箱 → 下次 `UserPromptSubmit` 由 hook 写进 `additionalContext`。**猫只搬运，不代答** | 已完成 | SEC-12：信是唯一落盘的用户内容，也是唯一能改写 agent 上下文的输入通道。三条明确不做：不代答、信里不带命令、不碰桌面端未公开端口 |
+| S9 | 鼠标叫醒：停在睡着的猫身上 → `pet:hover` → `store.wake()`（只认 sleeping），眼睛与 zZz 走同一条 `eyeOpen` 弹簧慢慢淡过来 | 已完成 | SEC-13（P3 记录在案）：第一条渲染层请求改状态的通道，无载荷；边界是**渲染层只能请求，改状态永远是主进程的事** |
 
 安全问题全部记录在 [SECURITY.md](./SECURITY.md)，每阶段开工前先看对应小节。
 
@@ -48,15 +49,15 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 |---|---|---|
 | 窗口与进程 | 创建透明置顶窗口、拖拽轮询、眼球追踪采样、气泡窗口生命周期 | `src/main.js` |
 | 事件接入 | 本地 HTTP 服务，`GET /health`、`GET /state`、`POST /state`、`POST /permission` | `src/server.js` |
-| 状态机 | 事件→状态映射、多会话优先级仲裁、oneshot 自动回落、25s 发呆 / 60s 入睡 | `src/state.js` |
+| 状态机 | 事件→状态映射、多会话优先级仲裁、oneshot 自动回落、闲置 60s 入睡、`wake()`（鼠标唤醒，只认 sleeping） | `src/state.js` |
 | 权限裁决 | 挂起请求、等待决定、唯一出口 `settle()` 保证恰好响应一次 | `src/permission.js` |
 | 权限气泡 | 卡片 UI、两个按钮、Esc 不表态、量高度回传 | `src/bubble.html` + `bubble-renderer.js` + `bubble-preload.js` |
 | 会话看板 | 独立窗口、双击开关、1s 轮询快照、按「最吵的排前面」排序、演示模式、复制路径 | `src/dashboard.html` + `dashboard-renderer.js` + `dashboard-preload.js` |
 | 渲染 | **两条路径**：① 骨骼弹簧（`rigType: ragdoll-spring-v2`，JS 直接拼 SVG + 二阶弹簧阻尼通道，60fps）；② 帧序列（双图层交叉淡入、帧轮播、瞳孔位移插值）。两条都共用 `svgNode()` 白名单出口 | `src/renderer.js` |
 | 主题 | 扫目录、校验 schema 与资产、校验 `motion`/`gags` 规则、缺状态补齐、全坏兜底（主进程）；换主题 = 换帧数据 + 重画 | `src/theme.js` + `themes/<id>/theme.json` |
-| 进程间桥 | 只暴露具体动作，不泄漏 `ipcRenderer` | `src/preload.js`（主窗口 9 个）+ `src/dashboard-preload.js`（看板 5 个）|
+| 进程间桥 | 只暴露具体动作，不泄漏 `ipcRenderer` | `src/preload.js`（主窗口 13 个）+ `src/dashboard-preload.js`（看板 5 个）|
 | 调试 | 假数据源，三种用法（完整剧本 / 单事件 / 保持某状态）；形象对照截图；主题打包 | `scripts/fake-feed.js`、`preview-shot.js`、`build-preview-bundle.js` |
-| 回归闸门 | 主进程 inspector + 渲染进程 CDP，**123 条断言；当前 123 PASS / 0 FAIL**（剪贴板那条环境不可读时 `[warn]` 降级）；两条渲染路径用同一批断言、`rigMode` 分叉判据 | `scripts/verify-electron.js` |
+| 回归闸门 | 主进程 inspector + 渲染进程 CDP，**171 条断言；当前 171 PASS / 0 FAIL**（剪贴板那条环境不可读时 `[warn]` 降级）；两条渲染路径用同一批断言、`rigMode` 分叉判据 | `scripts/verify-electron.js` |
 
 ## 已知限制
 
@@ -78,7 +79,9 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 - 没有在线主题目录，主题只能手工放进 `themes/`。换来的是供应链攻击面为零
 - **信要到下一次提交才送达**。这是选 hook 通道的代价：`UserPromptSubmit` 的 stdout 才有"进上下文"的契约，没有"主动推一条新消息"的契约。要做到立刻送达只能走 CLI（要单独登录，且 `-p` 只开新会话）或桌面端未公开端口（一次更新就崩），两条都不划算
 - **信送给"下一个提交消息的 agent"，不区分项目**。猫在写信时不知道你脑子里想把它发给哪个会话——它的世界里没有"会话"这个概念。所以 A 项目写的信可能在 B 项目的下一次提交里出现。缓解手段是 24h 过期 + 每封只投一次
-- 信箱上限 5 封 / 4000 字。超过就写不进去了（会在信纸上明确报错，不静默丢）
+- **信箱上限 5 封 / 4000 字**。超过就写不进去了（会在信纸上明确报错，不静默丢）
+- **鼠标必须"动"才算经过**：唤醒挂在 `mousemove` 上，光标一动不动地压在睡着的猫身上不会把它叫醒（想叫醒就摸一下）。反过来，鼠标停在猫身上超过 60s 它会再睡回去——这和"没人理它就睡"是同一套逻辑，没有为"手停在那里"做特例
+- **醒来的时长写死在渲染层**（`eyeOpen` 弹簧 k=110 c=21，约 0.5s），不进 `theme.json.timings`。主题能改的只有状态时长，改造型曲线会引出"60fps 弹簧参数要不要开放给主题"这一整串问题，暂时不碰
 - **没验到"WorkBuddy 真的把 stdout 并进了消息"**：hook 侧的输出格式按官方文档实现并有断言，但 WorkBuddy 桌面端那一步是本功能唯一"按文档实现、没亲眼看见"的环节
 
 ## 硬约束（改代码前先看）
@@ -112,3 +115,5 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 27. **送信的代码必须排在 `readPortFile()` 之前，stdin 也要排在探端口之前**。原来反过来是为了"桌宠没开就立刻退"省一次等待；但那样一来桌宠关着就永远寄不出信。顺带：输出要 `await` 写完再 `process.exit(0)`，管道上会被截断，而截断的 JSON 在宿主那边等于"没有输出"——信白寄且零报错。
 28. **信箱拼路径必须过 `ID_RE`（文件名和 `id` 字段都要过）**。`take()` 用 `` `${letter.id}.json` `` 去 `rename`，一个没校验的 `../../x` 就能把文件搬出信箱。信箱目录是普通目录，谁都能往里放文件。
 29. **信里不写祈使句**。`format()` 只声明来源（谁写的、什么时候），一句"请这样那样"都不能加。一旦猫开始"帮你整理成一封信"，那封信就不再是用户的话，而 agent 会把它当成用户说的话——中间没有任何人能分辨。
+30. **状态的主权在主进程，渲染层只能"请求"**。渲染层擅自 `renderState()` 会被下一个 250ms 的推送顶回去，表现是"闪一下又变回来"——S8 想用改状态来提示"信寄出了"时踩过，S9 想用它来"唤醒"时差点再踩一次。两个正当出口：改文案（`showHint()`），或发一条 IPC 请主进程改（`pet:hover` → `store.wake()`）。同一条也约束主进程侧：`wake()` 只认 `sleeping`，**不许顺手把 working 也"唤醒"**——那是用户鼠标改写 agent 的真实进展。
+31. **删部件/换部件，要连"读它的探针"一起改**。外观改动看起来只动 SVG，但回归里有断言在读具体部件（"每帧都在重算"读的是 `rig-body-group` / 胡须 / 尾巴的 transform）。删掉 `#rig-ruff` 而不改探针，报告不会红——它会变成读 `missing:rig-ruff`，字符串照旧在变，于是**一条永远为真的断言换掉了一条真的**。这是硬约束 25 的姊妹条：那个讲"留着的校验器"，这个讲"留着的探针"。

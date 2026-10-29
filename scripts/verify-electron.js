@@ -603,9 +603,9 @@ async function main() {
     ok("contextIsolation 生效：渲染层拿不到 process", (await R.eval("typeof window.process")) === "undefined");
     ok("preload 没有泄漏 ipcRenderer", (await R.eval("typeof window.ipcRenderer")) === "undefined");
     // 动作数是安全闸门：S6 加了 toggleDashboard（6→7），S7 加了 getTheme / onTheme（7→9），
-    // S8 加了 openLetter / petMenu / onLetterSent（9→12）。
+    // S8 加了 openLetter / petMenu / onLetterSent（9→12），S9 加了 wake（12→13）。
     // 以后每次加 IPC 都要顺手改这里，改的时候问自己一句"这个动作真的需要吗"。
-    ok("preload 只暴露 12 个具名动作", (await R.eval("Object.keys(window.clawd||{}).length")) === 12);
+    ok("preload 只暴露 13 个具名动作", (await R.eval("Object.keys(window.clawd||{}).length")) === 13);
 
     // ---------- 3. 状态切换 ----------
     // 必须先等主进程把首次状态推下来（main.js 里是启动后 300ms 的一次 broadcast）。
@@ -716,7 +716,9 @@ async function main() {
     // 不经过弹簧。所以骨骼路径要读的是每帧推导出来的 transform。
     const probeExpr = rigMode
       ? `(() => {
-           const ids = ['rig-body-group', 'rig-ruff', 'rig-head-group', 'rig-tail-main'];
+           // rig-ruff（胸口大毛领）2026-10-28 连 SVG 一起删了，这里换成胡须：
+           // 它同样有一个每帧由 breathSin 直接推导的 rotate，不经过弹簧。
+           const ids = ['rig-body-group', 'rig-whiskers-l', 'rig-head-group', 'rig-tail-main'];
            return ids.map((id) => {
              const el = document.getElementById(id);
              if (!el) return 'missing:' + id;
@@ -764,13 +766,93 @@ async function main() {
     let blinkSeen = false;
     for (let i = 0; i < 100; i++) {
       const v = await R.eval("document.getElementById('rig-eyes-open')?.getAttribute('opacity')");
-      if (v === "0") {
+      // 数值比较而不是 `=== "0"`：睁眼层的不透明度现在是**连续值**（S9 的
+      // 睁眼弹簧写的是 0.000~1.000 三位小数）。按字符串比会永远不相等，
+      // 于是"明明在眨眼"被判成没眨——这类断言失败比没有断言更费时间。
+      if (Number(v) <= 0.001) {
         blinkSeen = true;
         break;
       }
       await sleep(50);
     }
     ok("会眨眼（睁眼层被藏起来过一次以上）", blinkSeen, `seen=${blinkSeen}`);
+
+    // ---------- 3.4 鼠标把睡着的猫弄醒（S9） ----------
+    //
+    // 这里验的是两件事：**上行链路真的发了请求**，以及**醒来这段真的在过渡**。
+    // 有两半是在这里验不到的，说清楚免得下次以为覆盖了：
+    //   1) 主进程那一半（store.wake() 把 sleeping 改成 idle）在 Node 侧单独验——
+    //      要让真应用睡着得等 60 秒（ragdoll 没写 sleepAfterMs），那不适合放进回归。
+    //   2) "过渡"只能靠 eyeOpen 这个数去看。一张静态截图里，慢慢睁开和
+    //      啪一下睁开长得一模一样，所以判据必须是**采到中间值**而非只看终态。
+    if (rigMode) {
+      await R.eval("window.petDebug.setState('sleeping')");
+      let asleep = false;
+      for (let i = 0; i < 25; i++) {
+        if ((await R.eval("window.petDebug.eyeOpen()")) < 0.02) {
+          asleep = true;
+          break;
+        }
+        await sleep(60);
+      }
+      ok("能进到「熟睡」基准（睁眼程度收敛到 0）", asleep, `eyeOpen=${await R.eval("window.petDebug.eyeOpen()")}`);
+      ok(
+        "熟睡时头顶的 zZz 亮着",
+        Number(await R.eval("document.getElementById('fx-sleeping')?.getAttribute('opacity')")) >= 0.98
+      );
+
+      const wakeBefore = await R.eval("window.petDebug.wakeSends()");
+      // 用页面里合成一个 mousemove，走的是和真鼠标**同一条**监听：
+      // window 上的 mousemove → elementFromPoint 判命中 → 才发请求。
+      // 直接用 petDebug 调内部函数就绕过了命中判定，那样测的就不是这条路了。
+      const hoverHit = await R.eval(`(() => {
+        const hit = document.elementFromPoint(120, 120);
+        const onPet = !!(hit && hit.closest && hit.closest('#pet'));
+        window.dispatchEvent(new MouseEvent('mousemove', { clientX: 120, clientY: 120, bubbles: true }));
+        return onPet;
+      })()`);
+      await sleep(80);
+      const wakeAfter = await R.eval("window.petDebug.wakeSends()");
+      ok("hover 时命中的是猫本人（不是空白穿透区）", hoverHit === true);
+      ok("鼠标停到睡着的猫身上会发出醒猫请求", wakeAfter === wakeBefore + 1, `${wakeBefore} → ${wakeAfter}`);
+
+      // 500ms 上限：紧接着再来一次不该再发。醒着的猫不该为每次 mousemove 付一条 IPC。
+      await R.eval("window.dispatchEvent(new MouseEvent('mousemove', { clientX: 122, clientY: 120, bubbles: true }))");
+      await sleep(60);
+      const wakeAfter2 = await R.eval("window.petDebug.wakeSends()");
+      ok("500ms 内不重复发（限流生效）", wakeAfter2 === wakeAfter, `${wakeAfter} → ${wakeAfter2}`);
+
+      // 过渡曲线：睡 → 醒的那 0.5 秒里，睁眼程度必须经过连续的中间值。
+      await R.eval("window.petDebug.setState('idle')");
+      const curve = [];
+      for (let i = 0; i < 6; i++) {
+        const raw = await R.eval(
+          `JSON.stringify({ e: window.petDebug.eyeOpen(), z: Number(document.getElementById('fx-sleeping').getAttribute('opacity')) })`
+        );
+        curve.push(JSON.parse(raw || "{}"));
+        await sleep(50);
+      }
+      const mid = curve.filter((p) => p.e > 0.05 && p.e < 0.95);
+      const rising = curve.every((p, i) => i === 0 || p.e >= curve[i - 1].e - 0.02);
+      ok(
+        "睡着 → idle 是慢慢睁眼（采到中间值，不是 0/1 硬跳）",
+        mid.length >= 2 && rising,
+        curve.map((p) => p.e).join(" → ")
+      );
+      ok(
+        "zZz 和眼睛走同一条曲线（一起散，不会一个已经睁眼另一个还挂着）",
+        curve.length > 0 && curve.every((p) => Math.abs(1 - p.e - p.z) < 0.02),
+        curve.map((p) => `${p.e.toFixed(2)}/${p.z.toFixed(2)}`).join(" ")
+      );
+
+      // 收尾：等它彻底睁开，别把中间态留给后面的断言
+      for (let i = 0; i < 20; i++) {
+        if ((await R.eval("window.petDebug.eyeOpen()")) > 0.98) break;
+        await sleep(60);
+      }
+      await R.eval("window.petDebug.setState('thinking')");
+      await sleep(120);
+    }
 
     // ---------- 3.5 working 场景（敲键盘）与 eyeTracking ----------
     // working 曾经是水边垂钓，还带鱼 / 拖鞋两条彩蛋；用户改回敲键盘后，
@@ -951,7 +1033,7 @@ async function main() {
 
       // 四条 IPC 通道是否都接上了：从主进程数监听器，比从渲染层猜可靠
       // （letter:send 是 invoke/handle，不在 listenerCount 里，另有断言覆盖）
-      for (const ch of ["drag:start", "drag:end", "mouse:ignore", "app:quit", "pet:menu", "letter:open"]) {
+      for (const ch of ["drag:start", "drag:end", "mouse:ignore", "app:quit", "pet:menu", "letter:open", "pet:hover"]) {
         ok(
           `IPC ${ch} 已接线`,
           (await M.eval(`require('electron').ipcMain.listenerCount('${ch}')`)) >= 1
@@ -1737,6 +1819,42 @@ async function main() {
         st.dispose();
         ok("agent 在干活时不会睡着（working 期间不累计睡意）", vWork === "working", `visual=${vWork}`);
         ok("idle 累计够久就睡着（睡意确实还是会生效）", vIdle === "sleeping", `visual=${vIdle}`);
+      }
+
+      // S9：鼠标把猫弄醒。终点在状态机里——「醒」也只有这一个地方能改，
+      // 渲染层自己切画面会被 250ms 的状态推送顶回去（那就是"闪一下又睡"）。
+      {
+        const st = S.createStore({ onChange: () => {}, getTimings: () => ({ sleepAfterMs: 60 }) });
+        st.apply({ session_id: "wake-probe", event: "SessionStart" }); // → idle
+        await sleep(300);
+        st.tick();
+        const vAsleep = st.snapshot().visual;
+        const woke = st.wake();
+        const vAwake = st.snapshot().visual;
+        st.tick(); // 紧接着一拍：不许立刻睡回去
+        const vStill = st.snapshot().visual;
+
+        // 对照组：没睡的时候 wake() 什么都不该做。返回 false 是为了让调用方
+        // （和这条断言）能分清"醒了"和"本来就没睡"，而不是都得再读一次快照去猜。
+        st.apply({ session_id: "wake-probe", event: "PreToolUse" }); // → working
+        const wokeWhenAwake = st.wake();
+        const vWorking = st.snapshot().visual;
+        const wokeLogged = st.snapshot().recent.some((r) => r.how === "woke" && r.event === "Hover");
+        st.dispose();
+
+        ok(
+          "睡着的猫被 wake() 叫醒（sleeping → idle）",
+          vAsleep === "sleeping" && woke === true && vAwake === "idle",
+          `${vAsleep} → ${vAwake}（woke=${woke}）`
+        );
+        ok("醒来后不会立刻又睡回去（stateSince 一起重置了）", vStill === "idle", `visual=${vStill}`);
+        ok(
+          "醒着的猫不受 wake() 影响（working 不会被鼠标改写）",
+          wokeWhenAwake === false && vWorking === "working",
+          `woke=${wokeWhenAwake} visual=${vWorking}`
+        );
+        // 这条日志是"它为什么醒了"的唯一证据：没有它，醒来和"恰好有事件推进来"分不开。
+        ok("醒来会在事件日志里留一条 Hover 记录", wokeLogged);
       }
 
       // 事件日志：排查"它为什么变成 idle"只能靠它——视觉层只看到结果，看不到是被哪个事件推的。
