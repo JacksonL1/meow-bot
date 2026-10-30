@@ -14,8 +14,14 @@ const btnSend = document.getElementById("btnSend");
 const btnCancel = document.getElementById("btnCancel");
 
 const DEFAULT_NOTE = note.textContent;
+// 「报告问题」的说明行：强调预填的现场是**可以删的草稿**，不是证据。
+// 这句话是这个功能的边界——猫把现场摆出来供你参考，不替你决定该报什么。
+const REPORT_NOTE =
+  "现场已附在下面，可以删、可以改 · Ctrl+Enter 寄出 · Esc 算了。你下次开口时，它跟着你的话一起送过去。";
 let maxChars = 4000;
 let sending = false;
+let kind = "letter"; // "letter" | "report"
+let prefill = "";
 
 function refresh() {
   const n = text.value.length;
@@ -31,12 +37,19 @@ function setNote(msg, isError) {
 }
 
 function reset() {
-  text.value = "";
+  text.value = prefill ? `${prefill}\n` : "";
   sending = false;
-  setNote(DEFAULT_NOTE, false);
+  setNote(prefill ? REPORT_NOTE : DEFAULT_NOTE, false);
   refresh();
   // 窗口刚 show 出来时焦点可能还没落到页面，下一帧再 focus 更稳
-  requestAnimationFrame(() => text.focus());
+  requestAnimationFrame(() => {
+    text.focus();
+    // 光标必须放到最后。预填的诊断在前面，用户要写的话在后面——
+    // 不挪的话光标停在第 0 位，一打字就插进诊断中间去了。
+    const end = text.value.length;
+    text.setSelectionRange(end, end);
+    text.scrollTop = text.scrollHeight;
+  });
 }
 
 async function send() {
@@ -46,7 +59,7 @@ async function send() {
   sending = true;
   refresh();
   try {
-    const r = await window.letter.send(body);
+    const r = await window.letter.send(body, kind);
     if (r && r.ok) {
       // 寄成功后由主进程负责关窗，这里不再做任何事 ——
       // 关窗权集中在主进程，避免"渲染层说自己关了、主进程还留着窗口"的错位
@@ -91,6 +104,11 @@ window.addEventListener("keydown", (e) => {
 if (window.letter && typeof window.letter.onOpen === "function") {
   window.letter.onOpen((data) => {
     if (data && Number.isFinite(data.maxChars) && data.maxChars > 0) maxChars = data.maxChars;
+    kind = data && data.kind === "report" ? "report" : "letter";
+    // 预填只在报告模式用；普通写信必须是干净的一张纸。
+    // 兜底裁一刀：万一诊断有一天比上限还长，也不能让用户一打开就"超长、寄不出去"。
+    const raw = kind === "report" && typeof data.prefill === "string" ? data.prefill : "";
+    prefill = raw.length > maxChars - 200 ? raw.slice(0, Math.max(0, maxChars - 200)) : raw;
     reset();
   });
 } else {

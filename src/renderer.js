@@ -1262,12 +1262,20 @@ if (window.clawd) {
   // 为什么不改宠物状态：状态机在主进程，这里硬改成 notification 会被
   // 下一个 250ms 的 tick 顶回去，看起来就是"闪一下没了"。
   if (typeof window.clawd.onLetterSent === "function") {
-    window.clawd.onLetterSent(() => {
+    window.clawd.onLetterSent((data) => {
       // 说"你下次开口时"而不是"寄出即到"：外部 hook 只有借用户下一次上下文
       // 这一条船（UserPromptSubmit 的 stdout 才进上下文），写完信的这一刻
       // agent 并不在场。曾经这里还写着"会话一恢复就送到"——那是 SessionStart
       // 投递口还活着时的说法，实测它吃掉了一封信就被撤掉了（DEVLOG 10-30）。
-      showHint("信已封好 · 你下次开口时送到", 4000);
+      //
+      // 报告问题多说半句"本地也留了一份"：这是**回执**。hook 是
+      // fire-and-forget，宿主从不回执，"有没有送到"我们确认不了，
+      // 但"我提交过了"必须让用户查得到（用户真的问过「我写的信，没了?」）。
+      const isReport = !!(data && data.kind === "report");
+      showHint(
+        isReport ? "问题已记下（本地也留了一份）· 你下次开口时送到" : "信已封好 · 你下次开口时送到",
+        4000
+      );
     });
   }
 } else {

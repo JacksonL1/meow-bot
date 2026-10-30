@@ -51,6 +51,17 @@ let dashboard = null;
 // 不在这里做任何 SVG 清洗：清洗需要 DOM，主进程没有。
 let currentTheme = null;
 
+// 状态机。为什么是模块级的 let 而不是 whenReady 里的 const：
+// 「报告问题」要把**此刻的现场**（最近事件）预填进信纸，而 presentLetter()
+// 是模块级函数，够不到 whenReady 里的局部变量。
+// 它只在 app.whenReady() 里赋一次值，之前是 null；信纸那条路径
+// 全程先判空，开窗口前点不出菜单，所以 null 是到不了的分支。
+let store = null;
+
+// 信纸当前是"写信"还是"报告问题"。只影响两件事：
+// 预不预填诊断、寄出时留不留本地副本。
+let letterKind = "letter";
+
 const DEFAULT_THEME_ID = "ragdoll";
 
 function pickThemeCandidates() {
@@ -384,15 +395,33 @@ function positionLetter() {
   );
 }
 
+// 「报告问题」要带上的现场信息。只挑不含用户数据的那几个字段——
+// 会话的 cwd 无论完整还是 basename 都不进诊断（mailbox.buildDiagnostics 那条注释）。
+function diagnosticsMeta() {
+  return {
+    version: app.getVersion(),
+    platform: process.platform,
+    arch: process.arch,
+    theme: currentTheme && currentTheme.id ? currentTheme.id : null,
+  };
+}
+
 function presentLetter() {
   if (!letterWin || letterWin.isDestroyed()) return;
-  letterWin.webContents.send("letter:open", { maxChars: mailbox.MAX_LETTER_CHARS });
+  const payload = { maxChars: mailbox.MAX_LETTER_CHARS, kind: letterKind };
+  // 预填是**草稿**不是证据：填进去之后用户可以删、可以改。
+  // 猫是邮差——它把现场摆出来供用户参考，不替用户决定该报什么。
+  if (letterKind === "report") {
+    payload.prefill = mailbox.buildDiagnostics(store ? store.snapshot() : null, diagnosticsMeta());
+  }
+  letterWin.webContents.send("letter:open", payload);
   positionLetter();
   letterWin.show();
   letterWin.focus();
 }
 
-function openLetter() {
+function openLetter(kind) {
+  letterKind = kind === "report" ? "report" : "letter";
   ensureLetter();
   if (letterReady) {
     letterPendingOpen = false;
@@ -407,15 +436,15 @@ function openLetter() {
 // 寄信成功之后告诉桌宠"信寄出去了"。
 // 为什么不让渲染层自己设状态：状态机在主进程手里，渲染层擅自改成 notification
 // 会在下一个 250ms 的 tick 里被真实状态顶掉，看起来就像"闪了一下又没了"。
-function flashLetterSent() {
-  if (win && !win.isDestroyed()) win.webContents.send("letter:sent");
+function flashLetterSent(isReport) {
+  if (win && !win.isDestroyed()) win.webContents.send("letter:sent", { kind: isReport ? "report" : "letter" });
 }
 
 app.whenReady().then(() => {
   // 状态时长来自**当前主题**，但此刻主题还没解析（下面第 331 行才定）。
   // 所以传的是 getter 而不是值：store 每次判断时长都重新问一次，
   // 换主题后新时长立刻生效，不用重建 store。
-  const store = createStore({
+  store = createStore({
     onChange: broadcast,
     getTimings: () => (currentTheme && currentTheme.timings) || null,
   });
@@ -537,7 +566,11 @@ app.whenReady().then(() => {
   ipcMain.on("pet:menu", () => {
     if (!win || win.isDestroyed()) return;
     Menu.buildFromTemplate([
-      { label: "写封信…", click: openLetter },
+      { label: "写封信…", click: () => openLetter("letter") },
+      // 「报告问题」和「写封信」的区别只有一个：前者预填现场、并且本地留一份副本。
+      // 它走的还是同一条投递路（借你下一次上下文）——**没有更快的通道**，
+      // 所以文案里必须说清楚，不能让用户以为点完就送到了。
+      { label: "报告问题…", click: () => openLetter("report") },
       { label: "会话看板", click: toggleDashboard },
       { type: "separator" },
       { label: "退出", click: () => app.quit() },
@@ -545,19 +578,33 @@ app.whenReady().then(() => {
   });
 
   // ---- S8：信纸 ----
-  ipcMain.on("letter:open", openLetter);
+  // 注意这里显式取第二参数 kind，而不是直接把 openLetter 当 handler：
+  // 直接传的话第一参数是 IPC 的 event 对象，正好也不是 "report"，会碰巧走对——
+  // 但那是靠巧合正确，下一次有人加第三种 kind 就会踩雷。
+  ipcMain.on("letter:open", (_e, kind) => openLetter(kind === "report" ? "report" : "letter"));
   ipcMain.on("letter:cancel", () => {
     if (letterWin && !letterWin.isDestroyed()) letterWin.hide();
   });
 
   // 寄信是**唯一**会把用户写的东西落盘的动作，所以校验全部在这里做：
   // 渲染层传来的只是一段文字，能存不能存由 mailbox.put 说了算。
-  ipcMain.handle("letter:send", (_e, text) => {
+  ipcMain.handle("letter:send", (_e, text, kind) => {
     if (typeof text !== "string") return { ok: false, error: "信的内容必须是文字" };
+    const isReport = kind === "report";
     const r = mailbox.put(text);
     if (!r.ok) return r; // 失败原因原样回给信纸，让用户知道是太长还是信箱满
+
+    // 报告额外留一份本地副本当回执。它不参与投递（不会被 take 挪走），
+    // 所以不存在"取走了没寄出去"的黑洞；失败了也不该连累这封信本身，
+    // 所以这里的异常一律吞掉——信已经进了 pending，投递不受影响。
+    if (isReport) {
+      try {
+        mailbox.saveReport(text);
+      } catch {}
+    }
+
     if (letterWin && !letterWin.isDestroyed()) letterWin.hide();
-    flashLetterSent();
+    flashLetterSent(isReport);
     // 顺手清一下已投递的历史（7 天），失败无所谓
     try {
       mailbox.prune();

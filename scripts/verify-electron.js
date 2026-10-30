@@ -358,6 +358,73 @@ async function verifyMailbox() {
     fmt.includes("【桌宠转交") && fmt.includes("【信完】") && fmt.includes("正文第一行\n正文第二行")
   );
 
+  // ---- 反馈入口：报告问题的现场诊断 ----
+  //
+  // 为什么要有这个入口：用户第一次报 bug 是**写信**说的
+  // （「需要我确认的时候，没有提示我啊」）——他走的是"跟猫说话"那条路，
+  // 因为桌宠身上当时没有一个更像"反馈"的地方。于是他得自己动手描述现场，
+  // 而状态机手里其实握着现场（刚发生过哪些事件）。
+  {
+    const snap = {
+      visual: "notification",
+      sessions: [
+        { id: "s1", state: "working", cwd: "secret-project" },
+        { id: "s2", state: "idle", cwd: null },
+      ],
+      recent: [
+        { t: Date.now(), event: "Notification", sid: "a1b2c3d4", from: "thinking", to: "notification", how: "mapped" },
+        { t: Date.now() - 100, event: "UserPromptSubmit", sid: "a1b2c3d4", from: "idle", to: "thinking", how: "mapped" },
+      ],
+    };
+    const diag = mailbox.buildDiagnostics(snap, {
+      version: "0.1.0",
+      platform: "win32",
+      arch: "x64",
+      theme: "ragdoll",
+    });
+
+    ok("诊断里带着此刻的画面状态", diag.includes("notification"), JSON.stringify(diag.slice(0, 40)));
+    ok(
+      "诊断里带着最近事件（用户不用自己描述现场）",
+      diag.includes("Notification") && diag.includes("mapped") && diag.includes("thinking → notification"),
+      JSON.stringify(diag.slice(0, 80))
+    );
+    // 隐私红线：这段文本会进 agent 的上下文，也会留在用户磁盘上当副本，
+    // 两处都不该出现项目目录名。
+    ok("诊断里**没有**任何会话目录名（隐私红线）", !diag.includes("secret-project"), JSON.stringify(diag.slice(0, 160)));
+    ok(
+      "诊断长度有上限（不挤占用户下一条消息的上下文预算）",
+      diag.length <= mailbox.MAX_DIAGNOSTICS_CHARS,
+      `${diag.length} / ${mailbox.MAX_DIAGNOSTICS_CHARS}`
+    );
+    // 快照可能是空的、可能被改过：这里抛一次异常就是"点报告问题没反应"，
+    // 一个纯静默的失败。
+    ok("空快照也能出诊断（不抛异常）", typeof mailbox.buildDiagnostics(null, null) === "string");
+  }
+
+  // ---- 报告问题的本地副本（回执） ----
+  //
+  // 它**不是**第二个投递口：不参与 take()，永远不会被挪走，
+  // 所以不会出现"取走了没寄出去"的黑洞（那个坑见 DEVLOG 2026-10-30）。
+  // 唯一作用是让用户查得到"我提交过了"。
+  {
+    const repDir = path.join(base, "reports");
+    process.env.CLAWD_MAILBOX_DIR = repDir;
+    delete require.cache[require.resolve("../src/mailbox")];
+    const mb = require("../src/mailbox");
+
+    ok("一开始没有报告副本", mb.listReports().length === 0);
+    const saved = mb.saveReport("需要我确认的时候，没有提示我啊");
+    ok("报告能留下本地副本", saved.ok === true, saved.ok ? `id=${saved.id.slice(0, 8)}` : saved.error);
+    ok("报告副本读得回来", mb.listReports().length === 1);
+
+    // 对照组：普通写信**不会**写进 reported/。
+    // 少了这条，"副本数是 1"可能只是因为 put() 顺手也存了一份——
+    // 那会让"报告"这个语义消失，而且从副本数上完全看不出来。
+    mb.put("只是一封普通的信");
+    ok("对照组：普通写信不会留下副本（副本是报告才有）", mb.listReports().length === 1, `n=${mb.listReports().length}`);
+  }
+
   // ---- hook：没有信的时候必须一个字节都不输出 ----
   // 这条是整个功能最危险的一条：UserPromptSubmit 的 stdout 会被塞进
   // 用户的消息里，多打一个换行都是在污染每一次对话。
@@ -2240,6 +2307,57 @@ async function main() {
           "寄出后桌宠会明确说一句（不是静默成功）",
           typeof hintText === "string" && hintText.includes("信已封好"),
           String(hintText)
+        );
+
+        // ---- 「报告问题」端到端跑一遍 ----
+        //
+        // 原生右键菜单在回归里**不能真弹**（弹出来会阻塞主进程），
+        // 所以这条链路靠 `letter:open` 带的 kind 来驱动。
+        // 值得真跑一次的理由：预填有没有真的落进 textarea、光标在哪、
+        // 寄出后本地副本有没有多出来——这三件事全是跨进程的，
+        // 纯 Node 侧的断言一条都盖不到。
+        const reportsBefore = fs.existsSync(path.join(appMailbox, "reported"))
+          ? fs.readdirSync(path.join(appMailbox, "reported")).filter((f) => f.endsWith(".json")).length
+          : 0;
+
+        await R.eval("window.clawd.openLetter('report')");
+        await sleep(700);
+
+        const prefillVal = await L.eval("document.getElementById('text').value");
+        ok(
+          "点「报告问题」会把现场诊断预填进信纸（用户不用自己描述现场）",
+          typeof prefillVal === "string" && prefillVal.includes("【桌宠现场"),
+          JSON.stringify(String(prefillVal).slice(0, 40))
+        );
+        ok(
+          "预填后光标在最后（一打字不会插进诊断中间）",
+          (await L.eval(
+            "(() => { const t = document.getElementById('text'); return t.selectionStart === t.value.length; })()"
+          )) === true
+        );
+
+        await L.eval(
+          "(() => { const t = document.getElementById('text'); t.value += '回归报的一个问题';" +
+            " t.dispatchEvent(new Event('input')); })()"
+        );
+        await L.eval("document.getElementById('btnSend').click()");
+        await sleep(700);
+
+        const repDir2 = path.join(appMailbox, "reported");
+        const repFiles = fs.existsSync(repDir2)
+          ? fs.readdirSync(repDir2).filter((f) => f.endsWith(".json"))
+          : [];
+        ok(
+          "报告寄出后本地多一份副本（回执：查得到提交过）",
+          repFiles.length === reportsBefore + 1,
+          `files=${repFiles.length} before=${reportsBefore}`
+        );
+
+        const hint2 = await R.eval("document.getElementById('hint').textContent");
+        ok(
+          "报告的回执会说清本地也留了一份（不让人以为又丢了）",
+          typeof hint2 === "string" && hint2.includes("本地也留了一份"),
+          String(hint2)
         );
 
         L.close();

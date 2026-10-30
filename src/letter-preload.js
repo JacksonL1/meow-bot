@@ -11,8 +11,14 @@ contextBridge.exposeInMainWorld("letter", {
   // 带上 { maxChars }：字数上限的真值只有一份，在 mailbox.js 里。
   // 渲染层不许自己写一个 4000 —— 两处数字一旦分叉，就会出现"面板说还能写、
   // 寄出却被拒"这种自相矛盾的提示。
+  // 带上 { maxChars, kind, prefill }：
+  //   maxChars 字数上限的真值只有一份，在 mailbox.js 里。渲染层不许自己写一个 4000
+  //   —— 两处数字一旦分叉，就会出现"面板说还能写、寄出却被拒"这种自相矛盾的提示。
+  //   kind / prefill 是「报告问题」用的：预填的现场诊断只是一段普通文字草稿。
   onOpen: (cb) => ipcRenderer.on("letter:open", (_e, data) => cb(data)),
-  // 返回 { ok, error }：失败原因（太长 / 信箱满）要显示在信纸上，不能静默丢掉
-  send: (text) => ipcRenderer.invoke("letter:send", text),
+  // 返回 { ok, error }：失败原因（太长 / 信箱满）要显示在信纸上，不能静默丢掉。
+  // 第二参数是 kind（"letter" / "report"）：它来自渲染层，可被 F12 改，
+  // 但它的全部效力只是"多留一份本地副本"，不是权限，所以不做额外校验。
+  send: (text, kind) => ipcRenderer.invoke("letter:send", text, kind),
   cancel: () => ipcRenderer.send("letter:cancel"),
 });

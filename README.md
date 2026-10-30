@@ -72,7 +72,7 @@ node scripts/fake-feed.js                     # 完整剧本： thinking → wor
 node scripts/fake-feed.js Stop                # 单个事件
 node scripts/fake-feed.js --hold working 10   # 保持某个状态 10 秒
 
-npm run verify:electron                       # 183 项回归（当前 183 PASS / 0 FAIL）
+npm run verify:electron                       # 195 项回归（当前 195 PASS / 0 FAIL）
 
 npm run start:debug                           # 带 DevTools 启动（桌宠无边框、不进任务栏，平时打不开）
                                               #   然后在 Console 里敲 petDebug.events() 看 agent 推来的每个事件
@@ -135,6 +135,14 @@ npm run build:preview                         # 改完 themes/ 后更新 preview
   10-30），撤掉了。所以信由**你下一句话**带着走。这也是它做不到「写完立刻让
   agent 动起来」的原因：外部 hook 只能借用户的下一次上下文，
   没有给会话直接推消息的那条船
+- **报告问题（S8 的同款入口）**：**右键 → 「报告问题…」**。和「写封信…」的区别只有两处：
+  **① 预填现场**——信纸里已经写好了此刻的画面状态、会话分布、最近 12 条事件
+  （那正是排查「它为什么变成这样」最需要的东西，你不用自己描述）；
+  **② 本地留一份副本**——寄出后 `mailbox/reported/` 里多一份，
+  因为 hook 是 fire-and-forget（宿主从不回执），「有没有送到」我们确认不了，
+  但「我提交过了」必须查得到。**它走的仍是同一条投递路**，没有更快的通道。
+  预填的是**草稿不是证据**：可以删、可以改，猫只是把现场摆出来。
+  **隐私**：诊断里**不含任何路径**（会进上下文、也会留在磁盘，两处都不该有项目目录名）
 - **鼠标叫醒（S9）**：睡着的猫，鼠标一经过就慢慢睁眼醒来——不是「啪」一下切状态，
   躯干/头/耳/尾靠弹簧过冲，眼睛靠一条 `eyeOpen` 弹簧（≈0.5s）+ 三层交叉淡入，头顶 zZz 跟着一起散
 - 调试入口：DevTools 里 `petDebug.setState('working')` / `petDebug.gaze({x:1,y:-1})` / `petDebug.state()` / `petDebug.eyeOpen()`
@@ -426,7 +434,7 @@ Chrome 对超大模糊半径是同步算的，一个 `9999` 就是一次卡死�
   加载失败导致空白的话，用户看到的是一个**看得见进程、找不到窗口、不知道点哪里退出**的东西——比报错难处理得多。
 - **失败是整个主题拒绝，不是部分加载**。半个主题的表现是"看着有点怪"，作者根本不会发现。
 
-回归 183 PASS / 0 FAIL，其中主题与白名单 24 项、渲染与动画 13 项、状态时长 11 项、表情变体 4 项、信箱与送信 22 项、唤醒与睁眼过渡 12 项。`npm run preview:states` 出对照图，
+回归 195 PASS / 0 FAIL，其中主题与白名单 24 项、渲染与动画 13 项、状态时长 11 项、表情变体 4 项、信箱与送信 22 项、唤醒与睁眼过渡 12 项。`npm run preview:states` 出对照图，
 `npm run build:preview` 更新预览页的数据包。
 
 ## S8 已完成：跟桌宠说话（猫只做邮差）
