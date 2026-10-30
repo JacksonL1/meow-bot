@@ -92,14 +92,24 @@ themes/
 
 ```json
 "timings": {
-  "oneshot": { "error": 1200, "notification": 1500, "attention": 800 },
+  "oneshot": { "error": 1200, "attention": 800 },
   "sleepAfterMs": 20000
 }
 ```
 
-- `oneshot.<state>`：这三个状态播多久就退回 `idle`（否则 attention 会永远挂在屏幕上）。
+- `oneshot.<state>`：这三个状态**最多**停留多久就退回 `idle`（否则 attention 会永远挂在屏幕上）。
 - `sleepAfterMs`：**闲着（idle）多久才睡着**。计时从进入 idle 开始，working / thinking 期间不累计 ——
   agent 明明在干活时睡着是错的（一次跑 40 秒的构建期间一个事件都没有，但它在干活）。
+
+**`notification` 那一条不要往短里写。** 它不是"播一次就走"的闪光，是**"agent 在等你点允许"**的持续状态
+（主仓库管它叫 a real permission hold）。ragdoll 早期在这里写过 `1500`，后果是用户在信里问的那句：
+
+> 「需要我确认的时候，没有提示我啊」
+
+提示闪 1.5 秒就撤了，人抬头看的时候屏幕上什么都没有。所以主题里现在**干脆不写它**，
+用 `src/state.js` 的内置上限（10 分钟）。真正让提示消失的不是这个计时器，
+而是下一个事件（agent 又开始动了）把它顶掉 —— 这条写在 `state.js` 的 `tick()` 里。
+你自己写也可以，但记住那个数是**上限**，写短了等于把提示掐掉。
 
 **主题没写就是没写**：不写 `timings` 时加载器如实返回 `null`，由 `src/state.js` 用它自己的默认。
 默认值的真相只放在一处，加载器不会替你编一个——两边各存一份默认，分叉是静默的。

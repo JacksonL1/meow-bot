@@ -219,7 +219,7 @@
 
 **为什么不走 CLI**（试过，两条都不成立）：`codebuddy -p` 需要单独登录一次——桌面端的登录态在 Electron 的加密存储里，CLI 读不到；而且 `-p` 只会**开一个新会话**，进不了你正在看的那个。
 
-**验证**：回归 176 条里 22 条覆盖这一段——空信 / 超长 / 非字符串 / 信箱满被拒、坏 JSON 与非法 id 被跳过、非法 id 的信没被挪走、24h 过期不投、无信时 stdout **0 字节**、有信时是合法 JSON、投递后不重复、`PreToolUse` 不偷信、桌宠没开也能投、信纸窗口 `contextIsolation: true` + `nodeIntegration: false` + `sandbox: true`。
+**验证**：回归 183 条里 22 条覆盖这一段——空信 / 超长 / 非字符串 / 信箱满被拒、坏 JSON 与非法 id 被跳过、非法 id 的信没被挪走、24h 过期不投、无信时 stdout **0 字节**、有信时是合法 JSON、投递后不重复、`PreToolUse` 不偷信、桌宠没开也能投、信纸窗口 `contextIsolation: true` + `nodeIntegration: false` + `sandbox: true`。
 
 ### SEC-13 第一条"渲染层要求改状态"的通道（S9）
 

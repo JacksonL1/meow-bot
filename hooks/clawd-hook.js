@@ -74,9 +74,8 @@ function post(endpoint, body) {
 }
 
 // ---- S8：送信 ----
-// 只在 UserPromptSubmit 上做，因为**只有这个事件的 stdout 会被加进上下文**
-// （官方文档：退出码 0 时 stdout 一般只显示给用户，但 UserPromptSubmit 和
-// SessionStart 是例外——stdout 会进上下文）。
+// 官方文档点名的两个例外：**只有 UserPromptSubmit 和 SessionStart 的 stdout
+// 会被加进上下文**，其余事件写了也只是显示给用户看。
 //
 // 三条必须守住的边界：
 //   1. 没有信时**一个字节都不输出**。UserPromptSubmit 的 stdout 会被塞进
@@ -84,8 +83,25 @@ function post(endpoint, body) {
 //   2. 输出必须是合法 JSON。半截 JSON 宿主解析不了，等于信没寄出去。
 //   3. 送信**不依赖桌宠是否在跑**。信是桌宠写的，但寄的时候桌宠可能已经关了；
 //      这个函数在 readPortFile() 之前调用，就是为此。
+// 官方文档点名的两个例外：**只有这两个事件的 stdout 会被加进上下文**，
+// 其余事件就算写了也只显示给用户看，agent 看不到。
+// SessionStart 曾经和 UserPromptSubmit 并列在这里，**启用一天就被撤掉了**：
+// 它吃掉了一封信（详见 DEVLOG 2026-10-30 那条）。简短地说——
+// SessionStart 的注入在我们的实测里没能送达，而 `take()` 一 rename 就把信从
+// pending 拿走了，于是那封信既没进上下文、也不在信箱里，成了黑洞。
+// 这恰好是下面这段注释发誓要防的"取走了但没寄出去"。
+//
+// 这段注释留着而不是删掉这次尝试，是为了让下一个想"顺便再加一个投递口"的人
+// 先看见代价：**每多一个投递口，就多一个能把信带走、却不一定送到手的地方。**
+// hook 是 fire-and-forget（写完 stdout 就退出），宿主从不回执，
+// 所以"投递成功"我们根本没有确认手段——只能守住实测最可靠的那个口。
+const CONTEXT_EVENTS = new Set(["UserPromptSubmit"]);
+
+// 见下方 deliverLetters 上方关于 Notification 的过滤说明
+const IGNORED_NOTIFICATION_TYPES = new Set(["idle_prompt", "auth_success"]);
+
 async function deliverLetters(event) {
-  if (event !== "UserPromptSubmit") return;
+  if (!CONTEXT_EVENTS.has(event)) return;
 
   let result;
   try {
@@ -106,7 +122,7 @@ async function deliverLetters(event) {
   const payload = JSON.stringify({
     continue: true,
     hookSpecificOutput: {
-      hookEventName: "UserPromptSubmit",
+      hookEventName: event,
       additionalContext: text,
     },
   });
@@ -166,6 +182,17 @@ async function main() {
   if (!sid) {
     console.error(`[clawd-hook] 事件 ${event} 没带 session_id，已丢弃（不合成占位会话）`);
     return;
+  }
+
+  // Notification 里有一部分是 WorkBuddy 自己的生命周期闲聊，不是"在等你"。
+  // 这两个值是主仓库 hooks/workbuddy-hook.js:30 实测列出来的：
+  //   idle_prompt —— "再发一条消息吧"的提醒（Stop 之后约 60 秒）
+  //   auth_success —— 登录成功的 toast（每一轮开头都发一次）
+  // 必须在**源头**滤掉而不是交给状态机：notification 是"真的在等你"的长状态，
+  // 让一条 idle_prompt 挂上来，桌宠就会凭空提示好几分钟（见 state.js 那条注释）。
+  if (event === "Notification") {
+    const ntype = field(payload.notification_type);
+    if (ntype && IGNORED_NOTIFICATION_TYPES.has(ntype)) return;
   }
 
   // 4) 只取需要的字段，其余一律丢弃（不落盘、不打日志）

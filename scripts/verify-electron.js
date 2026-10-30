@@ -411,6 +411,50 @@ async function verifyMailbox() {
   );
   ok("同一封信不会被投递第二次", again.out === "", `len=${again.out.length}`);
 
+  // ---- SessionStart 不许把信取走 ----
+  // 它曾经是第二个投递口，启用一天就吃掉了一封信：
+  // SessionStart 的注入实测没能送达，而 take() 已经把信从 pending 挪走了，
+  // 结果那封信既没进上下文、也不在信箱里。见 DEVLOG 2026-10-30。
+  // 所以这条断言盯的是**反方向**：SessionStart 经过时，信必须还好好在信箱里。
+  {
+    const ssDir = path.join(base, "session-start-keep");
+    process.env.CLAWD_MAILBOX_DIR = ssDir;
+    mailbox.put("这封信要留到用户真的说话");
+    const out = await runHook(
+      "SessionStart",
+      { hook_event_name: "SessionStart", source: "resume" },
+      { ...hookEnv, CLAWD_MAILBOX_DIR: ssDir }
+    );
+    process.env.CLAWD_MAILBOX_DIR = ssDir;
+    const stillPending = mailbox.listPending();
+    ok(
+      "SessionStart 不会把信取走（它只在用户开口时送）",
+      out.out === "" && stillPending.length === 1,
+      `outLen=${out.out.length} pending=${stillPending.length}`
+    );
+  }
+
+  // ---- 取信必须是原子的 ----
+  // 同时开两个 hook 进程抢同一封信。串行测只证明"取过一次后没了"，证明不了竞态，
+  // 所以这里用 Promise.all 真并发。take() 靠 rename 的原子性让只有一个赢——
+  // 这条守的是 mailbox 本身，和投递口有几个无关。
+  {
+    const raceDir = path.join(base, "race");
+    process.env.CLAWD_MAILBOX_DIR = raceDir;
+    mailbox.put("这封信只准出去一次");
+    const [a, b] = await Promise.all([
+      runHook("UserPromptSubmit", { hook_event_name: "UserPromptSubmit", prompt: "x" }, { ...hookEnv, CLAWD_MAILBOX_DIR: raceDir }),
+      runHook("UserPromptSubmit", { hook_event_name: "UserPromptSubmit", prompt: "y" }, { ...hookEnv, CLAWD_MAILBOX_DIR: raceDir }),
+    ]);
+    const gotA = a.out.trim().length > 0;
+    const gotB = b.out.trim().length > 0;
+    ok(
+      "并发取信时同一封信只被取走一次（rename 是原子的）",
+      gotA !== gotB, // 恰好一个拿到；两个都拿到 = 重投，两个都空 = 丢信
+      `A=${gotA ? "拿到" : "空"} B=${gotB ? "拿到" : "空"}`
+    );
+  }
+
   // ---- 别的钩子事件不许把信吃掉 ----
   // 信只能在"用户说话"的那一刻送进上下文。要是 PreToolUse 把信取走了，
   // 它就白白消失在一次工具调用里，用户永远等不到它。
@@ -480,6 +524,41 @@ async function verifyHookSessionId() {
   await sleep(120);
   const blankSid = received.length;
 
+  // Notification 里混着 WorkBuddy 自己的生命周期闲聊：
+  //   idle_prompt  —— "再发一条消息吧"的提醒（Stop 之后约 60 秒）
+  //   auth_success —— 登录成功的 toast（每一轮开头都发一次）
+  // 必须在**源头**（hook）滤掉，不能交给状态机：notification 一旦变成"持续
+  // 到被顶掉"的长状态，一条 idle_prompt 挂上来就是"猫凭空喊好几分钟"。
+  received.length = 0;
+  await runHook(
+    "Notification",
+    { hook_event_name: "Notification", session_id: "hook-sid-1", notification_type: "idle_prompt" },
+    env
+  );
+  await sleep(120);
+  const idlePromptCount = received.length;
+
+  received.length = 0;
+  await runHook(
+    "Notification",
+    { hook_event_name: "Notification", session_id: "hook-sid-1", notification_type: "auth_success" },
+    env
+  );
+  await sleep(120);
+  const authCount = received.length;
+
+  // 对照组：真的在等你的那种通知必须照常放行。
+  // 少了这条，"一个都没发"可能只是我把整条 Notification 通路关掉了——
+  // 那是另一种更彻底的坏，而且从"0 个请求"上完全看不出来。
+  received.length = 0;
+  await runHook(
+    "Notification",
+    { hook_event_name: "Notification", session_id: "hook-sid-1", notification_type: "permission_prompt" },
+    env
+  );
+  await sleep(120);
+  const realCount = received.length;
+
   server.close();
 
   ok("带了 session_id 的事件会真的发出去（对照组：不是连不上 server）", withSid === 1, `收到 ${withSid} 个`);
@@ -489,6 +568,9 @@ async function verifyHookSessionId() {
     `收到 ${withoutSid} 个`
   );
   ok("session_id 只有空格也算没有", blankSid === 0, `收到 ${blankSid} 个`);
+  ok("idle_prompt 不算『在等你』（源头就丢掉）", idlePromptCount === 0, `收到 ${idlePromptCount} 个`);
+  ok("auth_success 也不算（每轮开头都发的登录 toast）", authCount === 0, `收到 ${authCount} 个`);
+  ok("对照组：真的通知照常放行（不是把整条路关了）", realCount === 1, `收到 ${realCount} 个`);
   ok(
     "丢弃时往 stderr 说了一句（不往 stdout —— 那会被宿主收进上下文）",
     missing.out === "" && /session_id/.test(missing.err),
@@ -1917,6 +1999,49 @@ async function main() {
           "迟到的 SessionStart 不会把刚进入的 thinking 打回 idle（WorkBuddy 每轮都补发它）",
           vThinking === "thinking" && vLate === "thinking",
           `${vThinking} → ${vLate}`
+        );
+      }
+
+      // 「需要我确认的时候，没有提示我啊」—— 用户在信里写的原话（10-29）。
+      //
+      // notification 是**持续状态**，不是播一下就走的 oneshot：agent 在等用户
+      // 点"允许"，这个等待可能几十秒甚至几分钟（主仓库管它叫
+      // a real permission hold，见 clawd-on-desk src/state.js:345）。
+      // 而 ragdoll 主题把它写成了 1500ms —— 比内置默认 3200 还短，
+      // 提示闪一下就撤了，用户抬头看的时候屏幕上什么都没有。
+      //
+      // 所以这里盯两件事，缺一个都是坏的：
+      //   ① 它得一直在（不然等于没提示）
+      //   ② agent 又动起来时它必须**立刻**让位（不然把上限拉长之后
+      //      就变成"明明在干活，猫还在喊"）
+      {
+        // 读 ragdoll **真实写进 theme.json 的值**当输入，而不是在测试里手抄一份。
+        // 手抄那份（1500）只能记录这一次的历史：主题哪天又被写回 1500，
+        // 它照样绿——那不是盯着它的断言，只是一张旧照片。
+        // 读真文件之后，"主题没写 → 用内置上限"这条路径也一并被验到了。
+        const RAGDOLL = JSON.parse(
+          fs.readFileSync(path.join(__dirname, "..", "themes", "ragdoll", "theme.json"), "utf8")
+        ).timings;
+
+        // 等 2 秒：超过主题写的 1500ms，但远远短于"用户抬个头的时间"。
+        const vHold = await drive(() => RAGDOLL, "Notification", 2000);
+        ok(
+          "等你确认时提示不会自己撤（2 秒后仍在 notification）",
+          vHold === "notification",
+          `visual=${vHold}`
+        );
+
+        const st = S.createStore({ onChange: () => {}, getTimings: () => RAGDOLL });
+        st.apply({ session_id: "perm-probe", event: "Notification" });
+        const vNotif = st.snapshot().visual;
+        st.apply({ session_id: "perm-probe", event: "PreToolUse" }); // 权限通过了，继续干活
+        st.tick();
+        const vBack = st.snapshot().visual;
+        st.dispose();
+        ok(
+          "agent 又动起来时提示立刻让位（不是霸屏到时间上限）",
+          vNotif === "notification" && vBack === "working",
+          `${vNotif} → ${vBack}`
         );
       }
 

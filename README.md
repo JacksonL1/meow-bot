@@ -72,7 +72,7 @@ node scripts/fake-feed.js                     # 完整剧本： thinking → wor
 node scripts/fake-feed.js Stop                # 单个事件
 node scripts/fake-feed.js --hold working 10   # 保持某个状态 10 秒
 
-npm run verify:electron                       # 176 项回归（当前 176 PASS / 0 FAIL）
+npm run verify:electron                       # 183 项回归（当前 183 PASS / 0 FAIL）
 
 npm run start:debug                           # 带 DevTools 启动（桌宠无边框、不进任务栏，平时打不开）
                                               #   然后在 Console 里敲 petDebug.events() 看 agent 推来的每个事件
@@ -126,9 +126,15 @@ npm run build:preview                         # 改完 themes/ 后更新 preview
 - **会话看板（S6）**：右键菜单里打开，一条会话一行——状态徽标、目录名、会话 id、闲了多久，
   正在演的那条用左侧色条标出；按「最吵的排前面」排序（error 优先）。
   目录**只显示最后一段**，完整路径只能点「复制路径」单独取（见下方 SEC-09 说明）
-- **跟桌宠说话（S8）**：**双击桌宠写封信**，猫把它原样收下，在你下次跟 agent 说话时一起送到。
+- **跟桌宠说话（S8）**：**双击桌宠写封信**，猫把它原样收下转交给 agent。
   猫**不回答任何问题**——它只做搬运工，不代答、不总结、不润色。信落在
-  `%APPDATA%\clawd-starter\mailbox\`，24 小时没寄出就作废，最多积 5 封
+  `%APPDATA%\clawd-starter\mailbox\`，24 小时没寄出就作废，最多积 5 封。
+  **投递时机**：官方点名的例外里只有 `UserPromptSubmit` 与 `SessionStart`
+  这两个事件的 stdout 会进上下文。我们**只守 `UserPromptSubmit` 一个口**——
+  `SessionStart` 曾经并列过，启用一天就吃掉一封信（取走了却没送达，见 DEVLOG
+  10-30），撤掉了。所以信由**你下一句话**带着走。这也是它做不到「写完立刻让
+  agent 动起来」的原因：外部 hook 只能借用户的下一次上下文，
+  没有给会话直接推消息的那条船
 - **鼠标叫醒（S9）**：睡着的猫，鼠标一经过就慢慢睁眼醒来——不是「啪」一下切状态，
   躯干/头/耳/尾靠弹簧过冲，眼睛靠一条 `eyeOpen` 弹簧（≈0.5s）+ 三层交叉淡入，头顶 zZz 跟着一起散
 - 调试入口：DevTools 里 `petDebug.setState('working')` / `petDebug.gaze({x:1,y:-1})` / `petDebug.state()` / `petDebug.eyeOpen()`
@@ -420,7 +426,7 @@ Chrome 对超大模糊半径是同步算的，一个 `9999` 就是一次卡死�
   加载失败导致空白的话，用户看到的是一个**看得见进程、找不到窗口、不知道点哪里退出**的东西——比报错难处理得多。
 - **失败是整个主题拒绝，不是部分加载**。半个主题的表现是"看着有点怪"，作者根本不会发现。
 
-回归 176 PASS / 0 FAIL，其中主题与白名单 24 项、渲染与动画 13 项、状态时长 11 项、表情变体 4 项、信箱与送信 22 项、唤醒与睁眼过渡 12 项。`npm run preview:states` 出对照图，
+回归 183 PASS / 0 FAIL，其中主题与白名单 24 项、渲染与动画 13 项、状态时长 11 项、表情变体 4 项、信箱与送信 22 项、唤醒与睁眼过渡 12 项。`npm run preview:states` 出对照图，
 `npm run build:preview` 更新预览页的数据包。
 
 ## S8 已完成：跟桌宠说话（猫只做邮差）

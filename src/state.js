@@ -24,9 +24,28 @@ const PRIORITY = {
 
 // oneshot = 播一次就结束的状态。不会赖在屏幕上。
 // value 是建议播放时长（毫秒）。
+//
+// 但 notification 那一条的语义**不是播放时长，是上限**，而且它比另外两个
+// 长了两个数量级。差别来自"它在表达什么"：
+//   error / attention —— 一个瞬间的事实（"刚才失败了"、"这一轮说完了"），
+//                        播完就该消失，留着是噪音。
+//   notification     —— 一个**持续的状态**：agent 正卡在那里等你点"允许"。
+//                        主仓库管它叫 a real permission hold
+//                        （clawd-on-desk src/state.js:345）。
+//
+// 起因是用户在信里写的一句话：「需要我确认的时候，没有提示我啊」。
+// 内置默认 3200ms（ragdoll 主题还把它改成了 1500ms）让它变成一道闪光：
+// 闪一下就撤，用户抬头看的时候屏幕上什么都没有。
+//
+// 10 分钟不是拍脑袋：对齐主仓库 Kimi 权限 hold 的兜底上限，那里的注释写着
+// "真实用户常常在 TUI 前耗上几十秒（接电话、吃饭、犹豫）"。
+// 真正的释放**不靠这个计时器**，靠下一个事件把它顶掉（见 tick() 里的说明）；
+// 这个数只是"从此再没有任何事件"时的兜底——否则提示会永远挂在屏幕上。
+const NOTIFICATION_MAX_MS = 10 * 60 * 1000;
+
 const ONESHOT = {
   error: 2600,
-  notification: 3200,
+  notification: NOTIFICATION_MAX_MS,
   attention: 2400,
 };
 
@@ -174,6 +193,14 @@ function createStore({ onChange, getTimings } = {}) {
     return best ? best.state : "idle";
   }
 
+  // 还有没有人真的处在这个状态？（oneshot 霸屏的前提，见 tick() 里的说明）
+  function sessionsHave(state) {
+    for (const s of sessions.values()) {
+      if (s.state === state) return true;
+    }
+    return false;
+  }
+
   function apply(payload) {
     if (!payload || typeof payload !== "object") return snapshot();
 
@@ -307,8 +334,15 @@ function createStore({ onChange, getTimings } = {}) {
     }
 
     // 3) 视觉层：oneshot 在时长内霸屏，否则看仲裁结果
+    //
+    // 霸屏的前提是**真的还有会话处在这个状态**。原来只判 `now < oneshot.until`，
+    // 于是会发生这种事：权限提示挂上来（上限 10 分钟）→ 用户点了允许 →
+    // agent 继续干活（PreToolUse → working）→ 画面上猫还在喊，因为 until 还没到。
+    // 这个前提以前只是偶尔闪错一下（attention 只有 800ms，没人看得出来），
+    // 把 notification 拉到 10 分钟之后它才第一次变得要紧——
+    // 同样的 bug，短的算瑕疵，长的就是"明明在干活，猫喊了整整十分钟"。
     let visual;
-    if (oneshot && now < oneshot.until) {
+    if (oneshot && now < oneshot.until && sessionsHave(oneshot.state)) {
       visual = oneshot.state;
     } else {
       oneshot = null;

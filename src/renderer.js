@@ -190,7 +190,8 @@ function createRiggedRagdollSVG() {
     <path id="rig-torso"
           d="M72 112 C59 114 50 130 50 146 C50 162 54 172 66 174 C80 177 120 177 134 174 C146 172 150 162 150 146 C150 130 141 114 128 112 Z"
           fill="#FAF6F0" stroke="#524338" stroke-width="3.5" stroke-linejoin="round"/>
-
+      <!-- 高级感金色 "RAG" 衬线字体，带有轻微描边以契合整体画风 -->
+      <text x="100" y="142" font-family="Georgia, serif" font-weight="900" font-size="14" fill="#D4AF37" text-anchor="middle" letter-spacing="2" stroke="#524338" stroke-width="0.8">RAG</text>
     <!-- 原来这里还有一块 #rig-torso-patch（cx112 cy134 rx34 ry18 的米色椭圆，opacity 0.65），
          注释写的是"背部柔毛轮廓"，实际读起来是肚子上一块**污渍**：硬边、没有描边、
          颜色比身体暗一档、位置还偏右上（不在身体中心）。
@@ -1262,7 +1263,11 @@ if (window.clawd) {
   // 下一个 250ms 的 tick 顶回去，看起来就是"闪一下没了"。
   if (typeof window.clawd.onLetterSent === "function") {
     window.clawd.onLetterSent(() => {
-      showHint("信已封好 · 你下次说话时一起送到", 4000);
+      // 说"你下次开口时"而不是"寄出即到"：外部 hook 只有借用户下一次上下文
+      // 这一条船（UserPromptSubmit 的 stdout 才进上下文），写完信的这一刻
+      // agent 并不在场。曾经这里还写着"会话一恢复就送到"——那是 SessionStart
+      // 投递口还活着时的说法，实测它吃掉了一封信就被撤掉了（DEVLOG 10-30）。
+      showHint("信已封好 · 你下次开口时送到", 4000);
     });
   }
 } else {

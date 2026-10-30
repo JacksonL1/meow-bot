@@ -449,7 +449,7 @@ form-action 'none'; connect-src 'none'
 
 **一句话**：某些状态"播一次就该结束"，不能赖在屏幕上。
 
-**本项目**：`state.js:27-31` `ONESHOT = { error: 2600, notification: 3200, attention: 2400 }`（毫秒）；`state.js:172-176` 超时后回 `idle`。
+**本项目**：`state.js` `ONESHOT = { error: 2600, notification: 600000, attention: 2400 }`（毫秒）；超时后回 `idle`。`notification` 那一个比另外两个长两个数量级，因为它的语义是**上限**不是播放时长：它表达的是"agent 卡在那儿等你点允许"，可能几十秒甚至几分钟；真正让它消失的是下一个事件，不是这个计时器。
 
 **为什么**：没有这个机制，用户去泡杯咖啡回来，桌宠还在对着他"红叹号"。
 
@@ -705,6 +705,9 @@ form-action 'none'; connect-src 'none'
 | 为什么眨眼不走弹簧 | 150ms 的事，慢下来看着像卡住 |
 | `SessionStart` 为什么不再等于 idle | WorkBuddy 每轮都在 UserPromptSubmit 后 0.1s 补发它，会把刚进入的 thinking 打回 idle |
 | 缺 session_id 为什么丢弃而不是兜底 | 合成占位 id 会让多条真实会话合并，事件互相覆盖（A 的 thinking 被 B 的 Stop 带塌） |
+| notification 为什么是 10 分钟不是 3 秒 | 它表达的是**持续状态**（agent 在等你点允许），不是播一次就走的闪光；3 秒的提示 = 人抬头时什么都没有 |
+| oneshot 霸屏的前提 | **还有会话真的处在这个状态**（`sessionsHave()`）——只判时间不问人，就会有"权限过了、agent 在干活、猫还在喊" |
+| 送信为什么只有一个投递口 | hook 是 fire-and-forget（写完 stdout 就退出），宿主从不回执；每多一个口就多一个能把信带走却不一定送到的黑洞 |
 | 改主形状要连带看什么 | 后爪、前爪、working 键盘这三处邻居 |
 | 心跳 tick | 所有时间驱动的变化收敛到一个函数 |
 | timer.unref() | 定时器不阻止进程退出 |

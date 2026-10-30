@@ -73,7 +73,6 @@
   "timings": {
     "oneshot": {
       "error": 1200,
-      "notification": 1500,
       "attention": 800
     }
   }
