@@ -83,12 +83,20 @@
         border-radius: 10px;
         padding: 10px 12px;
         display: grid;
-        grid-template-columns: auto 1fr auto;
+        grid-template-columns: auto minmax(0, 1fr) auto;
         grid-template-areas:
-          "badge dir idle"
-          "badge sid copy";
+          "badge title idle"
+          "badge dir   dir"
+          "badge meta  copy";
         gap: 4px 10px;
         align-items: center;
+      }
+      /* 还没拿到标题时（这条会话还没说过话）不给它留一行空的——
+         空行会让每条都多出 4px 的死高度，看着像"内容还没加载出来" */
+      li.untitled {
+        grid-template-areas:
+          "badge dir  idle"
+          "badge meta copy";
       }
       /* 当前真正在屏幕上播的那条，用左侧色条标出来——
          和状态徽标是两件事：徽标说"这条在干什么"，色条说"现在显示的是它" */
@@ -130,6 +138,15 @@
         background: #f2f1ee;
         color: #9a958a;
       }
+      /* 标题是看板上唯一"像人话"的一行，所以给它最重的位置和最强的对比。
+         它来自用户自己说的第一句话（hook 侧取的，prompt 原文不进这条链路）。 */
+      .title {
+        grid-area: title;
+        font-weight: 600;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
       .dir {
         grid-area: dir;
         font-weight: 500;
@@ -137,14 +154,36 @@
         text-overflow: ellipsis;
         white-space: nowrap;
       }
+      .meta {
+        grid-area: meta;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+      }
       .sid {
-        grid-area: sid;
         font-size: 11px;
         color: var(--muted);
         font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+      /* 工具名：看板上第二有用的一行。这条数据 hook 一直都在送，
+         只是此前没人存、没人显示（见 state.js 的 sanitizeTool 注释）。 */
+      .tool {
+        font-size: 11px;
+        color: #5b6b52;
+        background: #eef3ea;
+        border-radius: 5px;
+        padding: 1px 6px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 130px;
+      }
+      .tool:empty {
+        display: none;
       }
       .idle {
         grid-area: idle;

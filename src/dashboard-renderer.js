@@ -30,6 +30,7 @@ const STATE_META = {
 };
 
 const HIDDEN_DIR = "项目已隐藏";
+const HIDDEN_TITLE = "内容已隐藏";
 
 let demoMode = false;
 
@@ -52,12 +53,23 @@ function makeRow(id) {
   const badge = document.createElement("span");
   badge.className = "badge";
 
+  const title = document.createElement("span");
+  title.className = "title";
+
   const dir = document.createElement("span");
   dir.className = "dir";
+
+  const meta = document.createElement("div");
+  meta.className = "meta";
 
   const sid = document.createElement("span");
   sid.className = "sid";
   sid.textContent = id.slice(0, 12);
+
+  const tool = document.createElement("span");
+  tool.className = "tool";
+
+  meta.append(sid, tool);
 
   const idle = document.createElement("span");
   idle.className = "idle";
@@ -71,8 +83,8 @@ function makeRow(id) {
     setTimeout(() => (copy.textContent = "复制路径"), 1200);
   });
 
-  li.append(badge, dir, sid, idle, copy);
-  return { li, badge, dir, idle };
+  li.append(badge, title, dir, meta, idle, copy);
+  return { li, badge, title, dir, tool, idle };
 }
 
 function render(snapshot) {
@@ -104,9 +116,15 @@ function render(snapshot) {
     row.badge.textContent = meta.label;
     row.badge.className = `badge ${meta.cls}`;
 
-    // 演示模式：只隐藏目录名，状态与时间照旧——隐藏的目的是防投屏泄露项目名，
-    // 不是把看板变成废纸。
+    // 演示模式：只隐藏**目录名和标题**，状态与时间照旧——隐藏的目的是防投屏
+    // 泄露项目名，不是把看板变成废纸。
+    // 标题也要藏，而且理由比目录名更硬：它是用户自己说的第一句话，
+    // 里面出现客户名的概率比目录名还高。目录名是"低敏感但容易社死"，
+    // 用户的原话是"就敏感"。
+    row.title.textContent = s.title ? (demoMode ? HIDDEN_TITLE : s.title) : "";
+    row.li.classList.toggle("untitled", !s.title);
     row.dir.textContent = demoMode ? HIDDEN_DIR : s.cwd || "（未知目录）";
+    row.tool.textContent = s.tool || "";
     row.idle.textContent = fmtIdle(s.idleMs);
 
     // 主导标记：这条正是桌宠此刻在演的那个状态

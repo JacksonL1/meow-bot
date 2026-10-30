@@ -20,9 +20,6 @@
 
 const stage = document.getElementById("stage");
 const pet = document.getElementById("pet");
-const hint = document.getElementById("hint");
-const HINT_DEFAULT = hint ? hint.textContent : "";
-let hintTimer = null;
 const layers = [
   document.getElementById("layerA"),
   document.getElementById("layerB")
@@ -1257,27 +1254,6 @@ if (window.clawd) {
       applyGaze();
     }
   });
-
-  // 信寄出去之后，让提示条自己显一下。
-  // 为什么不改宠物状态：状态机在主进程，这里硬改成 notification 会被
-  // 下一个 250ms 的 tick 顶回去，看起来就是"闪一下没了"。
-  if (typeof window.clawd.onLetterSent === "function") {
-    window.clawd.onLetterSent((data) => {
-      // 说"你下次开口时"而不是"寄出即到"：外部 hook 只有借用户下一次上下文
-      // 这一条船（UserPromptSubmit 的 stdout 才进上下文），写完信的这一刻
-      // agent 并不在场。曾经这里还写着"会话一恢复就送到"——那是 SessionStart
-      // 投递口还活着时的说法，实测它吃掉了一封信就被撤掉了（DEVLOG 10-30）。
-      //
-      // 报告问题多说半句"本地也留了一份"：这是**回执**。hook 是
-      // fire-and-forget，宿主从不回执，"有没有送到"我们确认不了，
-      // 但"我提交过了"必须让用户查得到（用户真的问过「我写的信，没了?」）。
-      const isReport = !!(data && data.kind === "report");
-      showHint(
-        isReport ? "问题已记下（本地也留了一份）· 你下次开口时送到" : "信已封好 · 你下次开口时送到",
-        4000
-      );
-    });
-  }
 } else {
   // 浏览器独立预览模式
   renderState("idle");
@@ -1345,10 +1321,13 @@ if (stage) {
   stage.addEventListener("dblclick", (e) => {
     const hit = document.elementFromPoint(e.clientX, e.clientY);
     if (hit && hit.closest && hit.closest("#pet")) {
-      // 双击 = 写信。这是桌宠身上唯一"用户主动想说话"的入口，
-      // 而且双击这个手势本来就没有别的用途（看板挪进了右键菜单）。
-      if (window.clawd && typeof window.clawd.openLetter === "function") {
-        window.clawd.openLetter();
+      // 双击 = 开关看板。
+      // 这里原来是"双击 = 写信"（S8）。信箱整套已经砍掉了（2026-10-30）——
+      // 它解决的是一个不存在的问题：用户想让 agent 知道什么，直接在对话里说
+      // 是一跳直达，而经桌宠转交是三跳，还多出一个会丢信的环节。
+      // 空出来的这个手势给了看板：桌宠身上本来就该有一个"点一下看全局"的动作。
+      if (window.clawd && typeof window.clawd.toggleDashboard === "function") {
+        window.clawd.toggleDashboard();
       }
     }
   });
@@ -1375,25 +1354,6 @@ window.addEventListener("contextmenu", (e) => {
   }
 });
 
-// ============================================================================
-// 状态提示条
-//
-// #hint 平时只在鼠标悬停时淡淡显出来（CSS 里 body:hover）。这里做的是
-// "临时顶掉它"：写一段话、强制显形几秒、然后还原。
-// 用 inline style 而不是加 class，是因为要压过 body:hover 那条规则，
-// 而还原的方式就是删掉 inline style —— 删了它自己会回到悬停才显示。
-// ============================================================================
-function showHint(text, ms = 3000) {
-  if (!hint) return;
-  if (hintTimer) clearTimeout(hintTimer);
-  hint.textContent = text;
-  hint.style.opacity = "0.92";
-  hintTimer = setTimeout(() => {
-    hintTimer = null;
-    hint.textContent = HINT_DEFAULT;
-    hint.style.removeProperty("opacity");
-  }, ms);
-}
 
 // ============================================================================
 // 调试入口

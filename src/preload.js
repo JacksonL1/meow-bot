@@ -13,18 +13,9 @@ contextBridge.exposeInMainWorld("clawd", {
   // 这里刻意不做成"直接改画面"，否则会被下一个 250ms 的状态推送顶回去。
   wake: () => ipcRenderer.send("pet:hover"),
   quit: () => ipcRenderer.send("app:quit"),
-  // S8：双击桌宠 = 写封信。右键 = 小菜单（写信 / 看板 / 退出）。
-  // 看板原来是双击的入口，现在挪进右键菜单 —— 桌宠没有标题栏，
-  // 右键菜单是唯一能"把功能都摆出来"的地方。
-  // kind 可选："letter"（默认，双击走这个）/ "report"（预填现场 + 留本地副本）。
-  // 它来自渲染层，可被 F12 改，但全部效力只是"预填什么、留不留副本"，
-  // 不是权限，所以主进程只做一次字符串比对，不做额外校验。
-  // 带上这个参数还有一个纯工程上的理由：原生右键菜单在回归里**不能真弹**
-  // （会阻塞主进程），所以「报告问题」这条链路只有靠着它才能被真验一次。
-  openLetter: (kind) => ipcRenderer.send("letter:open", kind),
+  // 右键 = 小菜单（看板 / 退出）。桌宠没有标题栏，右键菜单是唯一能
+  // "把功能都摆出来"的地方。双击现在也走看板（信箱砍掉后空出来的手势）。
   petMenu: () => ipcRenderer.send("pet:menu"),
-  // 带上 { kind }：报告问题的回执文案不一样（它本地也留了一份）。
-  onLetterSent: (cb) => ipcRenderer.on("letter:sent", (_e, data) => cb(data)),
   toggleDashboard: () => ipcRenderer.send("dashboard:toggle"),
   // S7：主题。getTheme 是**拉**（启动时拉一次，绕开"推早了丢失"），
   // onTheme 是**推**（看板里切主题后立刻生效）。

@@ -84,6 +84,27 @@ const TICK_MS = 250;
 const MAX_SESSION_ID = 64;
 const MAX_SESSIONS = 100;
 const MAX_EVENT_LEN = 64;
+const MAX_TITLE = 60;
+const MAX_TOOL = 64;
+
+// 会话标题：看板上唯一"像人话"的一行。来源是 hook 侧从 `session_title` 或
+// prompt 第一行推出来的，**prompt 原文从不进这条链路**（见 clawd-hook.js）。
+// 只剥控制字符 + 限长，不做语义判断——语义（是不是密钥）在 hook 侧已经判过了，
+// 那里才有原文可判。
+function sanitizeTitle(raw) {
+  if (typeof raw !== "string") return undefined;
+  const t = raw.replace(/[\x00-\x1F\x7F]/g, "").trim().slice(0, MAX_TITLE);
+  return t || undefined;
+}
+
+// 工具名：这条**本来就已经在送了**（hook 一直 POST `tool_name`），
+// 但在加上这一行之前**没有任何消费者**——存都不存，等于一个"写对了也不会
+// 发生"的字段（硬约束 25）。现在它是看板上第二有用的那一行。
+function sanitizeTool(raw) {
+  if (typeof raw !== "string") return undefined;
+  const t = raw.replace(/[^\x20-\x7E]/g, "").trim().slice(0, MAX_TOOL);
+  return t || undefined;
+}
 
 function sanitizeSessionId(raw) {
   if (typeof raw !== "string") return "default";
@@ -128,7 +149,7 @@ function evictOldest(sessions) {
 }
 
 function createStore({ onChange, getTimings } = {}) {
-  /** @type {Map<string, {id:string,state:string,stateSince:number,lastAt:number,cwd?:string}>} */
+  /** @type {Map<string, {id:string,state:string,stateSince:number,lastAt:number,cwd?:string,title?:string,tool?:string}>} */
   const sessions = new Map();
   let oneshot = null; // { state, until }
   let lastVisual = null;
@@ -178,6 +199,8 @@ function createStore({ onChange, getTimings } = {}) {
         id: s.id,
         state: s.state,
         cwd: publicCwd(s.cwd),
+        title: s.title ?? null,
+        tool: s.tool ?? null,
         idleMs: Date.now() - s.lastAt,
       })),
       recent: recentEvents.slice(),
@@ -251,6 +274,20 @@ function createStore({ onChange, getTimings } = {}) {
     }
     s.lastAt = now;
     if (cwd) s.cwd = cwd;
+
+    // 标题是**粘的**：绝大多数事件都不带标题，让它们参与覆盖，就等于
+    // 每来一条 PreToolUse 把好标题抹掉一次。主仓库服务端用的是 `||` 链
+    // （workbuddy-hook.js:141 的注释专门解释了为什么不回退到低质量来源），
+    // 这里同理：**只有真的拿到了才写**。
+    const title = sanitizeTitle(payload.title);
+    if (title) s.title = title;
+
+    // 工具名是"这一轮到目前为止最后用到的那个"。新一轮（UserPromptSubmit）
+    // 开始时清掉——不清的话 thinking 阶段会挂着上一轮的工具名，
+    // 那是在说一件已经不成立的事。
+    if (event === "UserPromptSubmit") s.tool = undefined;
+    const tool = sanitizeTool(payload.tool_name);
+    if (tool) s.tool = tool;
 
     const prevState = s.state;
     const target = EVENT_STATE[event];

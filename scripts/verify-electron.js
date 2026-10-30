@@ -246,315 +246,6 @@ function runHook(event, stdinObj, env) {
   });
 }
 
-async function verifyMailbox() {
-  // 每个断言都用一个干净的信箱目录：共用一个的话，
-  // 上一条断言留下的信会让下一条的"应该是 0 封"变成假失败。
-  const base = path.join(TMP_ROOT, "mailbox");
-  process.env.CLAWD_MAILBOX_DIR = path.join(base, "main");
-  delete require.cache[require.resolve("../src/mailbox")];
-  const mailbox = require("../src/mailbox");
-
-  ok("全新信箱里一封信都没有", mailbox.listPending().length === 0);
-
-  const written = mailbox.put("帮我把 docs/ 里的旧截图删掉。\n第二行要保留。");
-  ok("写一封普通信成功", written.ok === true, written.ok ? `id=${written.id.slice(0, 8)}` : written.error);
-  ok("写完能读到 1 封待投递", mailbox.listPending().length === 1);
-
-  ok("空白信被拒（只有空格换行不算信）", mailbox.put("  \n\t \n ").ok === false);
-  ok("非字符串被拒", mailbox.put({ text: "x" }).ok === false);
-  ok(
-    "超过上限一个字就被拒",
-    mailbox.put("字".repeat(mailbox.MAX_LETTER_CHARS + 1)).ok === false
-  );
-  ok(
-    "刚好等于上限可以寄",
-    mailbox.put("字".repeat(mailbox.MAX_LETTER_CHARS)).ok === true
-  );
-
-  // 上限是 5，此时已有 2 封（普通一封 + 满长一封），补到 5 就满了
-  mailbox.put("第三封");
-  mailbox.put("第四封");
-  mailbox.put("第五封");
-  const overflow = mailbox.put("第六封");
-  ok(
-    "信箱满 5 封后拒绝新信（不无限堆积）",
-    overflow.ok === false && /封/.test(overflow.error || ""),
-    overflow.error
-  );
-
-  const first = mailbox.take();
-  // 顺序这一条要验两件事：
-  //   1. 先写的排前面（用户唯一能感知到的语义）
-  //   2. createdAt 严格递增 —— 这是 1 能成立的原因。
-  //      只验 1 不够：几封信落在同一毫秒里时，1 也可能碰巧对。
-  ok(
-    "取信按写入顺序、一封不漏",
-    first.letters.length === mailbox.MAX_PENDING &&
-      String(first.letters[0].text).indexOf("帮我把 docs/") === 0,
-    `n=${first.letters.length} first=${String(first.letters[0] && first.letters[0].text).slice(0, 12)}`
-  );
-  ok(
-    "同一毫秒连写的几封信也严格有序（不是按随机 UUID 排）",
-    first.letters.every((l, i, a) => i === 0 || l.createdAt > a[i - 1].createdAt),
-    first.letters.map((l) => l.createdAt).join(",")
-  );
-  ok("取走后待投递清零", mailbox.listPending().length === 0);
-  ok(
-    "取走的信挪进了 sent/（留证据，不是直接删）",
-    fs.readdirSync(path.join(base, "main", "sent")).length === mailbox.MAX_PENDING
-  );
-  ok("再取一次是空的（不会重复投递）", mailbox.take().letters.length === 0);
-
-  // ---- 过期 ----
-  // 造一封 25 小时前的信：TTL 是 24h，它不该被取走。
-  // 这条不是在测"代码能跑"，是在测"隔几天突然冒出一封旧信"会不会发生。
-  const staleDir = path.join(base, "stale");
-  process.env.CLAWD_MAILBOX_DIR = staleDir;
-  fs.mkdirSync(path.join(staleDir, "pending"), { recursive: true });
-  fs.writeFileSync(
-    path.join(staleDir, "pending", "stale0001.json"),
-    JSON.stringify({ id: "stale0001", createdAt: Date.now() - 25 * 3600 * 1000, text: "三天前的旧信" })
-  );
-  const staleTake = mailbox.take();
-  ok("超过 24h 的信不会被投递（也不会诈尸）", staleTake.letters.length === 0 && staleTake.expired === 1);
-
-  // ---- 坏文件与路径穿越 ----
-  // 信箱目录是磁盘上的普通目录，谁都能往里放文件。所以读的一侧必须假设
-  // "这里面可能有不认识的东西"：坏 JSON、以及最要命的那种——id 里带 ../。
-  // take() 会用 `${letter.id}.json` 拼路径去 rename，一个没校验的 id
-  // 就能把文件从信箱搬到任意位置。
-  const badDir = path.join(base, "bad");
-  process.env.CLAWD_MAILBOX_DIR = badDir;
-  fs.mkdirSync(path.join(badDir, "pending"), { recursive: true });
-  fs.writeFileSync(path.join(badDir, "pending", "broken0001.json"), "{ 这不是 JSON");
-  fs.writeFileSync(
-    path.join(badDir, "pending", "evil00001.json"),
-    JSON.stringify({ id: "../../../../etc/passwd", createdAt: Date.now(), text: "想跑出信箱" })
-  );
-  fs.writeFileSync(
-    path.join(badDir, "pending", "okokok01.json"),
-    JSON.stringify({ id: "okokok01", createdAt: Date.now(), text: "正常的一封" })
-  );
-  const survived = mailbox.listPending();
-  ok(
-    "坏 JSON 与非法 id 的信被跳过，正常的照收",
-    survived.length === 1 && survived[0].id === "okokok01",
-    `n=${survived.length} ids=${survived.map((l) => l.id).join(",")}`
-  );
-  mailbox.take();
-  const afterTake = fs.readdirSync(path.join(badDir, "pending"));
-  ok(
-    "非法 id 的信没被挪走（借它把文件搬出信箱这条路走不通）",
-    afterTake.includes("evil00001.json") && afterTake.includes("broken0001.json"),
-    afterTake.join(",")
-  );
-
-  // ---- 边界标记 ----
-  process.env.CLAWD_MAILBOX_DIR = path.join(base, "fmt");
-  mailbox.put("正文第一行\n正文第二行");
-  const fmt = mailbox.format(mailbox.take().letters);
-  ok(
-    "信的正文前后有清楚边界（不和用户此刻说的话混在一起）",
-    fmt.includes("【桌宠转交") && fmt.includes("【信完】") && fmt.includes("正文第一行\n正文第二行")
-  );
-
-  // ---- 反馈入口：报告问题的现场诊断 ----
-  //
-  // 为什么要有这个入口：用户第一次报 bug 是**写信**说的
-  // （「需要我确认的时候，没有提示我啊」）——他走的是"跟猫说话"那条路，
-  // 因为桌宠身上当时没有一个更像"反馈"的地方。于是他得自己动手描述现场，
-  // 而状态机手里其实握着现场（刚发生过哪些事件）。
-  {
-    const snap = {
-      visual: "notification",
-      sessions: [
-        { id: "s1", state: "working", cwd: "secret-project" },
-        { id: "s2", state: "idle", cwd: null },
-      ],
-      recent: [
-        { t: Date.now(), event: "Notification", sid: "a1b2c3d4", from: "thinking", to: "notification", how: "mapped" },
-        { t: Date.now() - 100, event: "UserPromptSubmit", sid: "a1b2c3d4", from: "idle", to: "thinking", how: "mapped" },
-      ],
-    };
-    const diag = mailbox.buildDiagnostics(snap, {
-      version: "0.1.0",
-      platform: "win32",
-      arch: "x64",
-      theme: "ragdoll",
-    });
-
-    ok("诊断里带着此刻的画面状态", diag.includes("notification"), JSON.stringify(diag.slice(0, 40)));
-    ok(
-      "诊断里带着最近事件（用户不用自己描述现场）",
-      diag.includes("Notification") && diag.includes("mapped") && diag.includes("thinking → notification"),
-      JSON.stringify(diag.slice(0, 80))
-    );
-    // 隐私红线：这段文本会进 agent 的上下文，也会留在用户磁盘上当副本，
-    // 两处都不该出现项目目录名。
-    ok("诊断里**没有**任何会话目录名（隐私红线）", !diag.includes("secret-project"), JSON.stringify(diag.slice(0, 160)));
-    ok(
-      "诊断长度有上限（不挤占用户下一条消息的上下文预算）",
-      diag.length <= mailbox.MAX_DIAGNOSTICS_CHARS,
-      `${diag.length} / ${mailbox.MAX_DIAGNOSTICS_CHARS}`
-    );
-    // 快照可能是空的、可能被改过：这里抛一次异常就是"点报告问题没反应"，
-    // 一个纯静默的失败。
-    ok("空快照也能出诊断（不抛异常）", typeof mailbox.buildDiagnostics(null, null) === "string");
-  }
-
-  // ---- 报告问题的本地副本（回执） ----
-  //
-  // 它**不是**第二个投递口：不参与 take()，永远不会被挪走，
-  // 所以不会出现"取走了没寄出去"的黑洞（那个坑见 DEVLOG 2026-10-30）。
-  // 唯一作用是让用户查得到"我提交过了"。
-  {
-    const repDir = path.join(base, "reports");
-    process.env.CLAWD_MAILBOX_DIR = repDir;
-    delete require.cache[require.resolve("../src/mailbox")];
-    const mb = require("../src/mailbox");
-
-    ok("一开始没有报告副本", mb.listReports().length === 0);
-    const saved = mb.saveReport("需要我确认的时候，没有提示我啊");
-    ok("报告能留下本地副本", saved.ok === true, saved.ok ? `id=${saved.id.slice(0, 8)}` : saved.error);
-    ok("报告副本读得回来", mb.listReports().length === 1);
-
-    // 对照组：普通写信**不会**写进 reported/。
-    // 少了这条，"副本数是 1"可能只是因为 put() 顺手也存了一份——
-    // 那会让"报告"这个语义消失，而且从副本数上完全看不出来。
-    mb.put("只是一封普通的信");
-    ok("对照组：普通写信不会留下副本（副本是报告才有）", mb.listReports().length === 1, `n=${mb.listReports().length}`);
-  }
-
-  // ---- hook：没有信的时候必须一个字节都不输出 ----
-  // 这条是整个功能最危险的一条：UserPromptSubmit 的 stdout 会被塞进
-  // 用户的消息里，多打一个换行都是在污染每一次对话。
-  process.env.CLAWD_MAILBOX_DIR = path.join(base, "empty");
-  const hookEnv = {
-    CLAWD_MAILBOX_DIR: path.join(base, "empty"),
-    // 指一个不存在的端点文件 = 桌宠没开。信必须照样能寄出去。
-    CLAWD_PORT_FILE: path.join(base, "no-such.port"),
-  };
-  const quiet = await runHook("UserPromptSubmit", { hook_event_name: "UserPromptSubmit", prompt: "hi" }, hookEnv);
-  ok("没信时 hook 的 stdout 是 0 字节", quiet.out === "", `len=${quiet.out.length}`);
-  ok("没信时 hook 退出码 0", quiet.code === 0);
-
-  // ---- hook：有信时投递 ----
-  const sendDir = path.join(base, "send");
-  process.env.CLAWD_MAILBOX_DIR = sendDir;
-  mailbox.put("今晚把 README 的截图换掉");
-  const sent = await runHook(
-    "UserPromptSubmit",
-    { hook_event_name: "UserPromptSubmit", prompt: "帮我看看这个 bug" },
-    { ...hookEnv, CLAWD_MAILBOX_DIR: sendDir }
-  );
-
-  let parsed = null;
-  try {
-    parsed = JSON.parse(sent.out);
-  } catch {}
-  ok(
-    "有信时 hook 输出的是合法 JSON（半截 JSON 等于信没寄出去）",
-    !!parsed && parsed.continue === true,
-    sent.out.slice(0, 60)
-  );
-  ok(
-    "投递走的是 UserPromptSubmit 的 additionalContext（官方支持的注入口）",
-    !!parsed &&
-      parsed.hookSpecificOutput &&
-      parsed.hookSpecificOutput.hookEventName === "UserPromptSubmit" &&
-      String(parsed.hookSpecificOutput.additionalContext).includes("今晚把 README 的截图换掉"),
-    parsed && parsed.hookSpecificOutput ? parsed.hookSpecificOutput.hookEventName : "(无)"
-  );
-  ok(
-    "桌宠没开也能寄信（投递不依赖端口文件）",
-    !!parsed && String(parsed.hookSpecificOutput.additionalContext).includes("今晚把 README 的截图换掉"),
-    `portFileExists=${fs.existsSync(hookEnv.CLAWD_PORT_FILE)}`
-  );
-
-  const again = await runHook(
-    "UserPromptSubmit",
-    { hook_event_name: "UserPromptSubmit", prompt: "再说一句" },
-    { ...hookEnv, CLAWD_MAILBOX_DIR: sendDir }
-  );
-  ok("同一封信不会被投递第二次", again.out === "", `len=${again.out.length}`);
-
-  // ---- SessionStart 不许把信取走 ----
-  // 它曾经是第二个投递口，启用一天就吃掉了一封信：
-  // SessionStart 的注入实测没能送达，而 take() 已经把信从 pending 挪走了，
-  // 结果那封信既没进上下文、也不在信箱里。见 DEVLOG 2026-10-30。
-  // 所以这条断言盯的是**反方向**：SessionStart 经过时，信必须还好好在信箱里。
-  {
-    const ssDir = path.join(base, "session-start-keep");
-    process.env.CLAWD_MAILBOX_DIR = ssDir;
-    mailbox.put("这封信要留到用户真的说话");
-    const out = await runHook(
-      "SessionStart",
-      { hook_event_name: "SessionStart", source: "resume" },
-      { ...hookEnv, CLAWD_MAILBOX_DIR: ssDir }
-    );
-    process.env.CLAWD_MAILBOX_DIR = ssDir;
-    const stillPending = mailbox.listPending();
-    ok(
-      "SessionStart 不会把信取走（它只在用户开口时送）",
-      out.out === "" && stillPending.length === 1,
-      `outLen=${out.out.length} pending=${stillPending.length}`
-    );
-  }
-
-  // ---- 取信必须是原子的 ----
-  // 同时开两个 hook 进程抢同一封信。串行测只证明"取过一次后没了"，证明不了竞态，
-  // 所以这里用 Promise.all 真并发。take() 靠 rename 的原子性让只有一个赢——
-  // 这条守的是 mailbox 本身，和投递口有几个无关。
-  {
-    const raceDir = path.join(base, "race");
-    process.env.CLAWD_MAILBOX_DIR = raceDir;
-    mailbox.put("这封信只准出去一次");
-    const [a, b] = await Promise.all([
-      runHook("UserPromptSubmit", { hook_event_name: "UserPromptSubmit", prompt: "x" }, { ...hookEnv, CLAWD_MAILBOX_DIR: raceDir }),
-      runHook("UserPromptSubmit", { hook_event_name: "UserPromptSubmit", prompt: "y" }, { ...hookEnv, CLAWD_MAILBOX_DIR: raceDir }),
-    ]);
-    const gotA = a.out.trim().length > 0;
-    const gotB = b.out.trim().length > 0;
-    ok(
-      "并发取信时同一封信只被取走一次（rename 是原子的）",
-      gotA !== gotB, // 恰好一个拿到；两个都拿到 = 重投，两个都空 = 丢信
-      `A=${gotA ? "拿到" : "空"} B=${gotB ? "拿到" : "空"}`
-    );
-  }
-
-  // ---- 别的钩子事件不许把信吃掉 ----
-  // 信只能在"用户说话"的那一刻送进上下文。要是 PreToolUse 把信取走了，
-  // 它就白白消失在一次工具调用里，用户永远等不到它。
-  const poachDir = path.join(base, "poach");
-  process.env.CLAWD_MAILBOX_DIR = poachDir;
-  mailbox.put("这封信只能等用户说话时再送");
-  const poach = await runHook(
-    "PreToolUse",
-    { hook_event_name: "PreToolUse", tool_name: "Bash" },
-    { ...hookEnv, CLAWD_MAILBOX_DIR: poachDir }
-  );
-  process.env.CLAWD_MAILBOX_DIR = poachDir;
-  ok(
-    "PreToolUse 不会把信取走（也不会往 stdout 多写东西）",
-    poach.out === "" && mailbox.listPending().length === 1,
-    `outLen=${poach.out.length} pending=${mailbox.listPending().length}`
-  );
-
-  // 收尾：别把测试造出来的信留在环境里影响后面
-  process.env.CLAWD_MAILBOX_DIR = path.join(base, "main");
-}
-
-// ------------------------------------------------------------
-// 没有 session_id 的事件必须被丢弃，不能给它合成占位会话
-//
-// 为什么值得单独立一段、而不是顺手加一条：**这条 bug 的表象在状态机、
-// 病根在 hook**。"thinking 时显示 idle" 是状态机的现象，但根子在 hook 把所有
-// 缺 session_id 的事件塞进同一个 "unknown" 会话里——多条真实会话因此互相覆盖。
-// 只在状态机一侧加断言永远发现不了它，所以必须在 hook 真的转发之前拦住。
-//
-// 只用 stderr 的警告做判据是不够的（那只能证明走了那个分支），
-// 所以这里起一个真的 server 数它收到了几个请求：0 个才是真的没转发。
-// ------------------------------------------------------------
 async function verifyHookSessionId() {
   const http = require("node:http");
   const received = [];
@@ -645,19 +336,96 @@ async function verifyHookSessionId() {
   );
 }
 
+// ---------- 会话标题 / 工具名：看板上"像人话"的那两行 ----------
+// 放在纯 Node 侧（起 Electron 之前）跑：标题的推导全在 hook 里，
+// 而真正要盯的是**prompt 原文有没有跟着出去**——那只能看 POST body 的真实字节。
+async function verifyHookSessionTitle() {
+  const http = require("node:http");
+  const received = [];
+
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      received.push(body);
+      res.writeHead(204);
+      res.end();
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+
+  const portFile = path.join(TMP_ROOT, "hook-title-port.json");
+  writePortFile(portFile, { port: server.address().port, token: "t".repeat(64) });
+  const env = { CLAWD_PORT_FILE: portFile };
+
+  let lastRaw = "";
+  const post = async (event, payload) => {
+    received.length = 0;
+    await runHook(event, { hook_event_name: event, session_id: "title-sid", ...payload }, env);
+    await sleep(120);
+    lastRaw = received.length ? received[0] : "";
+    return received.length ? JSON.parse(received[0]) : null;
+  };
+
+  const renamed = await post("PreToolUse", { session_title: "  重构看板  ", tool_name: "Edit" });
+  const fromPrompt = await post("UserPromptSubmit", {
+    prompt: "\n\n帮我把看板补上会话标题\n第二行不该出去",
+  });
+  const promptRaw = lastRaw;
+
+  const secret = await post("UserPromptSubmit", { prompt: "sk-abcdefghijklmnopqrstuvwxyz0123456789" });
+  const normal = await post("UserPromptSubmit", { prompt: "帮我把看板补上会话标题" });
+  const notPrompt = await post("PreToolUse", { prompt: "这条不该变成标题" });
+  const tooLong = await post("UserPromptSubmit", { prompt: "长".repeat(200) });
+
+  server.close();
+
+  ok(
+    "用户自己改的名优先（并且 trim 过）",
+    !!renamed && renamed.title === "重构看板",
+    `title=${JSON.stringify(renamed && renamed.title)}`
+  );
+  ok(
+    "工具名跟着事件一起送出去（此前它没有任何消费者）",
+    !!renamed && renamed.tool_name === "Edit",
+    `tool_name=${JSON.stringify(renamed && renamed.tool_name)}`
+  );
+  ok(
+    "没改名时取 prompt 的第一行非空文字",
+    !!fromPrompt && fromPrompt.title === "帮我把看板补上会话标题",
+    `title=${JSON.stringify(fromPrompt && fromPrompt.title)}`
+  );
+  ok(
+    "prompt 只有第一行进链路（第二行不进）",
+    promptRaw.includes("帮我把看板补上会话标题") && !promptRaw.includes("第二行不该出去"),
+    `bodyLen=${promptRaw.length}`
+  );
+  ok(
+    "第一行像密钥时整个标题都不要（不是洗一半再显示）",
+    !!secret && secret.title === undefined,
+    `title=${JSON.stringify(secret && secret.title)}`
+  );
+  ok(
+    "对照组：普通的中文句子不会被误判成密钥",
+    !!normal && normal.title === "帮我把看板补上会话标题",
+    `title=${JSON.stringify(normal && normal.title)}`
+  );
+  ok(
+    "只有 UserPromptSubmit 会从 prompt 取标题",
+    !!notPrompt && notPrompt.title === undefined,
+    `title=${JSON.stringify(notPrompt && notPrompt.title)}`
+  );
+  ok(
+    "标题有长度上限（60，超了就截断）",
+    !!tooLong && typeof tooLong.title === "string" && tooLong.title.length <= 60,
+    `len=${tooLong && tooLong.title && tooLong.title.length}`
+  );
+}
+
 async function main() {
   console.log("Electron 升级回归\n" + "=".repeat(56));
-
-  // ============================================================
-  // 0. 信箱与投递（S8）
-  //
-  // 这一段**不需要 Electron**，所以放在起进程之前跑：
-  //   1. 快 —— 不用等窗口
-  //   2. 干净 —— 此刻端点文件还不存在，正好是"桌宠没开"的真实场景，
-  //      而"桌宠关着也能寄信"就是这套设计必须成立的前提
-  // ============================================================
-  await verifyMailbox();
   await verifyHookSessionId();
+  await verifyHookSessionTitle();
 
   // 前置：不能有别的实例在跑，否则单实例锁会让本次启动直接退出
   const existing = await getJson(MAIN_PORT, "/json/list");
@@ -679,7 +447,6 @@ async function main() {
   const childEnv = {
     ...cleanEnv(),
     CLAWD_PERMISSION_TIMEOUT_MS: "6000",
-    CLAWD_MAILBOX_DIR: path.join(TMP_ROOT, "mailbox", "app"),
   };
 
   const child = spawn(
@@ -817,9 +584,11 @@ async function main() {
     ok("contextIsolation 生效：渲染层拿不到 process", (await R.eval("typeof window.process")) === "undefined");
     ok("preload 没有泄漏 ipcRenderer", (await R.eval("typeof window.ipcRenderer")) === "undefined");
     // 动作数是安全闸门：S6 加了 toggleDashboard（6→7），S7 加了 getTheme / onTheme（7→9），
-    // S8 加了 openLetter / petMenu / onLetterSent（9→12），S9 加了 wake（12→13）。
+    // S8 加了 petMenu（9→10），S9 加了 wake（10→11）。
+    // 2026-10-30：信箱整套砍掉，openLetter / onLetterSent 一并拿掉（13→11）——
+    // 功能下线要连着它开的口子一起收，留着一个没有消费者的动作就是安全隐患。
     // 以后每次加 IPC 都要顺手改这里，改的时候问自己一句"这个动作真的需要吗"。
-    ok("preload 只暴露 13 个具名动作", (await R.eval("Object.keys(window.clawd||{}).length")) === 13);
+    ok("preload 只暴露 11 个具名动作", (await R.eval("Object.keys(window.clawd||{}).length")) === 11);
 
     // ---------- 3. 状态切换 ----------
     // 必须先等主进程把首次状态推下来（main.js 里是启动后 300ms 的一次 broadcast）。
@@ -1245,9 +1014,9 @@ async function main() {
       ok("窗口尺寸 240×240", !!bounds && bounds.width === 240 && bounds.height === 240, b);
       ok("不可缩放", (await M.eval("require('electron').BrowserWindow.getAllWindows()[0].isResizable()")) === false);
 
-      // 四条 IPC 通道是否都接上了：从主进程数监听器，比从渲染层猜可靠
-      // （letter:send 是 invoke/handle，不在 listenerCount 里，另有断言覆盖）
-      for (const ch of ["drag:start", "drag:end", "mouse:ignore", "app:quit", "pet:menu", "letter:open", "pet:hover"]) {
+      // 五条 IPC 通道是否都接上了：从主进程数监听器，比从渲染层猜可靠
+      // （theme:get / letter:send 这类是 invoke/handle，不在 listenerCount 里）
+      for (const ch of ["drag:start", "drag:end", "mouse:ignore", "app:quit", "pet:menu", "pet:hover"]) {
         ok(
           `IPC ${ch} 已接线`,
           (await M.eval(`require('electron').ipcMain.listenerCount('${ch}')`)) >= 1
@@ -1573,9 +1342,9 @@ async function main() {
     // 三件事：看板能开、列表跟着状态机走、SEC-09 的分层真的成立
     // （快照里只有 basename，完整路径只在"点复制"那一刻由主进程释放）。
     if (ep) {
-      const seed = (sessionId, cwd, event) =>
+      const seed = (sessionId, cwd, event, extra) =>
         new Promise((resolve) => {
-          const body = JSON.stringify({ agent: "codebuddy", session_id: sessionId, event, cwd });
+          const body = JSON.stringify({ agent: "codebuddy", session_id: sessionId, event, cwd, ...extra });
           const req = require("node:http").request(
             {
               host: "127.0.0.1",
@@ -1597,7 +1366,10 @@ async function main() {
           req.end(body);
         });
 
-      await seed("sess-alpha", "E:\\work\\proj-alpha", "PreToolUse");
+      await seed("sess-alpha", "E:\\work\\proj-alpha", "UserPromptSubmit", {
+        title: "帮我重构看板",
+      });
+      await seed("sess-alpha", "E:\\work\\proj-alpha", "PreToolUse", { tool_name: "Edit" });
       await seed("sess-beta", "E:\\work\\proj-beta", "Stop");
 
       // 走和双击同一条 IPC
@@ -1638,7 +1410,31 @@ async function main() {
           `basename=${leakObj.hasBase} 盘符=${leakObj.hasDrive}`
         );
 
-        // 演示模式：只隐藏目录名，状态和时间照旧
+        // ---- 标题与工具名：看板上"像人话"的那两行 ----
+        // 标题是"粘"的：后面那条 PreToolUse 不带标题，不能把前一条的好标题抹掉。
+        const titles = await D.eval(
+          "[...document.querySelectorAll('#list .title')].map(e=>e.textContent).join('|')"
+        );
+        ok(
+          "看板显示了会话标题（标题是粘的：后续事件不带标题不会抹掉它）",
+          String(titles).includes("帮我重构看板"),
+          `显示=${titles}`
+        );
+        ok(
+          "没拿到标题的那条不占一行（untitled）",
+          await D.eval(
+            "[...document.querySelectorAll('#list li')].filter(li => (li.querySelector('.sid')||{}).textContent === 'sess-beta').every(li => li.classList.contains('untitled'))"
+          ),
+          `beta 行 class=${await D.eval("([...document.querySelectorAll('#list li')].find(li => (li.querySelector('.sid')||{}).textContent === 'sess-beta')||{className:'(没找到)'}).className")}`
+        );
+
+        const tools = await D.eval(
+          "[...document.querySelectorAll('#list .tool')].map(e=>e.textContent).join('|')"
+        );
+        ok("看板显示了工具名", String(tools).includes("Edit"), `显示=${tools}`);
+
+        // 演示模式：目录名和标题都要藏。标题的理由比目录名更硬——
+        // 它是用户自己说的第一句话，里面出现客户名的概率比目录名还高。
         await D.eval("(() => { const c = document.getElementById('demo'); c.checked = true; c.dispatchEvent(new Event('change')); return true; })()");
         await sleep(350);
         const demoDirs = await D.eval(
@@ -1649,6 +1445,17 @@ async function main() {
           String(demoDirs).split("|").every((t) => t === "项目已隐藏"),
           `显示=${demoDirs}`
         );
+        const demoTitles = await D.eval(
+          "[...document.querySelectorAll('#list .title')].map(e=>e.textContent).join('|')"
+        );
+        ok(
+          "演示模式也隐藏标题（用户的原话比目录名更敏感）",
+          !String(demoTitles).includes("帮我重构看板") && String(demoTitles).includes("内容已隐藏"),
+          `显示=${demoTitles}`
+        );
+        // 还原，别把演示模式留给后面的断言
+        await D.eval("(() => { const c = document.getElementById('demo'); c.checked = false; c.dispatchEvent(new Event('change')); return true; })()");
+        await sleep(300);
 
         // 关掉演示模式，给下一次运行留干净状态
         await D.eval("(() => { const c = document.getElementById('demo'); c.checked = false; c.dispatchEvent(new Event('change')); return true; })()");
@@ -2209,159 +2016,6 @@ async function main() {
       if (savedDir === undefined) delete process.env.CLAWD_THEMES_DIR;
       else process.env.CLAWD_THEMES_DIR = savedDir;
       delete require.cache[require.resolve("../src/theme")];
-    }
-
-    // ---------- 7.95 信纸（S8） ----------
-    // 走的是完整链路：渲染层的 openLetter → IPC → 主进程建窗 → 页面注入文字
-    // → 点「寄出」→ ipcRenderer.invoke → mailbox.put 落盘。
-    // 任何一环断了，最后那条"信真的躺在信箱里"就不会成立。
-    {
-      const appMailbox = childEnv.CLAWD_MAILBOX_DIR;
-
-      // 用 preload 暴露的通道，而不是直接在渲染层 import：
-      // 这样"preload 到底有没有把这条能力开口"也一并验了。
-      ok(
-        "preload 暴露了 openLetter（渲染层才够得着写信）",
-        (await R.eval("typeof window.clawd.openLetter")) === "function"
-      );
-
-      R.send("Runtime.evaluate", { expression: "window.clawd.openLetter()", returnByValue: true });
-      await sleep(1200);
-
-      const letterInfo = await M.eval(`(() => {
-        const W = require('electron').BrowserWindow;
-        const w = W.getAllWindows().find((x) => String(x.webContents.getURL()).includes('letter.html'));
-        if (!w) return null;
-        const p = w.webContents.getLastWebPreferences() || {};
-        return JSON.stringify({
-          visible: w.isVisible(),
-          onTop: w.isAlwaysOnTop(),
-          w: w.getBounds().width,
-          h: w.getBounds().height,
-          ctx: p.contextIsolation,
-          node: p.nodeIntegration,
-          sandbox: p.sandbox,
-        });
-      })()`);
-      const li = letterInfo ? JSON.parse(letterInfo) : null;
-
-      ok("双击桌宠能开出信纸窗口", !!li && li.visible === true, letterInfo || "没找到 letter.html 窗口");
-      ok("信纸置顶（否则会被以为是双击没反应）", !!li && li.onTop === true);
-      ok(
-        "信纸的安全基线和主窗口一致（contextIsolation / 无 node / sandbox）",
-        !!li && li.ctx === true && li.node === false && li.sandbox === true,
-        li ? `ctx=${li.ctx} node=${li.node} sandbox=${li.sandbox}` : ""
-      );
-
-      // 连到信纸那一页，真的打几个字再点「寄出」
-      const letterList = await getJson(RENDERER_PORT, "/json/list");
-      const letterTarget = (letterList || []).find((t) => String(t.url).includes("letter.html"));
-      ok("信纸页面能在 CDP 里看到（说明它真的加载了，不是空窗口）", !!letterTarget);
-
-      if (letterTarget) {
-        const L = await Cdp.connect(letterTarget.webSocketDebuggerUrl);
-        await L.send("Runtime.enable");
-
-        const before = fs.existsSync(path.join(appMailbox, "pending"))
-          ? fs.readdirSync(path.join(appMailbox, "pending")).length
-          : 0;
-
-        // 「寄出」按钮在空信时是禁用的，这条先确认一下——不然下面点了没反应会像 bug
-        ok(
-          "空信时「寄出」是禁用的（不会寄出空白信）",
-          (await L.eval("document.getElementById('btnSend').disabled")) === true
-        );
-
-        await L.eval(
-          "(() => { const t = document.getElementById('text'); t.value = '回归写的一封信：把 README 的截图换成新的';" +
-            " t.dispatchEvent(new Event('input')); return document.getElementById('btnSend').disabled; })()"
-        );
-        ok(
-          "打了字之后「寄出」才可用",
-          (await L.eval("document.getElementById('btnSend').disabled")) === false
-        );
-
-        await L.eval("document.getElementById('btnSend').click()");
-        await sleep(700);
-
-        const pendingDir = path.join(appMailbox, "pending");
-        const files = fs.existsSync(pendingDir) ? fs.readdirSync(pendingDir).filter((f) => f.endsWith(".json")) : [];
-        const body = files.length ? JSON.parse(fs.readFileSync(path.join(pendingDir, files[0]), "utf8")) : null;
-
-        ok(
-          "点「寄出」后信真的落盘了（不是只关了个窗口）",
-          files.length === before + 1 && !!body && String(body.text).includes("回归写的一封信"),
-          `files=${files.length} before=${before}`
-        );
-
-        const stillVisible = await M.eval(`(() => {
-          const w = require('electron').BrowserWindow.getAllWindows()
-            .find((x) => String(x.webContents.getURL()).includes('letter.html'));
-          return w ? w.isVisible() : 'gone';
-        })()`);
-        ok("寄出后信纸收起（不挡着屏幕，也不留一份草稿在别人眼里）", stillVisible === false, String(stillVisible));
-
-        // 用户必须得到反馈。静默成功等于让用户重复寄好几遍。
-        const hintText = await R.eval("document.getElementById('hint').textContent");
-        ok(
-          "寄出后桌宠会明确说一句（不是静默成功）",
-          typeof hintText === "string" && hintText.includes("信已封好"),
-          String(hintText)
-        );
-
-        // ---- 「报告问题」端到端跑一遍 ----
-        //
-        // 原生右键菜单在回归里**不能真弹**（弹出来会阻塞主进程），
-        // 所以这条链路靠 `letter:open` 带的 kind 来驱动。
-        // 值得真跑一次的理由：预填有没有真的落进 textarea、光标在哪、
-        // 寄出后本地副本有没有多出来——这三件事全是跨进程的，
-        // 纯 Node 侧的断言一条都盖不到。
-        const reportsBefore = fs.existsSync(path.join(appMailbox, "reported"))
-          ? fs.readdirSync(path.join(appMailbox, "reported")).filter((f) => f.endsWith(".json")).length
-          : 0;
-
-        await R.eval("window.clawd.openLetter('report')");
-        await sleep(700);
-
-        const prefillVal = await L.eval("document.getElementById('text').value");
-        ok(
-          "点「报告问题」会把现场诊断预填进信纸（用户不用自己描述现场）",
-          typeof prefillVal === "string" && prefillVal.includes("【桌宠现场"),
-          JSON.stringify(String(prefillVal).slice(0, 40))
-        );
-        ok(
-          "预填后光标在最后（一打字不会插进诊断中间）",
-          (await L.eval(
-            "(() => { const t = document.getElementById('text'); return t.selectionStart === t.value.length; })()"
-          )) === true
-        );
-
-        await L.eval(
-          "(() => { const t = document.getElementById('text'); t.value += '回归报的一个问题';" +
-            " t.dispatchEvent(new Event('input')); })()"
-        );
-        await L.eval("document.getElementById('btnSend').click()");
-        await sleep(700);
-
-        const repDir2 = path.join(appMailbox, "reported");
-        const repFiles = fs.existsSync(repDir2)
-          ? fs.readdirSync(repDir2).filter((f) => f.endsWith(".json"))
-          : [];
-        ok(
-          "报告寄出后本地多一份副本（回执：查得到提交过）",
-          repFiles.length === reportsBefore + 1,
-          `files=${repFiles.length} before=${reportsBefore}`
-        );
-
-        const hint2 = await R.eval("document.getElementById('hint').textContent");
-        ok(
-          "报告的回执会说清本地也留了一份（不让人以为又丢了）",
-          typeof hint2 === "string" && hint2.includes("本地也留了一份"),
-          String(hint2)
-        );
-
-        L.close();
-      }
     }
 
     // ---------- 8. 单实例锁（SEC-10） ----------
