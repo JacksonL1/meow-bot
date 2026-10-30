@@ -146,8 +146,17 @@ class SpringChannel {
 // 布偶猫骨骼化 SVG 模板 (Hierarchical Rigged SVG)
 // 保持原版 200x200 viewBox、原版奶油白/重点色/蓝宝石瞳配色，拆分为可独立受控的骨骼层
 // ============================================================================
-function createRiggedRagdollSVG() {
-  return `<svg class="frame on ragdoll-rig-svg" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+// uid：多只猫同时上台时用来给渐变 id 加后缀。
+//
+// 为什么必须加：SVG 的 `url(#id)` 是**全文档**查找，不是"当前 svg 内"。
+// 桌宠分身成 N 只之后会往 DOM 里放 N 份这段模板，如果都用 `id="eyeIrisGrad"`，
+// 那么第 2 只之后的猫，虹膜渐变的 `url(#eyeIrisGrad)` 全都指向第 1 份——
+// 今天两份渐变长得一样所以看不出来，哪天改了其中一份，
+// 表现会是"只有第一只猫的眼睛变了色"，而且没有任何报错。
+// querySelector 那批 id 没这个问题（它们在各自 svg 子树里查），只有 url() 有。
+function createRiggedRagdollSVG(uid) {
+  const u = uid ? `-${uid}` : "";
+  let markup = `<svg class="frame on ragdoll-rig-svg" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
   <defs>
     <radialGradient id="eyeIrisGrad" cx="45%" cy="40%" r="55%">
       <stop offset="0%" stop-color="#68BFFF"/>
@@ -264,6 +273,35 @@ function createRiggedRagdollSVG() {
     <!-- 重绘头部外轮廓线使其压住面具边缘 -->
     <path d="M100 48 C125 48 142 55 146 72 C150 90 152 105 136 114 C125 120 112 122 100 122 C88 122 75 120 64 114 C48 105 50 90 54 72 C58 55 75 48 100 48 Z"
           fill="none" stroke="#524338" stroke-width="3.5" stroke-linejoin="round"/>
+
+    <!-- 5.5 头巾 (#rig-bandana)：**默认藏起来**，只有这条会话真的抽出了关键词才戴。
+         放在头部轮廓之后、腮红之前——压住头，但绝不能盖到眼睛（眼睛在 y76 以下，
+         头巾下沿在 y60，留了 16px 的安全距离）。
+
+         为什么是"戴不戴"而不是"写不写字"：没有词的时候留一条空布带，
+         看起来就像一个随机的装饰，用户会以为那是形象的一部分，
+         然后花时间猜它是什么意思。藏起来才是对的。 -->
+    <g id="rig-bandana" display="none">
+      <!-- 结与飘带先画：它被布带压住一半，才像"从布带里系出来的" -->
+      <path id="rig-bandana-tail"
+            d="M136 62 C152 56 164 66 160 79 C157 88 145 88 141 80 C138 73 140 66 136 62 Z"
+            fill="#B8483F" stroke="#7E3330" stroke-width="2.2" stroke-linejoin="round"/>
+      <path id="rig-bandana-knot"
+            d="M130 58 C140 54 148 60 146 68 C144 75 134 74 131 68 C129 64 128 60 130 58 Z"
+            fill="#C9564C" stroke="#7E3330" stroke-width="2.2" stroke-linejoin="round"/>
+      <!-- 横跨额头的布带 -->
+      <path id="rig-bandana-band"
+            d="M54 70 C58 48 78 36 100 36 C122 36 142 48 146 70 C141 64 122 60 100 60 C78 60 59 64 54 70 Z"
+            fill="#C9564C" stroke="#7E3330" stroke-width="2.6" stroke-linejoin="round"/>
+      <!-- 布带上的一道高光，不然纯色看着像贴纸 -->
+      <path d="M64 58 C72 46 84 41 100 41 C116 41 128 46 136 58"
+            fill="none" stroke="#FFFFFF" stroke-opacity="0.16" stroke-width="2.4" stroke-linecap="round"/>
+      <!-- 词写在这里。字号由 JS 按字数调（字数多就缩小），
+           不然 6 个字会顶出布带两边——布带中段能用的宽度只有 ~72px。 -->
+      <text id="rig-bandana-text" x="100" y="55" text-anchor="middle"
+            font-size="13" font-weight="700" fill="#FFF7F0"
+            font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif"></text>
+    </g>
 
     <!-- 脸颊粉嫩腮红 -->
     <ellipse id="rig-blush-l" cx="62" cy="103" rx="6.5" ry="3.8" fill="#F2A7A7" opacity="0.38"/>
@@ -418,6 +456,16 @@ function createRiggedRagdollSVG() {
     </g>
   </g>
 </svg>`;
+  if (!u) return markup;
+  return markup
+    .split('id="eyeIrisGrad"')
+    .join(`id="eyeIrisGrad${u}"`)
+    .split("url(#eyeIrisGrad)")
+    .join(`url(#eyeIrisGrad${u})`)
+    .split('id="kbGlow"')
+    .join(`id="kbGlow${u}"`)
+    .split("url(#kbGlow)")
+    .join(`url(#kbGlow${u})`);
 }
 
 // ============================================================================
@@ -540,14 +588,15 @@ const STATE_POSES = {
 // 钓鱼这个语义被拿掉了（working 改成敲键盘），彩蛋连部件带引擎一起删干净——
 // 留着「暂时不排期」的版本等于留一条没人走的死路径，那正是这个项目踩过四次的东西。
 class RagdollRigController {
-  constructor(rootLayer) {
+  constructor(rootLayer, uid) {
     this.rootLayer = rootLayer;
+    this.uid = uid || "";
     // 骨骼模板也是「一串字符串变成 DOM」，和主题帧是同一个动作，
     // 所以走同一个出口 svgNode()——白名单只挡 on* / 外部 url，不挡 style 属性，
     // 而 rig 全靠 style="transform-origin" 定旋转中心，正好放行。
     // （曾经这里是 `innerHTML = createRiggedRagdollSVG()`，硬约束 19 说 src/ 下
     //   必须为 0 却没人发现——因为没有机械检查。现在回归里有了。）
-    const rigNode = svgNode(createRiggedRagdollSVG());
+    const rigNode = svgNode(createRiggedRagdollSVG(this.uid));
     if (!rigNode) throw new Error("骨骼模板解析失败");
     this.rootLayer.replaceChildren(rigNode);
     this.svg = rigNode;
@@ -566,6 +615,8 @@ class RagdollRigController {
       caret: this.svg.querySelector("#rig-code-caret"),
       kbGlow: this.svg.querySelector("#rig-kb-glow"),
       headGroup: this.svg.querySelector("#rig-head-group"),
+      bandana: this.svg.querySelector("#rig-bandana"),
+      bandanaText: this.svg.querySelector("#rig-bandana-text"),
       earL: this.svg.querySelector("#rig-ear-l"),
       earR: this.svg.querySelector("#rig-ear-r"),
       eyesOpen: this.svg.querySelector("#rig-eyes-open"),
@@ -666,6 +717,28 @@ class RagdollRigController {
     this.lastTs = performance.now();
     this.setState("idle");
     this.startLoop();
+  }
+
+  // 头巾上写什么词。传 undefined / "" = 没词可写，整条头巾藏起来。
+  //
+  // 字号按字数缩：布带中段能用的宽度只有 ~72px，六个汉字按 13px 排是 78px，
+  // 会顶出两边。宁可小一点，也不要让词溢出到布带外面——那看起来像渲染坏了。
+  // 档位写死成表而不是算比例，是因为算比例在 2 个字时会把字放得过大（顶到布带上下沿）。
+  setKeyword(kw) {
+    if (!this.els.bandana || !this.els.bandanaText) return;
+    const word = typeof kw === "string" ? kw.trim() : "";
+    if (!word) {
+      this.els.bandana.setAttribute("display", "none");
+      this.els.bandanaText.textContent = "";
+      return;
+    }
+    this.els.bandana.setAttribute("display", "inline");
+    // textContent，不是 innerHTML：这个词来自 agent 送过来的 prompt 派生结果，
+    // 虽然 hook 侧已经判过一轮（疑似密钥整条丢弃），这里仍然不当 HTML 解析。
+    this.els.bandanaText.textContent = word;
+    const n = [...word].length; // 按码点算，别按 UTF-16 单元（emoji 会算成 2）
+    const size = n <= 2 ? 16 : n === 3 ? 15 : n === 4 ? 13 : n === 5 ? 11 : n === 6 ? 10 : n === 7 ? 9 : 8;
+    this.els.bandanaText.setAttribute("font-size", String(size));
   }
 
   setState(newState) {
@@ -1099,12 +1172,16 @@ function renderState(stateName) {
     activeVariant = null;
     layers[0].classList.add("show");
     layers[1].classList.remove("show");
-    if (!ragdollRig) {
-      ragdollRig = new RagdollRigController(layers[0]);
-      buildCount += 1;
+    // 分身接管画面时**不要**再建单猫。少了这个判断，下一次状态推送
+    // 就会在分身旁边又长出一只猫（它在 layers[0]，分身在 #cast，两个都在）。
+    if (!castMode) {
+      if (!ragdollRig) {
+        ragdollRig = new RagdollRigController(layers[0]);
+        buildCount += 1;
+      }
+      ragdollRig.setState(currentState);
+      ragdollRig.setGaze(lastGaze.x, lastGaze.y);
     }
-    ragdollRig.setState(currentState);
-    ragdollRig.setGaze(lastGaze.x, lastGaze.y);
     return;
   }
 
@@ -1172,6 +1249,208 @@ function renderState(stateName) {
     }, interval);
   }
   applyGaze();
+}
+
+// ============================================================================
+// S10  多会话分身：一个会话一只猫
+//
+// 规则只有一条（用户的原话）：**一条任务 = 一只猫戴头巾；多条任务 = 分身成多只猫**。
+// 所以 <=1 条会话时**完全沿用原来的单猫路径**（连带它所有的既有行为与断言），
+// 只有真的有 2 条以上时才切换到分身。这样"改多猫"不会顺手改坏单猫。
+//
+// 两条边界是刻意定的：
+//   · 最多 4 只——舞台只有 240px 宽，第 5 只开始就小得看不出是什么了；
+//     超出的会话不是"藏起来"，是**排不上台**（按优先级排，最吵的在前面）。
+//   · 至少留 1 只——全退场的话桌面整个空掉，用户会以为进程挂了。
+// ============================================================================
+const MAX_CATS = 4;
+const CAT_SOLO_PX = 176;
+const CAT_MIN_PX = 74;
+const STAGE_MAX_W = 232; // #pet 只有 176，但舞台是 240；留出一点边不顶到窗口沿
+const OVERLAP_RATIO = 0.32; // 后一只压进前一只身体里的比例
+const FADE_AFTER_MS = 5 * 60 * 1000; // 这么久没动静 = "接不到任务了"，退场
+const FADE_MS = 1600; // "慢慢消失"——用 300ms 那档会像被删掉，不像自己走开
+
+// 和 state.js 的 PRIORITY 同一套序（error 最吵）。这里重复一份而不是 import，
+// 因为渲染层是纯浏览器脚本，不进 Node 模块图。
+const CAST_PRIORITY = { error: 8, notification: 7, attention: 5, working: 3, thinking: 2, idle: 1, sleeping: 0 };
+
+/** @type {Map<string, {el:HTMLElement, rig:any, keyword:string|null}>} */
+const cast = new Map();
+let castEl = null;
+let castSeq = 0;
+let focusedId = null;
+// 分身是否接管了画面。renderState 靠它决定"还建不建单猫那只"——
+// 少了它，分身和单猫会同时在场。
+let castMode = false;
+
+// n 只猫并排且互相重叠时的单只尺寸：
+//   总宽 = n*size - (n-1)*size*OVERLAP
+// 反解出让总宽不超过舞台的 size。n=1 时直接给满 176。
+function catSize(n) {
+  if (n <= 1) return CAT_SOLO_PX;
+  const fit = STAGE_MAX_W / (n - (n - 1) * OVERLAP_RATIO);
+  return Math.max(CAT_MIN_PX, Math.min(CAT_SOLO_PX, Math.round(fit)));
+}
+
+// 挑上台的会话：最吵的在前，同样吵就最近动过的在前。
+// keepId = 当前聚焦的那只，它只要还没"太久没动静"，就不该被挤出 MAX_CATS——
+// 用户刚点选的猫在下一秒被别的猫顶掉，看起来像点击没生效。
+function pickCast(sessions, keepId) {
+  const arr = Array.isArray(sessions) ? sessions : [];
+  const sorted = [...arr].sort((a, b) => {
+    const pa = CAST_PRIORITY[a && a.state] ?? 0;
+    const pb = CAST_PRIORITY[b && b.state] ?? 0;
+    if (pa !== pb) return pb - pa;
+    // 括号不能省：`a.idleMs || 0 - b.idleMs` 会被解析成
+    // `a.idleMs || (0 - b.idleMs)`，只要 a 有值就直接返回它，
+    // 比较器不再自洽（a 新 b 旧 与 a 旧 b 新 会给出同号结果）。
+    return ((a && a.idleMs) || 0) - ((b && b.idleMs) || 0);
+  });
+  const active = sorted.filter((s) => ((s && s.idleMs) || 0) < FADE_AFTER_MS);
+  const keep = active.length ? active : sorted.slice(0, 1);
+  let out = keep.slice(0, MAX_CATS);
+  // 只在"排位靠后被挤掉"时保它；真到了 FADE_AFTER_MS 该淡出还是淡出（它已不在 active 里）
+  if (keepId && !out.some((s) => s && s.id === keepId)) {
+    const fav = active.find((s) => s && s.id === keepId);
+    if (fav) out = [...out.slice(0, MAX_CATS - 1), fav];
+  }
+  return out;
+}
+
+function ensureCastEl() {
+  if (!castEl) castEl = document.getElementById("cast");
+  return castEl;
+}
+
+function retireCat(id, immediate) {
+  const rec = cast.get(id);
+  if (!rec) return;
+  cast.delete(id);
+  // 立刻脱离 flex 流：不脱的话它继续占着位置，
+  // 剩下的猫会在它真正被移除的那一帧**突然跳一下**——那是抽搐，不是"慢慢消失"。
+  rec.el.classList.add("leaving");
+  const drop = () => {
+    if (rec.rig && typeof rec.rig.destroy === "function") rec.rig.destroy();
+    rec.el.remove();
+  };
+  if (immediate) drop();
+  else setTimeout(drop, FADE_MS);
+}
+
+function releaseCast() {
+  for (const id of [...cast.keys()]) retireCat(id, true);
+}
+
+// 从分身退回单猫时的退场。**这里也必须走淡出**，不能 releaseCast() 硬删：
+// 2 只 → 1 只是最常见的收敛路径，硬删的话"接不到任务就慢慢消失"在它上面永远看不到。
+// 只有**会话真的没了**（SessionEnd / 清场）才立刻收——那不是"消失"，是"任务结束了"。
+function fadeOutCast(sessions) {
+  const alive = new Set((Array.isArray(sessions) ? sessions : []).map((s) => s.id));
+  for (const id of [...cast.keys()]) retireCat(id, !alive.has(id));
+}
+
+// 分身上台前先把单猫那只收掉。留着它不显示只是浪费——它有一条自己的 60fps 循环，
+// 每帧都在重算 28 个弹簧通道，而用户根本看不见它。
+function dropSoloRig() {
+  if (!ragdollRig) return;
+  ragdollRig.destroy();
+  ragdollRig = null;
+  layers[0].replaceChildren();
+  layers[1].replaceChildren();
+}
+
+function syncCast(list, allSessions) {
+  const host = ensureCastEl();
+  if (!host) return;
+
+  const wanted = new Set(list.map((s) => s.id));
+  // 两种"不在台上"要分开处理：
+  //   会话还在，只是没排上（太久没动静 / 超过 MAX_CATS 被挤掉）→ **淡出**
+  //   会话已经不在了（SessionEnd、清场）                        → 立刻收
+  // 一律 immediate 的话，CSS 里那条 1600ms 过渡就是死代码，永远没人看见"慢慢消失"。
+  const alive = new Set((Array.isArray(allSessions) ? allSessions : []).map((s) => s.id));
+  for (const id of [...cast.keys()]) {
+    if (!wanted.has(id)) retireCat(id, !alive.has(id));
+  }
+  if (!list.length) return;
+
+  // 聚焦的那只退场了就改聚最吵的那只；没指定过也一样。
+  if (!focusedId || !wanted.has(focusedId)) focusedId = list[0].id;
+
+  const size = catSize(list.length);
+  const overlap = Math.round(size * OVERLAP_RATIO);
+
+  list.forEach((s, i) => {
+    let rec = cast.get(s.id);
+    if (!rec) {
+      // 上一只同 id 的猫可能正在淡出（刚被挤掉，下一轮又活过来）。
+      // 不先收掉它，台上会短暂出现两只一样的猫。
+      for (const ghost of [...host.children]) {
+        if (ghost.classList.contains("leaving") && ghost.dataset.sid === String(s.id || "")) ghost.remove();
+      }
+      const el = document.createElement("div");
+      el.className = "cat";
+      el.dataset.sid = String(s.id || "");
+      // uid 让每只猫的渐变 id 各不相同（详见 createRiggedRagdollSVG 上的注释）
+      const rig = new RagdollRigController(el, "c" + castSeq++);
+      rec = { el, rig, keyword: undefined };
+      cast.set(s.id, rec);
+    }
+    // 每轮都 appendChild 一次，强制 DOM 顺序跟着排序结果走。
+    // 不这么做的话排序变了但 DOM 顺序不变，画面上就是"顺序不对"。
+    host.appendChild(rec.el);
+    rec.el.style.width = `${size}px`;
+    rec.el.style.height = `${size}px`;
+    rec.el.style.marginLeft = i === 0 ? "0px" : `-${overlap}px`;
+    // 聚焦的在最上层；其余按排位往下压，重叠处永远是前一只压后一只
+    rec.el.style.zIndex = String(s.id === focusedId ? 10 : 10 - i - 1);
+    rec.el.classList.toggle("focus", s.id === focusedId);
+
+    if (rec.keyword !== (s.keyword ?? null)) {
+      rec.keyword = s.keyword ?? null;
+      rec.rig.setKeyword(s.keyword);
+    }
+    rec.rig.setState(s.state);
+  });
+}
+
+// 会话名单 → 单猫 / 多猫。这个分支是"分身"唯一的总开关。
+function applySessions(sessions) {
+  if (!isRagdollTheme(currentTheme)) return; // 帧序列主题不分身，保持原样
+  const list = pickCast(sessions, focusedId);
+  if (list.length <= 1) {
+    // 单猫：收掉分身，回到原来的那条路（**连带它所有既有行为**）
+    castMode = false;
+    // 台上还有猫就让它淡出（理由见 fadeOutCast），没有才走 releaseCast
+    if (cast.size) fadeOutCast(sessions);
+    else releaseCast();
+    // 单猫那只可能在上一次进分身时被 destroy 过，这里要能自己长回来
+    if (!ragdollRig && isRagdollTheme(currentTheme)) {
+      layers[0].classList.add("show");
+      layers[1].classList.remove("show");
+      ragdollRig = new RagdollRigController(layers[0]);
+      buildCount += 1;
+      ragdollRig.setState(currentState);
+      ragdollRig.setGaze(lastGaze.x, lastGaze.y);
+    }
+    if (ragdollRig) ragdollRig.setKeyword(list.length ? list[0].keyword : undefined);
+    return;
+  }
+  castMode = true;
+  dropSoloRig();
+  syncCast(list, sessions);
+}
+
+function focusCat(id) {
+  if (!cast.has(id)) return false;
+  focusedId = id;
+  for (const [sid, rec] of cast) {
+    const on = sid === id;
+    rec.el.classList.toggle("focus", on);
+    rec.el.style.zIndex = String(on ? 10 : 2);
+  }
+  return true;
 }
 
 function applyGaze() {
@@ -1254,6 +1533,16 @@ if (window.clawd) {
       applyGaze();
     }
   });
+
+  // 会话名单（1s 一推）。分身的开与关全看它。
+  // 用 typeof 判一下而不是直接调：预览页 / 旧版 preload 没有这个口，
+  // 直接调会在启动时抛一个 TypeError，然后整段初始化断在这里——
+  // 表现是"桌宠什么都不显示"，而真正的报错在很后面才看得见。
+  if (typeof window.clawd.onCast === "function") {
+    window.clawd.onCast((sessions) => {
+      applySessions(sessions);
+    });
+  }
 } else {
   // 浏览器独立预览模式
   renderState("idle");
@@ -1318,6 +1607,28 @@ if (stage) {
     }
   });
 
+  // 点一只猫 = 聚焦它（"可以根据需求点击切换"）。
+  //
+  // 必须和**拖动**分开：整个桌宠窗口是可拖的，pointerdown → 移动 → pointerup
+  // 同样会触发 click。不判位移的话，每次把它挪个位置都会顺手改掉焦点，
+  // 表现是"我只是想拖一下，结果聚焦换了一只猫"。
+  let downX = 0;
+  let downY = 0;
+  stage.addEventListener("pointerdown", (e) => {
+    downX = e.clientX;
+    downY = e.clientY;
+  });
+  stage.addEventListener("click", (e) => {
+    if (cast.size === 0) return;
+    if (Math.abs(e.clientX - downX) + Math.abs(e.clientY - downY) > 6) return;
+    // 认 e.target，不认 elementFromPoint。
+    // 反查坐标在这个场景里是错的：点击目标是 SVG 里的某条 path，
+    // 用坐标去查也能查到（同一位置），但一旦事件是合成的、或者页面正在过渡，
+    // 坐标查到的就可能已经不是原来那只猫了。click 事件本身带着 target，用它。
+    const cat = e.target && e.target.closest ? e.target.closest(".cat") : null;
+    if (cat && cat.dataset.sid) focusCat(cat.dataset.sid);
+  });
+
   stage.addEventListener("dblclick", (e) => {
     const hit = document.elementFromPoint(e.clientX, e.clientY);
     if (hit && hit.closest && hit.closest("#pet")) {
@@ -1366,6 +1677,16 @@ window.addEventListener("contextmenu", (e) => {
 // 这些不是"方便"，是**唯一能让回归测到内部状态的窗口**。
 // 只看像素是没用的：静止画面和动画可能长得一样。
 // ============================================================================
+// S10：把"词有没有真的写进 DOM"读回来。
+// 观测窗口必须有自检（硬约束 23）：setKeyword 写了但 DOM 没变，
+// 在不报错的情况下没人会发现——尤其是当那只猫正好被别的东西盖住时。
+function petKeywordProbe() {
+  const read = (rig) => (rig && rig.els.bandanaText ? rig.els.bandanaText.textContent : null);
+  if (ragdollRig) return read(ragdollRig);
+  const first = [...cast.values()][0];
+  return first ? read(first.rig) : null;
+}
+
 window.petDebug = {
   setState: (state) => {
     renderState(state);
@@ -1442,6 +1763,40 @@ window.petDebug = {
   // 一张静态截图里，慢慢睁开和瞬间睁开长得一模一样。
   eyeOpen: () => (ragdollRig ? Math.min(1, Math.max(0, ragdollRig.sp.eyeOpen.pos)) : null),
   stateLog: () => stateLog.slice(),
+  // ---- S10：分身与头巾 ----
+  // 每个出口都要有断言证明它自己有货（硬约束 23）：观测窗口没有自检就只是装饰。
+  //
+  // 台上有几只猫、各自演什么状态、头巾上写的什么词、当前聚焦谁。
+  // 靠肉眼验证不了"第 2 只猫是不是真的在演自己的状态"——它和第一只
+  // 长得一模一样，只有读它自己的 rig 才知道。
+  cast: () => ({
+    mode: castMode ? "cast" : "solo",
+    focused: focusedId,
+    cats: [...cast.entries()].map(([id, rec]) => ({
+      id,
+      state: rec.rig.state,
+      keyword: rec.rig.els.bandanaText ? rec.rig.els.bandanaText.textContent : "",
+      bandana: rec.rig.els.bandana ? rec.rig.els.bandana.getAttribute("display") : null,
+      focus: rec.el.classList.contains("focus"),
+      width: rec.el.style.width,
+    })),
+  }),
+  // 单猫那只的头巾（分身模式下它是 null）
+  solo: () => {
+    if (!ragdollRig) return null;
+    return {
+      state: ragdollRig.state,
+      keyword: ragdollRig.els.bandanaText ? ragdollRig.els.bandanaText.textContent : "",
+      bandana: ragdollRig.els.bandana ? ragdollRig.els.bandana.getAttribute("display") : null,
+    };
+  },
+  // 直接给当前台上所有猫塞一个词，用来验证"词真的写进了 DOM"。
+  // 走的是和业务完全相同的那条路径（setKeyword），不是另开一条。
+  setKeyword: (kw) => {
+    if (ragdollRig) ragdollRig.setKeyword(kw);
+    for (const rec of cast.values()) rec.rig.setKeyword(kw);
+    return petKeywordProbe();
+  },
   // 最近 30 条 agent 事件（主进程记录的）：每个事件叫什么、把会话从什么改成了什么，
   // 还是压根没认出来（how:"ignored"）。查"那里明明在干活为什么显示 idle"先看这个。
   events: () => (Array.isArray(lastEvents) ? lastEvents.slice() : []),

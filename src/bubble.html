@@ -25,6 +25,66 @@
         box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
         padding: 12px 14px;
         /* 不要固定高度：渲染完由 renderer 量出来告诉主进程改窗口高度 */
+        overflow: hidden;
+      }
+      /* 顶部 3px 色带 = 风险的"一眼可见"。颜色由 data-risk 驱动，
+         渲染层只写一个属性值，不碰 style（CSP 里 style-src 虽然放行了 unsafe-inline，
+         但用属性 + CSS 类比直接写 style 好维护）。 */
+      .riskbar {
+        height: 3px;
+        margin: -12px -14px 10px;
+        background: #cfc8b8;
+      }
+      #card[data-risk="low"] .riskbar {
+        background: #7f9a6e;
+      }
+      #card[data-risk="medium"] .riskbar {
+        background: #d9a441;
+      }
+      #card[data-risk="high"] .riskbar {
+        background: #d3612f;
+      }
+      #card[data-risk="critical"] .riskbar {
+        background: #b3201a;
+      }
+      /* 风险徽标：和「需要批准」并列，不是压在它上面——它描述的是这条命令，
+         不是这个流程。 */
+      .risk {
+        font-size: 11px;
+        border-radius: 5px;
+        padding: 2px 6px;
+        color: #6b6a63;
+        background: #efece4;
+      }
+      #card[data-risk="medium"] .risk {
+        color: #7a5a1e;
+        background: #fbe8c2;
+      }
+      #card[data-risk="high"] .risk {
+        color: #8f3a17;
+        background: #fadacb;
+      }
+      #card[data-risk="critical"] .risk {
+        color: #fff;
+        background: #b3201a;
+      }
+      /* 理由列表。只列前几条，多了反而没人读。 */
+      ul.why {
+        margin: 0 0 8px;
+        padding-left: 16px;
+        font-size: 11px;
+        line-height: 1.55;
+        color: #6f6b62;
+      }
+      ul.why:empty {
+        display: none;
+      }
+      ul.why li + li {
+        margin-top: 2px;
+      }
+      #card[data-risk="high"] ul.why,
+      #card[data-risk="critical"] ul.why {
+        color: #7c4a3a;
       }
       .head {
         display: flex;
@@ -106,11 +166,14 @@
   </head>
   <body>
     <div id="card">
+      <div class="riskbar"></div>
       <div class="head">
         <span class="badge">需要批准</span>
         <span class="tool" id="tool">…</span>
+        <span class="risk" id="risk"></span>
       </div>
       <pre class="cmd" id="cmd"></pre>
+      <ul class="why" id="why"></ul>
       <div class="meta" id="meta"></div>
       <div class="row">
         <button class="deny" id="btnDeny">拒绝</button>

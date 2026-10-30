@@ -218,6 +218,7 @@ function presentBubble(entry) {
     command: entry.command,
     cwd: entry.cwd,
     sessionId: entry.sessionId,
+    risk: entry.risk,
     queued: bubbleQueue.length,
   });
   positionBubble();
@@ -495,8 +496,23 @@ app.whenReady().then(() => {
     if (!pushedAnyState) broadcast(store.snapshot());
   }, 300);
 
+  // 「分身」的会话名单走**独立的 1s 通道**，不搭 state 那条线。
+  //
+  // 为什么不能顺手塞进 state：state 只在 `visual` 变化时推（state.js 的 emit），
+  // 而每条会话自己的状态、头巾上的词、闲了多久，都会在没有 visual 变化时照常变。
+  // 反过来也不行——把 state 改成每秒都推，帧序列主题会在每次推送时重建全部帧
+  // （renderState 不认"状态没变"），那是一条真实的重建路径，不是理论问题。
+  //
+  // 所以两个通道各管一件事：state 管"桌宠演什么"，cast 管"台上有几只猫、各自在干什么"。
+  const CAST_PUSH_MS = 1000;
+  const castTimer = setInterval(() => {
+    if (!win || win.isDestroyed()) return;
+    win.webContents.send("cast", store.snapshot().sessions);
+  }, CAST_PUSH_MS);
+
   app.on("before-quit", () => {
     clearInterval(gazeTimer);
+    clearInterval(castTimer);
     store.dispose();
     // 退出时把所有挂着的权限请求以 204 结束，否则对端的 HTTP 连接会一直悬着。
     // 交还给 Claude Code 自己的原生提示，比让它卡死强。

@@ -86,6 +86,10 @@ const MAX_SESSIONS = 100;
 const MAX_EVENT_LEN = 64;
 const MAX_TITLE = 60;
 const MAX_TOOL = 64;
+// 关键词写在猫的头巾上，超过这个长度就糊成一团（头巾只有那么大）。
+// hook 侧已经限到 6，这里留 8 是给"别的 agent 直接打端点"留的余量——
+// 但**必须有限**，因为它是网络入参。
+const MAX_KEYWORD = 8;
 
 // 会话标题：看板上唯一"像人话"的一行。来源是 hook 侧从 `session_title` 或
 // prompt 第一行推出来的，**prompt 原文从不进这条链路**（见 clawd-hook.js）。
@@ -104,6 +108,16 @@ function sanitizeTool(raw) {
   if (typeof raw !== "string") return undefined;
   const t = raw.replace(/[^\x20-\x7E]/g, "").trim().slice(0, MAX_TOOL);
   return t || undefined;
+}
+
+// 头巾上的那一个词。它**比标题更暴露**：标题只在打开看板时上屏幕，
+// 而它一直挂在猫头上，投屏、截图、共享桌面全在画面里。
+// 所以清洗照做（控制字符、限长），但语义判断（是不是密钥）在 hook 侧已经判过——
+// 那里才有 prompt 原文可判。这里只保证"进内存的东西是有界的"。
+function sanitizeKeyword(raw) {
+  if (typeof raw !== "string") return undefined;
+  const k = raw.replace(/[\x00-\x1F\x7F]/g, "").trim().slice(0, MAX_KEYWORD);
+  return k || undefined;
 }
 
 function sanitizeSessionId(raw) {
@@ -201,6 +215,7 @@ function createStore({ onChange, getTimings } = {}) {
         cwd: publicCwd(s.cwd),
         title: s.title ?? null,
         tool: s.tool ?? null,
+        keyword: s.keyword ?? null,
         idleMs: Date.now() - s.lastAt,
       })),
       recent: recentEvents.slice(),
@@ -281,6 +296,12 @@ function createStore({ onChange, getTimings } = {}) {
     // 这里同理：**只有真的拿到了才写**。
     const title = sanitizeTitle(payload.title);
     if (title) s.title = title;
+
+    // 关键词跟着标题一起"粘"：只有 hook 真抽到了才写。
+    // 新一轮 UserPromptSubmit 会带新词覆盖旧的——这正是要的，
+    // 头巾上写的是**这一轮**在干什么。
+    const keyword = sanitizeKeyword(payload.keyword);
+    if (keyword) s.keyword = keyword;
 
     // 工具名是"这一轮到目前为止最后用到的那个"。新一轮（UserPromptSubmit）
     // 开始时清掉——不清的话 thinking 阶段会挂着上一轮的工具名，

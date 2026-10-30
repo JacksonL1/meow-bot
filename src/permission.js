@@ -28,6 +28,8 @@ const MAX_CWD = 1024;
 // 命令正文：气泡里最多显示这么多，超出截断但用户仍能靠"…"意识到被截了
 const MAX_COMMAND = 600;
 
+const { assessRisk } = require("./risk");
+
 function str(v, max) {
   return typeof v === "string" ? v.slice(0, max) : undefined;
 }
@@ -91,13 +93,17 @@ function createPermissionCenter({ onRequest, onResolve } = {}) {
   function create(res, payload) {
     const id = nextId++;
     const toolName = str(payload.tool_name, MAX_TOOL_NAME) || "Unknown";
+    const command = summarizeInput(toolName, payload.tool_input).slice(0, MAX_COMMAND);
     const entry = {
       id,
       res,
       toolName,
-      command: summarizeInput(toolName, payload.tool_input).slice(0, MAX_COMMAND),
+      command,
       sessionId: str(payload.session_id, MAX_SESSION_ID),
       cwd: str(payload.cwd, MAX_CWD),
+      // 风险评级在创建时就算好，和命令一起锁定——渲染层拿到的永远是同一份快照。
+      // 它只进 UI，不参与任何决策：settle() 的三条结局完全不受它影响。
+      risk: assessRisk({ toolName, command, cwd: payload.cwd }),
       createdAt: Date.now(),
       settled: false,
       timer: null,

@@ -17,7 +17,27 @@ const el = {
   deny: document.getElementById("btnDeny"),
   queue: document.getElementById("queue"),
   card: document.getElementById("card"),
+  risk: document.getElementById("risk"),
+  why: document.getElementById("why"),
 };
+
+// 命令是 agent 送过来的不可信字符串。风险理由是我们自己写的固定文案，
+// 但两条规矩一起守：一律 textContent、一律 createElement，不要 innerHTML。
+// （硬约束 19：src/ 下 innerHTML 出现次数必须是 0，回归里有机械检查。）
+function renderRisk(risk) {
+  const level = risk && typeof risk.level === "string" ? risk.level : "low";
+  const label = risk && typeof risk.label === "string" ? risk.label : "低";
+  el.card.setAttribute("data-risk", level);
+  el.risk.textContent = level === "low" ? "风险 低" : `风险 ${label}`;
+
+  el.why.textContent = "";
+  const reasons = (risk && Array.isArray(risk.reasons) ? risk.reasons : []).slice(0, 3);
+  for (const r of reasons) {
+    const li = document.createElement("li");
+    li.textContent = typeof r.text === "string" ? r.text : "";
+    el.why.appendChild(li);
+  }
+}
 
 let currentId = null;
 
@@ -30,6 +50,7 @@ function render(req) {
   el.tool.textContent = req.toolName || "Unknown";
   // textContent 而不是 innerHTML —— 命令是 agent 给的字符串，绝不能当 HTML 解析
   el.cmd.textContent = req.command || "(没有可显示的参数)";
+  renderRisk(req.risk);
   const parts = [];
   if (req.cwd) parts.push(req.cwd);
   if (req.sessionId) parts.push(`会话 ${req.sessionId.slice(0, 8)}`);

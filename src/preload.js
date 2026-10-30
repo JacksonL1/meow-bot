@@ -5,6 +5,9 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("clawd", {
   onState: (cb) => ipcRenderer.on("state", (_e, snapshot) => cb(snapshot)),
+  // S10：会话名单（分身用）。和 onState 分开的两条线，原因写在 main.js 的
+  // castTimer 上——state 只在 visual 变化时推，分身要的是每条会话自己的状态。
+  onCast: (cb) => ipcRenderer.on("cast", (_e, sessions) => cb(sessions)),
   onGaze: (cb) => ipcRenderer.on("gaze", (_e, gaze) => cb(gaze)),
   dragStart: () => ipcRenderer.send("drag:start"),
   dragEnd: () => ipcRenderer.send("drag:end"),
