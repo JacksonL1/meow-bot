@@ -63,7 +63,8 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 | 回归闸门 | 主进程 inspector + 渲染进程 CDP，**191 条断言；当前 191 PASS / 0 FAIL**（剪贴板那条环境不可读时 `[warn]` 降级）；两条渲染路径用同一批断言、`rigMode` 分叉判据 | `scripts/verify-electron.js` |
 | 容器（Rust 侧） | 与上面每一行同构的 Rust 实现：HTTP（`server.rs`）、状态机（`state.rs`）、主题（`theme.rs`）、裁决（`permission.rs`）、风险评级（`risk.rs`）、窗口与线程（`main.rs`）、Win32（`sys.rs`） | `src-tauri/src/*.rs` |
 | Tauri 桥 | 在 `window` 上装出与 `preload.js` 形状相同的 `clawd` / `bubble` / `dashboard` | `src/tauri-bridge.js` |
-| 回归闸门（Tauri） | WebView2 CDP（`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=`），**65 条断言；当前 65 PASS / 0 FAIL** | `scripts/verify-tauri.js` + 共用的 `scripts/cdp.js` |
+| 回归闸门（Tauri） | WebView2 CDP（`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=`），**74 条断言；当前 74 PASS / 0 FAIL** | `scripts/verify-tauri.js` + 共用的 `scripts/cdp.js` |
+| 打包闸门 | NSIS 安装包，**25 条断言；当前 25 PASS / 0 FAIL**（10 条只读 + 15 条真装/真跑/真卸） | `scripts/verify-bundle.js` + `src-tauri/tauri.conf.json` 的 `bundle` 段 |
 
 ## 已知限制
 
@@ -74,7 +75,7 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 - 看板 1s 轮询，不是推送——`idleMs` 天然随时间变，这是故意的取舍
 - 权限请求只存内存，没有决策历史与审计日志
 - 气泡只支持鼠标点 + Esc，没有键盘 Tab/Enter；看板也没有键盘导航，也没有远程审批
-- **常驻内存压不到 15MB，而且不可能压到**。实测（2026-11-02，Windows，release 构建）：Electron 45 4 个进程 RSS 370.1MB / 私有 221.2MB；Tauri 1 个 Rust 进程 **34.3MB / 私有 11.2MB** + WebView2 6 个子进程 349.1MB / 私有 202.4MB = 整机 **383.4MB / 私有 213.6MB**。**Rust 宿主自己达标，整机不达标**——窗口里跑的还是 Chromium。要到 15MB 只有原生自绘（GDI/Direct2D 手画每一帧）一条路
+- **常驻内存压不到 15MB，而且不可能压到**。实测两次（2026-11-02，Windows，release，同机同日）：Electron 45 **370.1 → 350.8MB** RSS（私有 221.2 → 203.1MB，4 进程）；Tauri **383.4 → 379.6MB**（私有 213.6 → 211.8MB，7 进程），其中 Rust 宿主 **34.3 → 33.9MB / 私有 11.2 → 10.4MB**，其余是 6 个 WebView2 子进程。**差值的波动（±30MB）比两者的差距更大，所以能说的只有"持平"**——不要让单次采样变成"换容器更省内存"的证据。**Rust 宿主自己达标，整机不达标**——窗口里跑的还是 Chromium。要到 15MB 只有原生自绘（GDI/Direct2D 手画每一帧）一条路
 - **单实例锁已补（S10-6）**：`single.rs` 用命名互斥量，第二份进程在 `Builder::build` 之前就退出。
   **纠一条本台账写错过的**：S10-5 说"开第二份 hook 仍然打给第一份（端口没变）"是错的——
   `write_port_file()` 无条件执行，第二份会拿随机端口**覆盖**端点文件，

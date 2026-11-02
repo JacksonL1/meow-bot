@@ -27,16 +27,25 @@ Tauri 那份少，是**因为少测了宿主专属的东西**（Electron 那 191
 真装一份再卸掉，所以挂在 `--install` 后面。**"装得上"和"跑得对"是两件事**，
 `cargo build` 绿说明不了任何一条。
 
-**内存这件事必须说清楚**（用户原目标是"常驻 15MB 以内"）：
+**内存这件事必须说清楚**（用户原目标是"常驻 15MB 以内"）。同一个 release 构建测了两次，
+**两次互有高低**，所以两次都列出来：
 
-| | 进程数 | RSS | 私有内存 |
-|---|---|---|---|
-| Electron 45 | 4 | 370.1 MB | 221.2 MB |
-| Tauri（Rust 宿主） | 1 | **34.3 MB** | **11.2 MB** |
-| Tauri（WebView2 子进程） | 6 | 349.1 MB | 202.4 MB |
-| Tauri 合计 | 7 | 383.4 MB | 213.6 MB |
+| 测量 | | 进程数 | RSS | 私有内存 |
+|---|---|---|---|---|
+| 上午（S10-6② 后） | Electron 45 | 4 | 370.1 MB | 221.2 MB |
+| | Tauri 合计 | 7 | 383.4 MB | 213.6 MB |
+| | └ Rust 宿主 | 1 | **34.3 MB** | **11.2 MB** |
+| | └ WebView2 子进程 | 6 | 349.1 MB | 202.4 MB |
+| 12:10（S10-6④ 后） | Electron 45 | 4 | 350.8 MB | 203.1 MB |
+| | Tauri 合计 | 7 | 379.6 MB | 211.8 MB |
+| | └ Rust 宿主 | 1 | **33.9 MB** | **10.4 MB** |
+| | └ WebView2 子进程 | 6 | 345.7 MB | 201.4 MB |
 
-**Rust 宿主自己 11.2MB，达标；整机没达标，而且不可能达标**——窗口里跑的还是 Chromium。
+**差值（两次合计 ±30MB）比两者的差距还大**，所以能说的只有一句：**整机基本持平，
+谁也省不出量级**。上午那组 Tauri 略重、下午那组 Electron 略轻，都不是结论，
+是噪声——写台账时不要拿单次采样去证明"换容器更省内存"。
+
+**Rust 宿主自己 10–11MB，达标；整机没达标，而且不可能达标**——窗口里跑的还是 Chromium。
 换容器换掉的是"多一层 Node 运行时"，不是"多一层浏览器"。要到 15MB 只有原生自绘一条路，
 用户已经明确否掉了。这个结论写在 `PROJECT.md` 的取舍里，不要下次再当新问题重开一遍。
 
@@ -120,9 +129,12 @@ Tauri v2 的 IPC 是 `fetch("ipc://localhost/<cmd>")`，Windows 上落成 `http:
 - [x] **打包分发**：`bundle.active` 现在是 `true`，NSIS 出 `clawd-starter_0.1.0_x64-setup.exe`（1.57MB），
       `installMode: currentUser`（不提权）、装到 `%LOCALAPPDATA%\clawd-starter`
       → **S10-6 已做**（验收脚本 `verify-bundle.js` 25 条，含真装/真卸，见下）
-- [x] **开机自启 / 单实例**：Electron 版靠 `requestSingleInstanceLock()`，
+- [x] **单实例**：Electron 版靠 `requestSingleInstanceLock()`，
       Tauri 侧没做等价物——现在开第二份会抢 23333 端口，回退随机端口并告警
       → **S10-6 已补**（`single.rs`，命名互斥量 + 命名事件，见下）
+- [ ] **开机自启**：**一直没做，Electron 版也没有**。原来这条和"单实例"写在一行，
+      容易看成两件都做了（`PROGRESS.md:132` 的 `[x]` 就写错过一次）。
+      要做就是 HKCU 的 `Run` 项或启动文件夹快捷方式，得配一个"安装时可选、卸载时清掉"的开关
 - [x] **锁屏检测**是 2s 轮询 `OpenInputDesktop`，Electron 版是 `powerMonitor` 事件。
       轮询在锁屏后仍会跑（便宜，但确实在跑）
       → **S10-6 已换**（`WTSRegisterSessionNotification`，轮询降为注册失败时的兜底，见下）
@@ -325,6 +337,21 @@ NSIS 是 Tauri 2 自带下载的（落到 `%LOCALAPPDATA%\tauri\NSIS\`，makensi
 
 **判据**：装出来的 exe 与裸 exe 逐字节相同（除 bundler 那 3 字节）+ 安装版 `/health` 是 `event`。
 前者证明"用户拿到的是刚验过的那一份"，后者证明"打包没把能力弄丢"。
+
+**S10-6 收尾完成（4/4）**。收尾这一次把所有闸门重跑了一遍，四份同时绿：
+Electron **191** / Tauri **74** / `cargo test` **22** / 打包 **25**，外加台账巡检 `[ok] 一致`。
+打包改了 `tauri.conf.json` 和 `build.rs` 的产物之后，**Electron 那份 191 条一条没掉**——
+两套容器共用渲染层这件事，到这里才算真被验证过一次（之前只是"应该没问题"）。
+
+这一步之后仍然开着的，都**不属于 S10-6**，别混在一起看：
+
+| 遗留 | 状态 |
+|---|---|
+| 「thinking 显示成 idle」的根因 | 未定，诊断口已就位，等现场数据 |
+| WorkBuddy 上的 hook 安装 | 沙箱写不了 `~/.workbuddy/settings.json`，要用户自己跑一条命令 |
+| 托盘图标 | 脚本手画的占位物（`scripts/make-icons.js`），不是设计稿 |
+| `cargo audit` | **本机没装，从没跑过**——写在这里，免得下次以为跑过了 |
+| 安装包签名 / 离线安装 | 见 ④：`downloadBootstrapper` + 无签名，都是明确的选择 |
 
 ### S9 鼠标经过，把睡着的猫叫醒（2026-10-28，紧接 S8 之后，同一天）
 
