@@ -306,6 +306,27 @@ function toggleDashboard() {
   d.focus();
 }
 
+// ---- 开机自启（默认关）----
+// 桌宠没有窗口，用户关掉之后不会自己回来；但"开机就弹一只猫"不是所有人都想要。
+// 所以做成托盘里的一个开关，默认关，勾从系统读回来而不是本地记一份。
+//
+// 注意 Electron 的语义：`openAtLogin` 在两种安装形态下落到不同地方
+// （打包后是注册表 Run 项，dev 下是开发模式，系统可能忽略）。这里不猜，
+// 改完立刻读回系统实际状态，读回什么就显示什么。
+// 顺序是**先写、再读回、再改勾**。反过来（先改勾再写）会在写入被系统拒绝时
+// 让菜单显示一个不存在的状态——用户勾上了，重启之后猫没出来，而他以为自己开过。
+function toggleAutostart(item) {
+  const want = !app.getLoginItemSettings().openAtLogin;
+  app.setLoginItemSettings({ openAtLogin: want });
+  const actual = app.getLoginItemSettings().openAtLogin;
+  if (item) item.checked = actual;
+  if (actual !== want) {
+    // 组策略、权限、未打包的 dev 环境都可能让写入无效。此时如实说，不假装成功。
+    console.warn(`[autostart] 写入未生效：想要 ${want}，系统报 ${actual}`);
+  }
+  return actual;
+}
+
 app.whenReady().then(() => {
   // 状态时长来自**当前主题**，但此刻主题还没解析（下面第 331 行才定）。
   // 所以传的是 getter 而不是值：store 每次判断时长都重新问一次，
@@ -433,6 +454,10 @@ app.whenReady().then(() => {
     if (!win || win.isDestroyed()) return;
     Menu.buildFromTemplate([
       { label: "会话看板", click: toggleDashboard },
+      // 勾是**从系统里读回来的**（`wasOpenedAtLogin` / `openAtLogin`），不是本地变量。
+      // 用本地变量的话，别的地方改过一次之后菜单就在说谎。
+      { label: "开机自启", type: "checkbox", checked: app.getLoginItemSettings().openAtLogin,
+        click: (item) => toggleAutostart(item) },
       { type: "separator" },
       { label: "退出", click: () => app.quit() },
     ]).popup({ window: win });

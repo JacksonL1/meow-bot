@@ -44,6 +44,8 @@ windows-sys = { version = "0.59", features = [
     # RegisterClassW / WNDCLASSW 被 GDI 门禁挡着（结构体里带 HICON / HBRUSH）。
     # 我们只是建一个消息专用窗口，一个像素都不画。
     "Win32_Graphics_Gdi",
+    # 开机自启：HKCU 的 Run 键
+    "Win32_System_Registry",
 ] }
 
 [profile.release]

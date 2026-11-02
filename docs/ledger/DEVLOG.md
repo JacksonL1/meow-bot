@@ -4,6 +4,39 @@
 
 ---
 
+## 2026-11-02 · 开机自启：值必须带引号，勾必须写成功才动
+
+Tauri 侧没有现成的 `app.setLoginItemSettings()`，自己写注册表：
+
+- **落点用 HKCU 不用 HKLM**：`HKLM\...\Run` 要管理员权限，一个桌宠不配提权。
+  HKCU 只对当前用户生效——桌宠本来就是 per-user 的东西，正合适。
+- **值必须带引号**：`"C:\Program Files\clawd-starter\clawd-starter.exe"`。
+  不带引号时路径一旦含空格，Windows 会把空格后面的部分当参数，
+  开机表现是弹一个"找不到 XXX"的错误框，而且只在**别人**的机器上出现。
+- **不引 `tauri-plugin-autostart`**：它连带拉 11 个包（auto-launch、objc2-*……），
+  而我们只需要 `windows-sys` 的一个 feature（`Win32_System_Registry`）+
+  五个 API（Open/Query/SetValue/Delete/Close）。四个函数五十行，值得自己写。
+- **删一个不存在的值不算失败**：`RegDeleteValueW` 返回 `ERROR_FILE_NOT_FOUND(2)`
+  时照样算成功——"关"要能重复按，幂等是这个开关的基本修养。
+- **测试只默认验「关」**：开机自启是**进程外的全局状态**，写它等于改这台机器。
+  测试中途崩了就留下一条真条目，下次登录自己弹一只猫。
+  所以 `autostart_set(false)` 的幂等默认就测，「开」的往返要
+  `CLAWD_AUTOSTART_TEST=1` 显式点名才跑。
+- **勾的顺序**：先读当前状态 → 取反 → 写 → 写**成功**才 `set_checked`。
+  反过来（先动勾再写）会在写入被系统拒绝时让菜单显示一个不存在的状态。
+  Electron 侧同理：`setLoginItemSettings` 之后立刻读回
+  `getLoginItemSettings().openAtLogin`，读回什么就显示什么。
+
+## 2026-11-02 · 单例状态 + cargo 并行测试，第三次踩
+
+`autostart` 的注册表项和 `SESSION_CB` 一样是**进程级单例**：两个测试并行跑，
+A 把值删了、B 正好在断言它存在——红了还以为是代码坏了。
+第三次踩同一个坑（前两次：`SESSION_CB`、临时端点文件），这次的修法是
+**合成一个测试**，让"关→（opt-in 的）开→关"在一条用例里串行走完。
+写涉及全局状态的测试时先问一句：这个状态每个进程有几份？
+
+---
+
 ## 2026-11-02 · 内存这事：同一个构建测两次，差值比结论还大
 
 收尾时把两种容器又测了一遍。上午那组是 Electron **370.1MB** / Tauri **383.4MB**，

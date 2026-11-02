@@ -21,7 +21,7 @@ use permission::{Center, Notify, PendingView};
 use state::{Snapshot, Store, Timings};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::menu::{ContextMenu, MenuBuilder, MenuItemBuilder};
+use tauri::menu::{CheckMenuItem, CheckMenuItemBuilder, ContextMenu, MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
@@ -683,26 +683,51 @@ fn apply_lock(app: &AppHandle, locked: bool) {
 
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let dash = MenuItemBuilder::with_id("tray-dashboard", "会话看板").build(app)?;
+    // 勾是**从注册表读回来的**，不是本地变量——别的进程（或重装）改过之后，
+    // 菜单上显示的就是错的。读一次很便宜，错一次很难查。
+    let auto = CheckMenuItemBuilder::with_id("tray-autostart", "开机自启")
+        .checked(sys::autostart_enabled())
+        .build(app)?;
     let quit = MenuItemBuilder::with_id("tray-quit", "退出").build(app)?;
     let menu = MenuBuilder::new(app)
         .item(&dash)
+        .item(&auto)
         .separator()
         .item(&quit)
         .build()?;
     let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?;
 
+    let auto_for_event = auto.clone();
     TrayIconBuilder::with_id("clawd-tray")
         .icon(icon)
         .tooltip("Clawd · 桌宠")
         .menu(&menu)
         .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id().as_ref() {
+        .on_menu_event(move |app, event| match event.id().as_ref() {
             "tray-dashboard" => toggle_dashboard(app),
+            "tray-autostart" => toggle_autostart(app, &auto_for_event),
             "tray-quit" => app.exit(0),
             _ => {}
         })
         .build(app)?;
     Ok(())
+}
+
+/// 开关开机自启，并把勾同步回菜单。
+///
+/// 先按"读回来的当前状态"取反，再真的去写，写成功才动勾——
+/// 顺序反过来（先动勾再写）会让菜单在写入失败时说谎。
+fn toggle_autostart(app: &AppHandle, item: &CheckMenuItem<tauri::Wry>) {
+    let want = !sys::autostart_enabled();
+    match sys::autostart_set(want) {
+        Ok(()) => {
+            if let Err(e) = item.set_checked(want) {
+                eprintln!("[autostart] 状态已改，但菜单上的勾没同步：{e}");
+            }
+            let _ = app.emit("autostart", want);
+        }
+        Err(e) => eprintln!("[autostart] 改开机自启失败：{e}"),
+    }
 }
 
 fn main() {

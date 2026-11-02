@@ -13,9 +13,9 @@ S1–S10 全部完成。**2026-11-02 补上 S10-5：容器从 Electron 换成 Ru
 
 | 闸门 | 脚本 | 结果 | 断言数 |
 |---|---|---|---|
-| Electron 45 | `npm run verify:electron` | **191 PASS / 0 FAIL** | 191 |
-| Tauri 2.12.5 + WebView2 | `npm run verify:tauri` | **74 PASS / 0 FAIL** | 74 |
-| Rust 单测 | `cd src-tauri && cargo test` | **22 passed / 0 failed** | 22 |
+| Electron 45 | `npm run verify:electron` | **194 PASS / 0 FAIL** | 194 |
+| Tauri 2.12.5 + WebView2 | `npm run verify:tauri` | **76 PASS / 0 FAIL** | 76 |
+| Rust 单测 | `cd src-tauri && cargo test` | **23 passed / 0 failed** | 23 |
 | 打包（NSIS 安装包） | `npm run verify:bundle:install` | **25 PASS / 0 FAIL** | 25 |
 
 Tauri 那份少，是**因为少测了宿主专属的东西**（Electron 那 191 条里有 12 条打的是
@@ -132,9 +132,12 @@ Tauri v2 的 IPC 是 `fetch("ipc://localhost/<cmd>")`，Windows 上落成 `http:
 - [x] **单实例**：Electron 版靠 `requestSingleInstanceLock()`，
       Tauri 侧没做等价物——现在开第二份会抢 23333 端口，回退随机端口并告警
       → **S10-6 已补**（`single.rs`，命名互斥量 + 命名事件，见下）
-- [ ] **开机自启**：**一直没做，Electron 版也没有**。原来这条和"单实例"写在一行，
+- [x] **开机自启**：**一直没做，Electron 版也没有**。原来这条和"单实例"写在一行，
       容易看成两件都做了（`PROGRESS.md:132` 的 `[x]` 就写错过一次）。
-      要做就是 HKCU 的 `Run` 项或启动文件夹快捷方式，得配一个"安装时可选、卸载时清掉"的开关
+      → **S10-7 已做**（两边同日补齐，见下）。Tauri：`sys::autostart_set()` 直写
+      HKCU `Run` 项（带引号的完整 exe 路径），托盘勾选菜单的勾**从注册表读回来**，
+      写成功才动勾；Electron：`app.setLoginItemSettings()` + 右键菜单 checkbox，
+      同样是"改完立刻读回系统实际状态"。默认关。
 - [x] **锁屏检测**是 2s 轮询 `OpenInputDesktop`，Electron 版是 `powerMonitor` 事件。
       轮询在锁屏后仍会跑（便宜，但确实在跑）
       → **S10-6 已换**（`WTSRegisterSessionNotification`，轮询降为注册失败时的兜底，见下）
@@ -352,6 +355,30 @@ Electron **191** / Tauri **74** / `cargo test` **22** / 打包 **25**，外加�
 | 托盘图标 | 脚本手画的占位物（`scripts/make-icons.js`），不是设计稿 |
 | `cargo audit` | **本机没装，从没跑过**——写在这里，免得下次以为跑过了 |
 | 安装包签名 / 离线安装 | 见 ④：`downloadBootstrapper` + 无签名，都是明确的选择 |
+
+### S10-7 把还开着的所有事项做完（2026-11-02，S10-6 同日的最后一轮）
+
+#### ① 开机自启（Tauri + Electron 两边同日补齐）
+
+这条的来历先记一笔：S10-5 的台账把它和"单实例"写在**同一行**、且标了 `[x]`，
+导致上一版功能清单里它被当成已交付——这是台账自己的错，不是代码的。
+现在两边都真的有了：
+
+- **Tauri**：`sys.rs` 新增 `autostart_enabled()` / `autostart_set(bool)`，
+  直写 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`（值名 `clawd-starter`，
+  值是**带引号**的 `current_exe()` 完整路径）。托盘菜单加 `CheckMenuItem`
+  「开机自启」，勾**从注册表读回来**（不是本地变量），写成功才动勾，
+  同时 `emit("autostart", …)`。不用 `tauri-plugin-autostart`（连带 11 个包），
+  只给 `windows-sys` 加一个 `Win32_System_Registry` feature。
+- **Electron**：右键菜单加 checkbox，`app.setLoginItemSettings()` 改完
+  **立刻读回** `getLoginItemSettings()`，读回什么显示什么；
+  写入未生效（组策略 / dev 环境）时 stderr 告警，不假装成功。
+- **默认关**。测试只默认验「关」（幂等、不留痕迹）；「开」的往返
+  要 `CLAWD_AUTOSTART_TEST=1` 显式点名——自启是进程外全局状态，
+  测试崩溃会留一条真条目，下次登录自己弹一只猫。
+
+闸门：`cargo test` 23（autostart 两条合成一条，单例状态不能并行测）；
+Electron 194（+3）；Tauri 76（+2：两套容器的自启能力互为镜像的静态对齐断言）。
 
 ### S9 鼠标经过，把睡着的猫叫醒（2026-10-28，紧接 S8 之后，同一天）
 

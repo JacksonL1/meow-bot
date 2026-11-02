@@ -1,14 +1,16 @@
 // ============================================================
-// Windows 系统集成（Electron 版由 Electron API 提供的四件事）
+// Windows 系统集成（Electron 版由 Electron API 提供的五件事）
 //
 //   screen.getCursorScreenPoint()   → cursor_pos()      拖动 + gaze 都要
 //   screen.getPrimaryDisplay().workArea → work_area()   贴边定位
 //   clipboard.writeText()           → set_clipboard_text()
 //   powerMonitor lock-screen/suspend → watch_session()   SEC-07 锁屏时收起窗口
+//   app.setLoginItemSettings()      → autostart_set()   开机自启（默认关）
 //
 // 为什么不用 Tauri 的插件：托盘/剪贴板各自要带一个插件 + 一份权限声明，
 // 而这里只需要几个系统调用。直接调 user32 更小、也没有额外的 IPC 层。
-// ============================================================
+// 开机自启同理——`tauri-plugin-autostart` 会连带 11 个包（auto-launch / dirs /
+// os_info / objc2-* …），而它做的事就是往 HKCU 的 Run 里写一个值。
 #![allow(unused_unsafe)]
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
@@ -21,6 +23,10 @@ use windows_sys::Win32::System::DataExchange::{
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
+use windows_sys::Win32::System::Registry::{
+    RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
+    HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_SZ,
+};
 use windows_sys::Win32::System::RemoteDesktop::{
     WTSRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
 };
@@ -239,12 +245,91 @@ where
     rx.recv_timeout(Duration::from_millis(1500)).unwrap_or(false)
 }
 
+// ---- 开机自启 --------------------------------------------------------
+// Windows 的"开机自启"就一件事：HKCU 的 Run 里有没有这一项。
+// 用 HKCU 而不是 HKLM，是因为后者要管理员权限——桌宠不需要，也不该要。
+//
+// 值是**带引号的完整路径**。引号不是装饰：路径里一旦有空格，
+// Windows 启动时会把空格后面那截当成参数，结果是"开机弹一个错误对话框"。
+const RUN_SUBKEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+const RUN_VALUE: &str = "clawd-starter";
+
+/// 开机自启开没开。读不到就当没开（此时 `autostart_set(true)` 会把它补上）。
+pub fn autostart_enabled() -> bool {
+    let Some(key) = open_run_key(KEY_READ) else { return false };
+    unsafe {
+        let mut len: u32 = 0;
+        // lpData 传 null、只问长度：够判断"在不在"，且不用先猜缓冲多大
+        let rc = RegQueryValueExW(key, wide(RUN_VALUE).as_ptr(), std::ptr::null(), std::ptr::null_mut(), std::ptr::null_mut(), &mut len);
+        let _ = RegCloseKey(key);
+        rc == 0
+    }
+}
+
+/// 开 / 关开机自启。写入的是**当前进程的 exe 路径**（dev 与安装版各自正确）。
+pub fn autostart_set(on: bool) -> Result<(), String> {
+    let Some(key) = open_run_key(KEY_SET_VALUE | KEY_READ) else {
+        return Err("打不开 HKCU 的 Run 键".to_string());
+    };
+    let rc = unsafe {
+        if on {
+            let path = std::env::current_exe().map_err(|e| format!("拿不到当前 exe 路径：{e}"))?;
+            let cmd = format!("\"{}\"", path.to_string_lossy());
+            let bytes: Vec<u16> = cmd.encode_utf16().chain(std::iter::once(0)).collect();
+            RegSetValueExW(key, wide(RUN_VALUE).as_ptr(), 0, REG_SZ, bytes.as_ptr() as *const u8, bytes.len() as u32 * 2)
+        } else {
+            RegDeleteValueW(key, wide(RUN_VALUE).as_ptr())
+        }
+    };
+    // 删一个不存在的值会返回 2（ERROR_FILE_NOT_FOUND），那也算"关掉了"
+    let ok = rc == 0 || (!on && rc == 2);
+    unsafe {
+        let _ = RegCloseKey(key);
+    }
+    if ok { Ok(()) } else { Err(format!("写开机自启失败：RegSetValueExW 返回 {rc}")) }
+}
+
+fn open_run_key(rights: windows_sys::Win32::System::Registry::REG_SAM_FLAGS) -> Option<HKEY> {
+    let mut key: HKEY = std::ptr::null_mut();
+    let rc = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, wide(RUN_SUBKEY).as_ptr(), 0, rights, &mut key) };
+    if rc == 0 { Some(key) } else { None }
+}
+
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 pub fn bool_ok(v: BOOL) -> bool {
     v != 0
+}
+
+#[cfg(test)]
+mod autostart_tests {
+    use super::*;
+
+    // 只有一个测试，不是懒得拆：开机自启的真身是**这台机器上 HKCU Run 里的一个值**，
+    // 也就是进程外的全局状态。拆成"测关"和"测往返"两个测试，cargo 会并行跑它们——
+    // 一个刚把它写上，另一个就读到"开着"，于是红的那个看起来像"自启没生效"，
+    // 其实是两个测试在抢同一个注册表项（和 sys::tests 里 SESSION_CB 那件事一样）。
+    //
+    // 默认只验"关得掉"（幂等、跑完不留痕迹）；**"打得开"要显式开开关**才验：
+    //   CLAWD_AUTOSTART_TEST=1 cargo test --release autostart
+    // 因为它会真的往登录项里写一条——中途崩了，下次登录会自己弹一只猫。
+    #[test]
+    fn autostart_off_is_idempotent_and_on_round_trips_when_asked() {
+        assert!(autostart_set(false).is_ok(), "关掉开机自启失败");
+        assert!(!autostart_enabled(), "关掉之后仍然读得到 Run 里的值");
+
+        if std::env::var("CLAWD_AUTOSTART_TEST").as_deref() != Ok("1") {
+            eprintln!("[autostart] 往返测试没跑（设 CLAWD_AUTOSTART_TEST=1 才会真开一次）");
+            return;
+        }
+
+        assert!(autostart_set(true).is_ok(), "打开开机自启失败");
+        assert!(autostart_enabled(), "打开之后读不到 Run 里的值");
+        assert!(autostart_set(false).is_ok(), "关掉开机自启失败");
+        assert!(!autostart_enabled(), "关掉之后仍然读得到 Run 里的值");
+    }
 }
 
 #[cfg(test)]

@@ -510,6 +510,27 @@ async function main() {
       innerHtmlHits.join(", ") || "0 处"
     );
 
+    // ---------- 0.9 开机自启（S10-7）----------
+    // 状态从**系统里读回来**，不在本地记第二份。断言分两层：
+    //   1) 静态：托盘菜单里确实有这一项（防止哪天被顺手删掉）
+    //   2) 运行时：Electron 的 loginItemSettings 读得到、且默认是关的
+    const mainJsSrc = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
+    ok(
+      "托盘菜单里有『开机自启』这一项（静态检查）",
+      mainJsSrc.includes('label: "开机自启"') && mainJsSrc.includes("setLoginItemSettings")
+    );
+    const loginJson = M ? await M.eval("JSON.stringify(require('electron').app.getLoginItemSettings())") : null;
+    const loginObj = loginJson ? JSON.parse(loginJson) : null;
+    ok(
+      "开机自启默认关（Electron 侧能读到系统的登录项状态）",
+      loginObj && loginObj.openAtLogin === false,
+      loginObj ? `openAtLogin=${loginObj.openAtLogin}` : "没有主进程 inspector，跳过"
+    );
+    ok(
+      "Electron 侧也提供了开关动作（不是只看得到状态）",
+      mainJsSrc.includes("function toggleAutostart")
+    );
+
     // ---------- 1.1 权限风险评级（S10） ----------
     // 纯函数，不需要 Electron 起来就能跑，所以放在静态检查这一段。
     //

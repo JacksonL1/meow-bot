@@ -161,6 +161,36 @@ async function main() {
     process.exit(1);
   }
 
+  // 陈旧二进制守卫。
+  //
+  // 为什么值得单独一段：debug 目录里躺着的是一份**几小时前的**二进制，
+  // 而 `withGlobalTauri`、IPC 白名单、/health 的 lock 字段全是编译期就定死的。
+  // 于是拿旧二进制跑，会得到 8 条看起来像"代码坏了"的 FAIL——
+  // 真实原因是那几个修复根本没编进去。这类失败最贵：它会让人回头去改
+  // 一段本来就对的代码。宁可在开跑前拦下来。
+  const srcDirs = [path.join(ROOT, "src"), path.join(ROOT, "src-tauri", "src")];
+  const newest = (dir) => {
+    if (!fs.existsSync(dir)) return 0;
+    let t = 0;
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) t = Math.max(t, newest(p));
+      else if (/\.(rs|js|json|html|css)$/.test(e.name)) t = Math.max(t, fs.statSync(p).mtimeMs);
+    }
+    return t;
+  };
+  const srcAt = Math.max(...srcDirs.map(newest));
+  const exeAt = fs.statSync(EXE).mtimeMs;
+  if (srcAt > exeAt) {
+    const ages = Math.round((srcAt - exeAt) / 1000);
+    console.error(
+      `可执行文件比源码旧 ${ages}s：${EXE}\n` +
+        `它不含你刚改的东西，跑出来的失败会是假的。先跑：\n` +
+        `  cd src-tauri && cargo build${RELEASE ? " --release" : ""}`
+    );
+    process.exit(1);
+  }
+
   if (!(await portFree(CDP_PORT))) {
     console.error(`调试端口 ${CDP_PORT} 被占用，先关掉其他调试实例。`);
     process.exit(1);
@@ -251,6 +281,21 @@ async function main() {
     // 所以"关掉 withGlobalTauri"缩小的是可发现面，真正的边界是 Rust 侧的
     // 每窗口白名单（main.rs 的 only()）。下面三条把这两件事一起钉住。
     ok("withGlobalTauri 已关：window.__TAURI__ 不存在", (await R.eval("typeof window.__TAURI__")) === "undefined");
+
+    // 开机自启的**能力对齐**检查（硬约束 35：两套容器逐条对齐）。
+    // Electron 侧用 `app.setLoginItemSettings`，Tauri 侧用自己写的 `sys::autostart_set`
+    // 写 HKCU 的 Run 键——两条路的落点是同一个注册表项，所以这里静态确认
+    // 两边**都在**，任一侧被删掉就会红。
+    const mainJsSrc = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
+    const sysRsSrc = fs.readFileSync(path.join(ROOT, "src-tauri", "src", "sys.rs"), "utf8");
+    ok(
+      "开机自启：Electron 侧有 setLoginItemSettings",
+      mainJsSrc.includes("setLoginItemSettings") && mainJsSrc.includes('label: "开机自启"')
+    );
+    ok(
+      "开机自启：Tauri 侧有 autostart_set / autostart_enabled",
+      sysRsSrc.includes("pub fn autostart_set") && sysRsSrc.includes("pub fn autostart_enabled")
+    );
     const internalsDesc = String(
       await R.eval(
         "JSON.stringify(Object.getOwnPropertyDescriptor(window,'__TAURI_INTERNALS__'),(k,v)=>typeof v==='function'?'[fn]':v)"
