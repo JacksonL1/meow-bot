@@ -4,6 +4,140 @@
 
 ---
 
+## 2026-11-02 · 容器换成 Rust（Tauri）：**三个 bug 是跑起来之后才浮出来的**
+
+用户的原话是「我装了 Rust。装工具链后迁 Tauri」。三条需求里的第二条
+（"把后端与窗口容器用 Rust 重写，常驻内存 15MB 以内"）到这一步才算有人动手。
+
+结论先写：**后端确实做到了，整机没有**。Rust 宿主进程私有内存 **11.2MB**（达标），
+但窗口里跑的还是 Chromium（WebView2），整机常驻 **约 383MB**，和 Electron 的 **370MB** 基本持平。
+"15MB"这个数在任何 WebView 方案下都拿不到，只有原生自绘才行——而用户明确否掉了自绘
+（"我要线下手动画吗？"）。**这不是执行不到位，是目标本身和所选方案互斥**，
+应该当面说清楚，而不是把 383MB 描述成"接近 15MB"。
+
+### 迁移顺序：先把判据钉死，再动代码
+
+`src/risk.js` 的 16 条用例先在 Rust 里重写一遍 `#[cfg(test)]`，断言两版判据一致；
+`state.js` / `theme.js` 各自有 6 条、`permission.js` 4 条。**先有等价性证明，再删 JS 版**——
+反过来的话，重写过程中"悄悄把判据挪动一格"这种错误，只有在真实 agent 跑歪了之后才会暴露，
+而那时候已经没人记得原判据是什么了。
+
+### 三个 bug，全部是"接口通、画面不动"
+
+这三个的共同点：**没有任何一处报错**。HTTP 200、invoke 返回 ok、控制台干净。
+它们是跑起来对着屏幕看才发现的——这也是为什么这次坚持要有 `verify-tauri.js`。
+
+#### ① `POST /state` 的 `changed` 被 `let _ = changed;` 丢掉了
+
+`Store::apply()` 内部已经调过 `tick()`，而 `tick()` 会**顺手把 `last_visual` 更新成新值**。
+等 250ms 心跳再跑一次 `tick()`，它比的是"新值 vs 新值"，返回 `false`——
+这次变化就**永远不会被推出去**。
+
+症状极具迷惑性：`/state` 回包里 `visual` 是对的、`cast`（1s 定时推）里会话状态也对，
+**只有画面停在旧状态**，直到下一次状态变化才追上来。
+
+Electron 版没这个问题，因为 `state.js` 的 `apply()` 末尾直接 `emit()` → `onChange` 回调。
+Rust 版把"算 change"和"推 change"拆到了两个文件里（`state.rs` 算、`server.rs` 看了却没推），
+拆的时候没人负责那根线。
+
+修法：`server::start` 收一个 `OnChange = Arc<dyn Fn(&Snapshot)>` 回调，
+`main.rs` 把它翻译成 `emit("state", snap)`。
+**不用 `AppHandle` 直接塞进 server**：那一层刻意不认识 tauri，
+塞进去之后 `server.rs` 的每条单测都得先起一个 Tauri 应用。
+
+#### ② 第一条权限请求永远不会弹窗：窗口没建出来
+
+`show_bubble()` 里，`bubble_ready == false` 时把请求塞进 `bubble_pending` 就返回了——
+**但没人建窗**。而 `bubble_ready` 这条握手信号是**页面发出来的**，页面要加载就得先有窗。
+
+死循环：没窗 → 没页面 → 没 ready → 请求一直躺在槽里 → HTTP 那头挂到超时 → 回落 204。
+用户从头到尾**什么都没看见**。整条权限气泡功能在"第一次使用"这个场景下是死的
+（第二次能用，因为第一次超时后窗被建过？不，是根本没建——所以是每次都死）。
+
+Electron 版把"建窗"和"等 did-finish-load 再投"绑在同一个 `createBubbleWindow()` 里，
+拆成 `show_bubble` / `present_bubble` 两个函数之后就漏了。
+
+#### ③ 在命令线程里建窗 → 死锁；`app.exit()` 顺便一起陪葬
+
+`dashboard_toggle` 里直接 `WebviewWindowBuilder::build()`。窗口**建出来了**
+（`/json/list` 里能看到一个 `about:blank`），但**永远不导航**，
+而且这条 invoke 永远不 resolve（5s 后 CDP 那侧超时）。
+
+更坑的是它把 `quit()` 也带坏了：`app.exit(0)` 只是往消息循环投一条消息，
+而消息循环正卡在我们这一帧里——没人去泵它。于是"点退出没反应"。
+
+同一段代码从 **HTTP 线程**调就没事（`show_bubble` → `ensure_bubble` 建气泡窗口是好的），
+因为那时消息循环是空闲的。**所以判据不是"能不能建窗"，是"从哪个线程建"**。
+
+修法：`dashboard_toggle` / `app_quit` 都挪进 `std::thread::spawn`。
+改完之后 `quit` 从"8 秒不退"变成 **201ms 退出**，端点文件也删干净了。
+
+### 桥接层：让容器换掉而渲染层一行不改
+
+`src/tauri-bridge.js` 在 `window` 上装出和 `preload.js` 形状相同的
+`clawd` / `bubble` / `dashboard` 三个对象。`renderer.js` 里那些 `if (window.clawd)`
+的判断本来就是为"浏览器预览模式"留的，现在正好复用：**切换宿主在渲染层看来是透明的**。
+Electron 下这个文件第一行就 `return`（没有 `__TAURI__`），所以三份 HTML 两边共用。
+
+有两处不能照抄：
+
+- **`listen` 是异步的，`ipcRenderer.on` 是同步的。** 三个渲染层都是"先 on、后 ready"的顺序假设。
+  气泡那条最要紧：`onRequest(render)` 之后立刻 `ready()`，而主进程收到 ready 就会把攒着的
+  第一个请求吐出来。所以每条通道在**脚本加载时**就挂上，`ready()` 再显式等一次那条 Promise。
+- **`send` 一定要吞异常。** `ipcRenderer.send` 从不 reject，渲染层因此一行 catch 都没写；
+  Tauri 的 `invoke` 会 reject（命令不存在、参数不符、命令里 `return Err`）。不吞就是刷屏的
+  unhandled rejection。
+
+### 动了 CSP（硬约束 20），理由和代价都写进 meta 注释了
+
+`connect-src` 从 `'none'` 放宽到 `ipc: http://ipc.localhost`。
+这不是"顺手开个口子"：Tauri v2 的 IPC 不是进程内通道，是
+`fetch("ipc://localhost/<cmd>")`，Windows 上落成 `http://ipc.localhost`，
+**属于标准网络请求，会被 `connect-src` 拦**。`tauri-utils/src/config.rs` 的 CSP 注释里
+给的就是这两个值。
+
+只放行这一个假域名，公网依然一个都连不上。写在这里是因为：**下一次有人想再放宽 CSP 时，
+得先看到这次的理由，而不是看到"上次也放宽过"就当成惯例**。
+
+### 回归：两份，判据同源
+
+- `scripts/verify-electron.js` 仍然是 **191 PASS / 0 FAIL**（这次只改了一处：把 CDP 客户端抽成
+  `scripts/cdp.js` 共用）。
+- 新增 `scripts/verify-tauri.js`，**65 PASS / 0 FAIL**。
+
+为什么不复用同一份脚本：Electron 那 191 条里有 12 条打的是**主进程 Node inspector**
+（`BrowserWindow.getAllWindows().length` / `ipcMain.listenerCount()`）。
+Tauri 的主进程是 Rust，这些断言既没有入口也没有意义。硬套只会得到一堆"跳过"，
+而**跳过是不算数的绿**。
+
+三条断言在写的过程中被改掉，值得记一下，因为它们暴露的是"我以为的行为"和"实际的行为"不一致：
+
+- `Stop` → **attention**（不是 idle），2400ms oneshot 后才回 idle。原来那条断言写错了。
+- 猫是**故意重叠**的（用户原话"有重叠"）。断言"不重叠"是在拿自己的臆想当规格。
+- gaze 线程有变化检测（偏差 < 0.02 不发）。断言"1.2 秒内至少 5 条"必挂。
+  该断言的是"至少成功推过一次"——它同时证明 `GetCursorPos`、线程、emit、桥四段全通。
+
+### 顺带学到的一件事
+
+`about:blank` 的 CDP 目标**不代表窗口没建**，它代表"窗口建了、页面还没导航"。
+早期我按"有 target 就算建窗成功"判断，把 ② 和 ③ 混成了一件事。
+分开它们靠的是直接读那个 target 的 `location.href` 和 `typeof window.__TAURI__`。
+
+### 入库前：4.0 GB 的 `target/` 差点跟着进去
+
+跑台账巡检脚本时它报了 7000 多个没登记的文件，全是 `src-tauri/target/**` 下的 `.d` / `.pdb` /
+`.dll.exp`。查了一下：**4.0 GB，7588 个文件**——`git add src-tauri` 会把这些当成新文件一起暂存。
+当时 `.gitignore` 里没有它（这个仓库此前没有 Rust 代码），巡检脚本的 `SKIP_DIRS` 也没有 `target`。
+
+两处都补了：`.gitignore` 加 `src-tauri/target/` 和 `src-tauri/gen/`（后者是 Tauri 每次构建
+重写的 ACL schema 快照）。补完再 `git add -A src-tauri`，暂存列表是 15 个文件，正好是源码 +
+配置 + 三个图标 + `Cargo.lock`。
+
+**教训**：换一套工具链之后，`.gitignore` 和"哪些目录不算源码"这两个老约定会静默失效——
+它们不报错，只是让 `git add` 变得很危险。巡检脚本恰好是能发现这件事的东西，前提是有人跑它。
+
+---
+
 ## 2026-10-30 · 信箱整套删掉：它解决的是一个不存在的问题
 
 上午刚给信箱加了「报告问题…」入口，下午整套砍了。触发是用户一句判断：

@@ -2,8 +2,13 @@
 
 > 按阶段记录。每完成一个阶段，就对照「阶段检查项」过一遍，把新发现补进对应小节。
 > 审计基准：`src/` 下 15 个文件全量通读 + `npm audit`，日期 2026-10-26（2026-10-30 复查，文件数按 `FILE_MAP.md` 同步）。
+> **2026-11-02 追加**：`src-tauri/` 下 7 个 `.rs`（3318 行）全量通读 + Tauri capabilities 逐条核对，
+> 见「S10-5 容器换成 Rust」小节。`cargo audit` **未跑**（本机没装），记在这里免得下次误以为跑过。
 > 严重度：**P0 阻断发布 / P1 上线前必修 / P2 应当修 / P3 记录在案**。
-> **当前状态（2026-10-26 修复轮）**：SEC-01/02/03/04/06/09/10 已修复；SEC-05 已加固；SEC-07 部分修复；SEC-08 未修（需 major 升级，待决定）。逐条证据见下方「修复记录」。
+> **当前状态**：SEC-01/02/03/04/06/09/10 已修复；SEC-05 已加固；SEC-07 部分修复；SEC-08 未修（需 major 升级，待决定）。逐条证据见下方「修复记录」。
+> **S10-5 的结论**：换容器**没有降低**这些修复的效果（四道锁、CSP、白名单、SEC-09 分层全部保留），
+> 但**多了一处让渡**（`withGlobalTauri` 把通用 invoke 通道放到 `window` 上）和**两处差异**
+> （无 `res.on("close")`、无单实例锁），逐条记在 S10-5 小节。
 
 ---
 
@@ -589,6 +594,104 @@ svg.querySelector(".m-" + rule.part)
 
 因此回归里除了"淡出过程中它还在场上"，还加了"1.9 秒后它真的从 DOM 里消失"。
 这两条合起来才叫"慢慢消失"：既要慢，也要最终走干净。
+
+---
+
+## S10-5 容器换成 Rust（Tauri）：安全基线有没有被换掉（2026-11-02，回归 65/65）
+
+换容器不做安全核对是不行的：**Electron 的 `contextIsolation` 和 Tauri 的 capabilities
+是两套完全不同的边界模型**，把代码从 A 搬到 B，"没有新增漏洞"不能靠默认成立。
+
+### 一、结论先说：三处没有变、一处变松了、两处有已知差异
+
+| | Electron 版 | Tauri 版 | 判定 |
+|---|---|---|---|
+| 渲染层能做哪些动作 | `preload.js` 显式开 12 个 | `tauri-bridge.js` 开同样 12 个 | **没变** |
+| 渲染层能不能调"任意"后端能力 | **不能**：`contextIsolation` 下连 `ipcRenderer` 都摸不到 | **能**：`withGlobalTauri` 把 `window.__TAURI__.core.invoke` 直接放在窗口上 | **变松了**，见第二节 |
+| 主题 SVG 的执行面 | `svgNode()` 白名单 + CSP `script-src 'self'` | 同一份 `renderer.js` + 同一份 CSP | **没变** |
+| 本地 HTTP 的四道锁 | Host / Origin / Token / Content-Type | 逐条照搬，含定长时间比较 | **没变**（回归里 5 条断言逐条验） |
+| 对端掐断（`/permission` 挂起中浏览器关掉） | `res.on("close")` → 立刻 204 | **没有等价物**，只能等超时兜底（结论仍是 204） | 有差异，可接受 |
+| 单实例锁 | `requestSingleInstanceLock()` | **没有做**，开第二份会抢 23333 → 回退随机端口 + 告警 | 有差异，见第四节 |
+
+### 二、`withGlobalTauri` 是一处真实的安全性让渡，必须写下来
+
+Electron 那边花了三个阶段守住的一条：**渲染层拿不到通用调用口**，只能调 preload 里
+显式列出的 12 个具体动作（回归有两条断言钉着：`typeof require === "undefined"`、
+`window.clawd` 上没有 `ipcRenderer`）。
+
+Tauri 这边 `withGlobalTauri: true` 直接把 `window.__TAURI__.core.invoke` 放在窗口上——
+**任何一段能在页面里执行的 JS，都能调用 16 条命令里的任意一条**，参数自己编。
+这不是"等价"，这是把边界从"白名单动作"退回到"白名单之外还有一条通用通道"。
+
+为什么仍然接受：
+
+1. `script-src 'self'` 决定页面里**只能跑我们自己的脚本**，注入面已经被 CSP 收到最窄；
+   主题 SVG 走 `svgNode()` 的标签白名单，`on*` 属性、非本地 `href`、`javascript:` 全被剥掉。
+2. **16 条命令每一条都不信任自己的参数**（这是原本就有的设计，不是为 Tauri 补的）：
+   `dashboard_copy_path` 只按 id 在 Map 里精确取、取不到返回 false（拼一个 id 骗不出别人的路径）；
+   `permission_decide` 只认 `allow`/`deny`/其余一律 no-decision；`theme_set` 只认 `readdir`
+   出来的真实目录名。所以"能调任意命令"实际能撬到的东西，不比那 12 个动作多。
+3. 桥本身**没有**再暴露一层（回归有一条断言：`window.clawd.core === undefined && window.clawd.event === undefined`）——
+   我们至少没有主动把它包装成"更好用的通用口"。
+
+**该记的待办**：关掉 `withGlobalTauri`，改成打包进页面的 API 子集（或手写 `__TAURI_INTERNALS__` 调用），
+让 `invoke` 不再挂在 `window` 上。这件事没做，是因为它会把 `tauri-bridge.js` 从"零依赖"
+变成"要过一遍打包"，而当前的收益（挡住一个需要先突破 CSP 才能利用的通道）不划算。
+**记在这里是为了下次有人问"为什么 window 上有 invoke"时有个答案，而不是一句"Tauri 就这样"。**
+
+### 三、CSP 动了，这是硬约束 20 的一次显式例外
+
+三份 HTML 的 `connect-src` 从 `'none'` 放宽到 `ipc: http://ipc.localhost`。
+理由、出处、代价都写在 `src/index.html` 的 meta 注释里（Tauri v2 的 IPC 是
+`fetch("ipc://localhost/<cmd>")`，Windows 上落成 `http://ipc.localhost`，属于标准网络请求）。
+
+边界核对：
+
+- 只加了一个**假域名 + 一个自定义 scheme**，公网依然一个都连不上（`default-src 'none'` 仍在）。
+- `script-src` / `img-src` / `object-src` / `base-uri` / `form-action` **一个都没动**。
+- 回归里有一条断言专门盯这件事的实现效果：**"主题经 IPC 拉回来了"**——
+  它同时是"CSP 放行对了"和"放行得刚好够用"的证明（多了没用，少了主题拉不回来、画面是空的）。
+
+### 四、两处已知差异（不是漏洞，但会影响安全假设）
+
+1. **没有单实例锁。** Electron 版靠 `requestSingleInstanceLock()` 保证"系统里只有一只猫"。
+   Tauri 版没做等价物，所以开第二份时：23333 被占 → 回退随机端口 → **打印告警**。
+   影响是"桌面上出现两只猫、hook 仍然打给第一只（端口没变）"，
+   不是安全漏洞，但**告警必须留着**——端口静默漂移会让已装的 HTTP hook 指向死端口，
+   而那种故障的现象是"桌宠什么都不显示"，最难归因。
+2. **锁屏检测从事件变成轮询**（2s 一次 `OpenInputDesktop`）。
+   Electron 有 `powerMonitor` 事件；Tauri 没有等价物。轮询在锁屏后照常在跑（很便宜，但确实在跑），
+   而它决定的是"锁屏时要不要把窗口藏起来"——**藏起来的目的是不让桌宠出现在锁屏截图/共享屏幕上**，
+   所以这条延迟最多 2 秒，可以接受；但如果哪天要做"锁屏立即隐藏"，就得换成 `WTSRegisterSessionNotification`。
+
+### 五、`set_clipboard_text` 自己写 Win32，SEC-09 的分层要重新核一遍
+
+`dashboard:copy-path` 原来走 `clipboard.writeText()`，现在走
+`GlobalAlloc` + `SetClipboardData(CF_UNICODETEXT)`（`sys.rs`）。SEC-09 的约束是
+**完整路径只能由主进程在用户显式点击时、单条塞进剪贴板**，换实现之后逐条对：
+
+- 仍然只由 `dashboard_copy_path(id)` 触发，`id` 先过 Map 精确查找，取不到直接 `false`；
+- 仍然是**单条**（没有"复制全部"的入口）；
+- 仍然不进快照（回归断言：看板拿到的快照里没有 `[A-Za-z]:\\Users\\`）；
+- 新增的一点：手写剪贴板要自己管内存，`GlobalAlloc` 失败时返回 `false` 而不是 panic
+  （`panic = "abort"` 下 panic 等于整个进程消失）。
+
+### 六、新增的攻击面清单（都是"我们自己的进程"，但值得列全）
+
+| 面 | 谁能碰 | 边界 |
+|---|---|---|
+| 16 条 `#[tauri::command]` | 三个窗口的页面脚本 | 参数各自校验；没有一条信任入参 |
+| Tauri capabilities | 同上 | 只有 `core:default` + 四个窗口能力。**刻意不给 fs / shell / http** |
+| `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` | 环境变量 | 回归用它开 `--remote-debugging-port`。**正常启动不设**。但如果用户环境里已经有这个变量，会被继承——这一点 Electron 版（`--remote-debugging-port` 走命令行参数）反而更干净 |
+| 端点文件 `{port, token}` | 同机任意进程（0600） | 与 Electron 版同一路径、同一格式、同一权限位。**Rust 侧没在 Windows 上设 ACL**（`#[cfg(unix)]` 那段不生效）——和 `port-file.js` 在 Windows 上的现状一致，属既有问题，不是这次引入的 |
+| 托盘图标 `include_bytes!` | 编译期嵌进二进制 | 运行时不读外部文件，无加载面 |
+
+### 七、检查清单增补
+
+- [ ] 若换过容器：渲染层"能调什么"是否与旧容器**逐条对齐**（多一个少一个都要有理由）
+- [ ] 若用了 `withGlobalTauri`：是否在台账里写清了这是让渡、以及为什么可以接受
+- [ ] 若改了 CSP：是**加了一个具体值**还是放宽了一整类；理由有没有写在 meta 里
+- [ ] 新容器的"收尾"是否等价：挂起的权限请求会不会悬空、端点文件会不会残留
 
 ---
 

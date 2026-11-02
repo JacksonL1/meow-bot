@@ -8,7 +8,8 @@ const path = require("node:path");
 
 const ROOT = path.resolve(__dirname, "../../..");
 const MAP_FILE = path.join(ROOT, "docs/ledger/FILE_MAP.md");
-const SKIP_DIRS = new Set(["node_modules", ".git", ".idea", "dist", "docs"]);
+// target/ 是 cargo 的构建产物（本机 4.0 GB），和 node_modules 同级待遇：不入台账、不入库。
+const SKIP_DIRS = new Set(["node_modules", ".git", ".idea", "dist", "docs", "target"]);
 const SKIP_FILES = new Set([".DS_Store", "Thumbs.db"]);
 
 function walk(dir, acc = []) {

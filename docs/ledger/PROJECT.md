@@ -1,19 +1,19 @@
 # clawd-starter
 
-> 从零重搭 Clawd 桌宠的骨架：用 Electron 做一个透明置顶、会跟着鼠标看你的桌面宠物，先把「agent 事件 → 状态机 → 画面」这条数据链路跑通，之后每个阶段都往这条链路上加东西，而不是推倒重来。
+> 从零重搭 Clawd 桌宠的骨架：做一个透明置顶、会跟着鼠标看你的桌面宠物（2026-11-02 起容器有 Electron 和 Tauri 两套），先把「agent 事件 → 状态机 → 画面」这条数据链路跑通，之后每个阶段都往这条链路上加东西，而不是推倒重来。
 
 | 项 | 内容 |
 |---|---|
-| 状态 | ACTIVE（S1–S9 完成） |
+| 状态 | ACTIVE（S1–S10 完成；S10-5 容器换成 Rust） |
 | 路径 | `E:\JacksonLee\project\clawd-starter` |
-| 技术栈 | Electron 45.0.0（`nodeIntegration: false` + `contextIsolation: true` + `sandbox: true`）、Node 原生 `http` + `fs`、渲染层纯手写 SVG 无框架、无构建工具 |
-| 入口 | `src/main.js`（主进程） |
-| 启动 | `npm install` → `npm start`（即 `electron .`） |
+| 技术栈 | **两套容器，同一套渲染层**：① Electron 45.0.0（`nodeIntegration: false` + `contextIsolation: true` + `sandbox: true`）+ Node 原生 `http`/`fs`；② Tauri 2.12.5 + WebView2（Rust `tiny_http` + `regex` + `windows-sys`，**不用任何 `tauri-plugin-*`**）。渲染层纯手写 SVG 无框架、无构建工具 |
+| 入口 | Electron：`src/main.js`；Tauri：`src-tauri/src/main.rs` |
+| 启动 | `npm install` → `npm start`（`electron .`）；或 `npm run start:tauri`（`cargo run --release`） |
 | 端口 | **固定 23333**（与主仓库一致），只绑 `127.0.0.1`。为什么不能随机：权限 HTTP hook 的 url 是安装时写死进 `settings.json` 的，端口漂移就等于 hook 指向死端口。被占用时退回随机端口并显式 warn，但必须重跑 `install:hooks` |
 | 端点文件 | `%APPDATA%\clawd-starter\clawd-starter.port`，内容 `{port, token}`，权限 0600 |
 | 依赖服务 | 无。不连任何外部服务，只在本机开一个 HTTP 端口接收事件 |
-| 版本控制 | git，**5 次提交**（截至 `修改一下形象，添加会话看板窗口`）。**S7 主题系统 + 这批台账改动尚未提交** |
-| 体积 | **21 个源文件，7185 行**（`src/` 15 个 4132 = 12 js 3635 + 3 html 497、`hooks/` 2 个 528、`scripts/` 4 个 2557），另有 `themes/` 下 22 个 SVG 资产（ragdoll 21 / _template 1；crab 的 19 个与两个一次性脚本已删）。**2026-10-30 15:20 实测**。这条被改了五次才对，五次里四次不是代码变了、是**数法**变了：先是「25 个 / 7625 行」（凭印象），再「21 个 / 7248 行」（漏算 html），再「23 个 / 7967 行」（html 只数了 `index`/`letter`），再「25 个 / 8309 行」（补回 `bubble`/`dashboard`）。**第六次（21 / 6919）才是代码真的变了**：信箱整套删掉 4 个文件 1390 行。写体积时必须**连文件数、口径、实测时间一起写**，只写总数没法被复查 |
+| 版本控制 | git，**18 次提交**（远端 `github.com/JacksonL1/meow-bot`，分支 `main`）。S7 之后 12 次全部入库，最后两次是 S10-5：`081921f 容器换成 Rust：迁到 Tauri`（代码）+ 一次台账。**这条以前写的是"5 次提交、S7 尚未提交"，从 S7 到 S10-5 期间一直没更新**——台账里凡是带计数的字段都是这样烂掉的，改代码时顺手看一眼 |
+| 体积 | **37 个源文件，12756 行**（`src/` 17 个 = 14 js 4555 + 3 html 621、`src-tauri/` 11 个 = 7 rs 3318 + `build.rs` 3 + 2 json 34、`hooks/` 2 个 645、`scripts/` 7 个 3580；`Cargo.lock` 4445 行是生成物不计），另有 `themes/` 下 22 个 SVG 资产。**2026-11-02 10:30 实测**。这条被改了七次，七次里六次不是代码变了、是**数法**变了（漏 html、漏 `src-tauri`、把 JSON 不算源文件、生成物混进来）。写体积时必须**连文件数、口径、实测时间一起写**，只写总数没法被复查 |
 
 ## 它解决什么问题
 
@@ -40,6 +40,8 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 | S7 | 主题系统：`themes/<id>/theme.json` + `assets/*.svg`，**删掉写死的 `visuals.js`** | 已完成 | 白名单先于加载器；放行 3 个标签 + 9 个图元，拒 5 类；校验分主进程（文件/格式）与渲染层（内容）两段 |
 | S8 | ~~跟桌宠说话：双击写信 → 落磁盘信箱 → 下次 `UserPromptSubmit` 由 hook 写进 `additionalContext`~~ **2026-10-30 整套删除**（它解决的是一个不存在的问题：想让 agent 知道什么，直接在对话里说是一跳直达，经桌宠转交是三跳还多一个丢信环节）。**这一阶段留下的东西只有右键菜单**（看板 / 退出）和双击手势，两者现在都开关看板 | 已删除 | 删它时踩的反面教材已记进硬约束 1：功能下线要**连校验层和文档一起删**。当时误删了 `IGNORED_NOTIFICATION_TYPES` 常量而使用还在，`ReferenceError` 被 `catch(() => {})` 吞掉 → 所有 Notification 静默发不出、零报错 |
 | S9 | 鼠标叫醒：停在睡着的猫身上 → `pet:hover` → `store.wake()`（只认 sleeping），眼睛与 zZz 走同一条 `eyeOpen` 弹簧慢慢淡过来 | 已完成 | SEC-13（P3 记录在案）：第一条渲染层请求改状态的通道，无载荷；边界是**渲染层只能请求，改状态永远是主进程的事** |
+| S10 | 三条需求一次做完：① **分身 + 头巾**——≥2 条会话时同窗口横排多只猫（有重叠、点击切聚焦、久不接任务淡出 1600ms），每只猫的头巾上写 hook 侧抽出来的一个词；② **命令风险评级**——气泡里显示「风险 低/中/高/极高」+ 人能读懂的理由（`rm -rf /`、密钥读写、管道执行、多行 shell）；③ 资源瘦身的**前半段**：判据与迁移方案定案（Tauri，保住前端资产） | 已完成 | S10 四条新风险逐条挡法见 SECURITY.md；硬规则：**评级只影响显示，critical 也不自动 deny，超时仍 204** |
+| S10-5 | **容器换成 Rust**：Tauri 2.12.5 + WebView2。后端（HTTP / 状态机 / 主题 / 裁决 / 风险评级）用 Rust 重写，三个窗口与托盘改 `WebviewWindow` / `TrayIconBuilder`，Win32 四件事自己写（`sys.rs`）。渲染层靠 `src/tauri-bridge.js` **一行没改**。新增 `scripts/verify-tauri.js`（65 条），Electron 那份仍 191 条 | 已完成 | 三处没变（动作面 / SVG 白名单 / 四道锁）、**一处变松**（`withGlobalTauri` 把 `core.invoke` 放到 `window` 上，已记录为让渡）、两处已知差异（无 `res.on(close)`、无单实例锁） |
 
 安全问题全部记录在 [SECURITY.md](./SECURITY.md)，每阶段开工前先看对应小节。
 
@@ -57,7 +59,10 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 | 主题 | 扫目录、校验 schema 与资产、校验 `motion`/`gags` 规则、缺状态补齐、全坏兜底（主进程）；换主题 = 换帧数据 + 重画 | `src/theme.js` + `themes/<id>/theme.json` |
 | 进程间桥 | 只暴露具体动作，不泄漏 `ipcRenderer` | `src/preload.js`（主窗口 13 个）+ `src/dashboard-preload.js`（看板 5 个）|
 | 调试 | 假数据源，三种用法（完整剧本 / 单事件 / 保持某状态）；形象对照截图；主题打包 | `scripts/fake-feed.js`、`preview-shot.js`、`build-preview-bundle.js` |
-| 回归闸门 | 主进程 inspector + 渲染进程 CDP，**195 条断言；当前 195 PASS / 0 FAIL**（剪贴板那条环境不可读时 `[warn]` 降级）；两条渲染路径用同一批断言、`rigMode` 分叉判据 | `scripts/verify-electron.js` |
+| 回归闸门 | 主进程 inspector + 渲染进程 CDP，**191 条断言；当前 191 PASS / 0 FAIL**（剪贴板那条环境不可读时 `[warn]` 降级）；两条渲染路径用同一批断言、`rigMode` 分叉判据 | `scripts/verify-electron.js` |
+| 容器（Rust 侧） | 与上面每一行同构的 Rust 实现：HTTP（`server.rs`）、状态机（`state.rs`）、主题（`theme.rs`）、裁决（`permission.rs`）、风险评级（`risk.rs`）、窗口与线程（`main.rs`）、Win32（`sys.rs`） | `src-tauri/src/*.rs` |
+| Tauri 桥 | 在 `window` 上装出与 `preload.js` 形状相同的 `clawd` / `bubble` / `dashboard` | `src/tauri-bridge.js` |
+| 回归闸门（Tauri） | WebView2 CDP（`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=`），**65 条断言；当前 65 PASS / 0 FAIL** | `scripts/verify-tauri.js` + 共用的 `scripts/cdp.js` |
 
 ## 已知限制
 
@@ -68,6 +73,11 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 - 看板 1s 轮询，不是推送——`idleMs` 天然随时间变，这是故意的取舍
 - 权限请求只存内存，没有决策历史与审计日志
 - 气泡只支持鼠标点 + Esc，没有键盘 Tab/Enter；看板也没有键盘导航，也没有远程审批
+- **常驻内存压不到 15MB，而且不可能压到**。实测（2026-11-02，Windows，release 构建）：Electron 45 4 个进程 RSS 370.1MB / 私有 221.2MB；Tauri 1 个 Rust 进程 **34.3MB / 私有 11.2MB** + WebView2 6 个子进程 349.1MB / 私有 202.4MB = 整机 **383.4MB / 私有 213.6MB**。**Rust 宿主自己达标，整机不达标**——窗口里跑的还是 Chromium。要到 15MB 只有原生自绘（GDI/Direct2D 手画每一帧）一条路
+- **Tauri 版没有单实例锁**：开第二份会抢 23333 → 回退随机端口 + 告警。桌面上会出现两只猫，hook 仍然打给第一份（端口没变）
+- **改前端也要 `cargo build`**：`frontendDist` 是编译期嵌进二进制的，不是 Electron 那种即改即看。改一版形象要等一次链接
+- **锁屏检测是 2s 轮询**（`OpenInputDesktop`），不是事件。锁屏后最多 2 秒才藏窗口
+- **`bundle.active: false`**：只产出裸 exe，没有安装包。要分发得配 WiX/NSIS
 - **不能和主仓库 `clawd-on-desk` 同时运行**：都用 23333，且 hook URL 是安装时写死的
 - 命中判定用 `#pet` 的 176×176 包围盒，不是真实 alpha 遮罩——四个角上的透明区会误判为「可点击」
 - 看板的「复制路径」在回归里验的是返回值 + 剪贴板内容（实测能拿到完整路径）；但**环境不具备时**（某些会话读不到剪贴板）会降级成一条警告，不做假断言
@@ -83,7 +93,7 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 
 ## 硬约束（改代码前先看）
 
-1. **`preload.js` / `bubble-preload.js` / `dashboard-preload.js` 只暴露动作，不暴露 `ipcRenderer`**——这是 Electron 的安全边界，加功能时最容易顺手破坏。主窗口的动作数被回归钉死（现在 **11** 个），多一个少一个都会红。
+1. **`preload.js` / `bubble-preload.js` / `dashboard-preload.js` 只暴露动作，不暴露 `ipcRenderer`**——这是 Electron 的安全边界，加功能时最容易顺手破坏。主窗口的动作数被回归钉死（现在 **12** 个），多一个少一个都会红。
 2. **状态名必须存在于 `VISUAL_STATES`**，渲染层靠白名单挡住任意字符串进 DOM。
 3. **`transparent: true` 必须同时给 `backgroundColor: '#00000000'` 和 `hasShadow: false`**，缺一个就露底色。
 4. 环境里若有 `ELECTRON_RUN_AS_NODE=1`，`electron .` 会退化成纯 Node，表现为 `require('electron')` 返回字符串。启动前 `env -u ELECTRON_RUN_AS_NODE npm start`。
@@ -102,7 +112,7 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 17. **彩蛋演完必须"恢复原值"而不是"一律隐藏"**。彩蛋的部件有两种来源：天生藏着的（鱼、拖鞋，写死 `display="none"`）和本来就露着的（`pupils`，被拉进彩蛋只是为了"跟着看一眼"）。一律 `display:none` 会把猫的瞳孔一起抹掉。`restoreGagParts()` 里存的是**开演前的属性快照**，别简化成常量。
 18. **一个部件同一时刻只能被一个 `transform` 源控制**。`motion` 每帧都在写，所以彩蛋**不要去动 `motion` 已经占用的部件**（比如 `head`）；同一个部件要同时位移和缩放，就在 SVG 里**再套一层 `<g class="m-xxx">`**，外层管位移、内层管缩放。写在同一层会互相覆盖，表现为"只有一个生效"，且不会报错。
 19. **`src/` 下 `innerHTML` 的出现次数必须是 0**（回归里已有一条机械检查在查这条，2026-10-28 补）。主题内容只能走 `svgNode()`（`DOMParser` + `ALLOWED_TAGS`）。这条是可机械检查的，别靠"我记得用清洗函数"——上一版重写把整个非骨骼路径改回了 `innerHTML = frames.join("")`，白名单函数还在文件里但已不在任何路径上（见 SECURITY「两道闸是怎么被无声拆掉的」）。
-20. **`index.html` 必须带 CSP meta**。删它要单独一次提交并在 SECURITY 留记录。它平时看起来是"一行没用的配置"——因为它挡的东西今天一个都不在；它挡的是明天漏过白名单的那一个。
+20. **`index.html` 必须带 CSP meta**。删它要单独一次提交并在 SECURITY 留记录。**放宽同理**——S10-5 把 `connect-src` 从 `'none'` 改到 `ipc: http://ipc.localhost`（Tauri 的 IPC 是 fetch），理由写在 meta 注释里。判据是「加了一个具体值，还是放宽了一整类」：前者可以在注释里说清，后者一律不许。它平时看起来是"一行没用的配置"——因为它挡的东西今天一个都不在；它挡的是明天漏过白名单的那一个。
 21. **架构重写后必须比对回归通过数**。任何一项掉红都要能说出原因；"测试过时了，先放着"是这次 49 条断言集体失效时的第一反应，也是差点把三道防线一起放过去的反应。
 22. **主题自报 `rigType`，不要靠 id / name 嗅探渲染器**。`id === "ragdoll"` 的兜底意味着任何叫 ragdoll 的主题都会掉进"画死在 JS 里的那只猫"。加载器透传 `rigType`，未知字段可忽略，但**渲染分支的选择必须来自主题声明**。
 23. **每个 `petDebug` 出口都要有一条断言证明它自己有货**。`ragdollRig.springs` vs 实际的 `this.sp` 只差一个名字，结果是 `return {}`——不报错、不崩溃、调用方看不出来。观测窗口没有自检，它就只是装饰（见 SECURITY「骨骼弹簧重写」第四节）。
@@ -114,3 +124,8 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 29. **没有回执的协议里，"多一条路"不是冗余是风险**。hook 是 fire-and-forget（写完 stdout 就 `exit(0)`，宿主从不回执），所以"投递成功"根本没有确认手段。加第二个投递口（`SessionStart`）的结果是启用一天吃掉一封信——`take()` 一 rename 信就消失，而它是否真进了对面上下文永远没人知道。**先问：这条路失败了，我看得见吗？**
 30. **状态的主权在主进程，渲染层只能"请求"**。渲染层擅自 `renderState()` 会被下一个 250ms 的推送顶回去，表现是"闪一下又变回来"——S8 想用改状态来提示"信寄出了"时踩过，S9 想用它来"唤醒"时差点再踩一次。两个正当出口：改文案（`#hint` 提示条，归渲染层自己管），或发一条**无载荷**的 IPC 请主进程改（`pet:hover` → `store.wake()`）。同一条也约束主进程侧：`wake()` 只认 `sleeping`，**不许顺手把 working 也"唤醒"**——那是用户鼠标改写 agent 的真实进展。
 31. **删部件/换部件，要连"读它的探针"一起改**。外观改动看起来只动 SVG，但回归里有断言在读具体部件（"每帧都在重算"读的是 `rig-body-group` / 胡须 / 尾巴的 transform）。删掉 `#rig-ruff` 而不改探针，报告不会红——它会变成读 `missing:rig-ruff`，字符串照旧在变，于是**一条永远为真的断言换掉了一条真的**。这是硬约束 25 的姊妹条：那个讲"留着的校验器"，这个讲"留着的探针"。
+32. **窗口不能在 `#[tauri::command]` 里建**（同步 command 跑在主线程上，建窗会卡死在 WebView2 的创建回调；`app.exit()` 同理，消息循环正卡在那一帧里没人泵）。要建窗、要退出，先进 `std::thread::spawn`。判据不是「能不能建窗」，是**从哪个线程建**——同一段代码从 HTTP 线程调就是好的。
+33. **「先存起来等握手」之前，必须先把窗体出来**。`bubble.html` 要先加载才会发 `bubble_ready`，窗口不建出来这个信号永远不会到，请求就一直躺在槽里挂到超时——而界面上什么都不发生。这条的隐蔽性在于：**第二次请求也不会好**，它不是竞态，是死锁。
+34. **「算 change」和「推 change」之间要有一根显式的线**。`apply()` 内部调了 `tick()`，`tick()` 顺手更新了 `last_visual`；心跳再 tick 时比的是「新值 vs 新值」→ 返回 false → 这次变化永远推不出去。Rust 侧把这两件事分到了两个文件（`state.rs` 算、`server.rs` 推），拆的时候没人负责那根线。跨文件拆分状态机时，**先确认「谁负责通知」有名字**。
+35. **两套容器的「渲染层能做什么」必须逐条对齐**。Electron 的 `preload.js` 和 Tauri 的 `tauri-bridge.js` 是同一份契约的两个实现，动作名、参数、返回值都得一一对应（回归里两边的键名清单是硬写的）。换容器时最容易漏的不是功能，是**边界**：`withGlobalTauri` 顺手就把 `core.invoke` 放到了 `window` 上，那不叫「等价迁移」。
+36. **先确认目标能不能被方案满足，再动手**。用户的原始目标是「常驻 15MB 以内」，而 Tauri 在 Windows 上仍然是 WebView2（Chromium）。实测：Rust 宿主私有内存 **11.2MB**（达标），WebView2 子进程 **202.4MB**，整机 **383MB**——和 Electron 的 **370MB** 基本持平。**这不是执行不到位，是目标与方案互斥**。遇到这种要先说清楚，不要把 383MB 描述成「接近 15MB」。
