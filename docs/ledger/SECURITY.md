@@ -2,14 +2,15 @@
 
 > 按阶段记录。每完成一个阶段，就对照「阶段检查项」过一遍，把新发现补进对应小节。
 > 审计基准：`src/` 下 15 个文件全量通读 + `npm audit`，日期 2026-10-26（2026-10-30 复查，文件数按 `FILE_MAP.md` 同步）。
-> **2026-11-02 追加**：`src-tauri/` 下 7 个 `.rs`（3318 行）全量通读 + Tauri capabilities 逐条核对，
+> **2026-11-02 追加**：`src-tauri/` 下 8 个 `.rs`（3507 行）全量通读 + Tauri capabilities 逐条核对，
 > 见「S10-5 容器换成 Rust」小节。`cargo audit` **未跑**（本机没装），记在这里免得下次误以为跑过。
 > 严重度：**P0 阻断发布 / P1 上线前必修 / P2 应当修 / P3 记录在案**。
 > **当前状态**：SEC-01/02/03/04/06/09/10 已修复；SEC-05 已加固；SEC-07 部分修复；SEC-08 未修（需 major 升级，待决定）。逐条证据见下方「修复记录」。
 > **S10-5 的结论**：换容器**没有降低**这些修复的效果（四道锁、CSP、白名单、SEC-09 分层全部保留），
 > 但**多了一处让渡**（`withGlobalTauri` 把通用 invoke 通道放到 `window` 上）和**两处差异**
 > （无 `res.on("close")`、无单实例锁），逐条记在 S10-5 小节。
-> **S10-6（收尾）进展**：单实例锁已补（`single.rs`），让渡待关，`res.on("close")` 无等价物保持。
+> **S10-6（收尾）进展**：单实例锁已补（`single.rs`）；`withGlobalTauri` 已关、每窗口命令白名单已加
+> （但 `__TAURI_INTERNALS__.invoke` 摘不掉，边界在 Rust 侧）；`res.on("close")` 无等价物保持。
 
 ---
 
@@ -608,39 +609,82 @@ svg.querySelector(".m-" + rule.part)
 | | Electron 版 | Tauri 版 | 判定 |
 |---|---|---|---|
 | 渲染层能做哪些动作 | `preload.js` 显式开 12 个 | `tauri-bridge.js` 开同样 12 个 | **没变** |
-| 渲染层能不能调"任意"后端能力 | **不能**：`contextIsolation` 下连 `ipcRenderer` 都摸不到 | **能**：`withGlobalTauri` 把 `window.__TAURI__.core.invoke` 直接放在窗口上 | **变松了**，见第二节 |
+| 渲染层能不能调"任意"后端能力 | **不能**：`contextIsolation` 下连 `ipcRenderer` 都摸不到 | **仍能**，但只剩一个不可配置的内部对象：`withGlobalTauri` 已关（`__TAURI__` 没了），`window.__TAURI_INTERNALS__.invoke` 摘不掉 | **有差异，已加硬边界**：每窗口命令白名单在 Rust 侧，见第二节 |
 | 主题 SVG 的执行面 | `svgNode()` 白名单 + CSP `script-src 'self'` | 同一份 `renderer.js` + 同一份 CSP | **没变** |
 | 本地 HTTP 的四道锁 | Host / Origin / Token / Content-Type | 逐条照搬，含定长时间比较 | **没变**（回归里 5 条断言逐条验） |
 | 对端掐断（`/permission` 挂起中浏览器关掉） | `res.on("close")` → 立刻 204 | **没有等价物**，只能等超时兜底（结论仍是 204） | 有差异，可接受 |
 | 单实例锁 | `requestSingleInstanceLock()` | `single.rs` 的命名互斥量 + 命名事件（**S10-6 补的**） | **已补齐**，见第四节 |
 
-### 二、`withGlobalTauri` 是一处真实的安全性让渡，必须写下来
+### 二、通用调用口：关掉了便利 API，但**真正的边界不在 JS 那边**
 
 Electron 那边花了三个阶段守住的一条：**渲染层拿不到通用调用口**，只能调 preload 里
 显式列出的 12 个具体动作（回归有两条断言钉着：`typeof require === "undefined"`、
 `window.clawd` 上没有 `ipcRenderer`）。
 
-Tauri 这边 `withGlobalTauri: true` 直接把 `window.__TAURI__.core.invoke` 放在窗口上——
+Tauri 这边 `withGlobalTauri: true` 时，`window.__TAURI__.core.invoke` 直接放在窗口上——
 **任何一段能在页面里执行的 JS，都能调用 16 条命令里的任意一条**，参数自己编。
-这不是"等价"，这是把边界从"白名单动作"退回到"白名单之外还有一条通用通道"。
 
-为什么仍然接受：
+#### 已经做的：关掉 `withGlobalTauri`（S10-6②）
 
-1. `script-src 'self'` 决定页面里**只能跑我们自己的脚本**，注入面已经被 CSP 收到最窄；
-   主题 SVG 走 `svgNode()` 的标签白名单，`on*` 属性、非本地 `href`、`javascript:` 全被剥掉。
-2. **16 条命令每一条都不信任自己的参数**（这是原本就有的设计，不是为 Tauri 补的）：
-   `dashboard_copy_path` 只按 id 在 Map 里精确取、取不到返回 false（拼一个 id 骗不出别人的路径）；
-   `permission_decide` 只认 `allow`/`deny`/其余一律 no-decision；`theme_set` 只认 `readdir`
-   出来的真实目录名。所以"能调任意命令"实际能撬到的东西，不比那 12 个动作多。
-3. 桥本身**没有**再暴露一层（回归有一条断言：`window.clawd.core === undefined && window.clawd.event === undefined`）——
-   我们至少没有主动把它包装成"更好用的通用口"。
+`tauri.conf.json` 改成 `false` 之后 `window.__TAURI__` 整个消失（回归断言钉着），
+`src/tauri-bridge.js` 改成自己拼 `invoke` / `listen`——一共 8 行：
 
-**该记的待办**：关掉 `withGlobalTauri`，改成打包进页面的 API 子集（或手写 `__TAURI_INTERNALS__` 调用），
-让 `invoke` 不再挂在 `window` 上。这件事没做，是因为它会把 `tauri-bridge.js` 从"零依赖"
-变成"要过一遍打包"，而当前的收益（挡住一个需要先突破 CSP 才能利用的通道）不划算。
-**记在这里是为了下次有人问"为什么 window 上有 invoke"时有个答案，而不是一句"Tauri 就这样"。**
+```js
+const I = window.__TAURI_INTERNALS__;
+const invoke = I.invoke.bind(I);
+function listen(name, cb) {
+  return invoke("plugin:event|listen", {
+    event: name,
+    target: { kind: "Any" },          // EventTarget 是 #[serde(tag = "kind")]
+    handler: I.transformCallback(cb), // 要的是回调 id，不是函数
+  });
+}
+```
 
-### 三、CSP 动了，这是硬约束 20 的一次显式例外
+不用 `@tauri-apps/api` 的原因很简单：那个包最后调的也是这两个内部接口，
+而"Tauri 侧零 npm 依赖"是这个项目从一开始就定下的约定。
+
+#### 但要说清楚：**通用的口子并没有消失**
+
+`window.__TAURI_INTERNALS__` 还在，而且它的属性描述符是
+`{ writable: false, enumerable: false, configurable: false }`（实测，见 DEVLOG）。
+**删不掉、改不掉、也不出现在 `Object.keys(window)` 里**——所以它不是"忘了关"，
+是 Tauri 有意做成不可配置的（IPC 的地基）。也就是说：
+
+- 关掉 `withGlobalTauri` 缩小的是**可发现面**（少了一套文档化的、任何示例里都能查到的 API）；
+- 它**不等于**"渲染层拿不到通用调用口"。想靠这一步把 Electron 那条边界找回来，是找不回来的。
+
+随时可以用 `node scripts/probe-tauri-surface.js --release` 重新测这一条——
+文档会变，这个脚本不会撒谎。
+
+#### 所以真正的边界放在 Rust 侧：每窗口命令白名单
+
+`main.rs` 里 16 条命令**每一条**都带 `window: WebviewWindow` 参数（Tauri 注入调用方那个
+webview），进门第一句 `only(&window, W_MAIN)?;`：
+
+| 窗口 | 能调的命令 |
+|---|---|
+| `main`（index.html） | `drag_start` `drag_end` `mouse_ignore` `pet_hover` `app_quit` `pet_menu` `dashboard_toggle` `theme_get` |
+| `bubble`（bubble.html） | `permission_decide` `bubble_ready` `bubble_height` `bubble_dismiss` |
+| `dashboard`（dashboard.html） | `dashboard_snapshot` `dashboard_copy_path` `theme_list` `theme_set` |
+
+拒绝时 `Err("forbidden: window ...")` 并且 `eprintln!` 留痕——静默失败的话，
+将来会分不清"没调"和"被拒了"。回归里三个方向各一条断言（主调气泡、主调看板、看板调主），
+都是**绕过 `window.clawd` 直连 `__TAURI_INTERNALS__.invoke`**：测的是 Rust 拦不拦得住，
+不是桥拦不拦。
+
+为什么不用 Tauri v2 的 ACL（能给自己写的命令声明权限）：那要 build.rs 生成 manifest +
+每条命令一份 toml，改一个命令要动三处。这里 16 条命令、3 个窗口，一张表看得完。
+
+#### 仍然剩下的风险（不许忘）
+
+白名单按**窗口**分，不按**调用来源**分。如果哪天主窗口被注入了脚本，
+它照样能调主窗口那 8 条——包括 `app_quit`（让桌宠退出）和 `dashboard_toggle`。
+这不是新问题（Electron 版同样如此：注入了脚本就能调 preload 那 12 个动作），
+但**不要以为加了白名单就等于"渲染层被关起来了"**。白名单解决的是"越窗口"，
+不是"同窗口内的越权"。
+
+### ### 三、CSP 动了，这是硬约束 20 的一次显式例外
 
 三份 HTML 的 `connect-src` 从 `'none'` 放宽到 `ipc: http://ipc.localhost`。
 理由、出处、代价都写在 `src/index.html` 的 meta 注释里（Tauri v2 的 IPC 是
@@ -704,7 +748,8 @@ Tauri 这边 `withGlobalTauri: true` 直接把 `window.__TAURI__.core.invoke` �
 ### 七、检查清单增补
 
 - [ ] 若换过容器：渲染层"能调什么"是否与旧容器**逐条对齐**（多一个少一个都要有理由）
-- [ ] 若用了 `withGlobalTauri`：是否在台账里写清了这是让渡、以及为什么可以接受
+- [ ] `withGlobalTauri` 是不是 `false`；如果是 `true`，台账里有没有写清这是让渡、为什么可以接受
+- [ ] 16 条命令**逐条**都在 `only()` 的某个名单里（新增命令最容易漏这一句）
 - [ ] 若改了 CSP：是**加了一个具体值**还是放宽了一整类；理由有没有写在 meta 里
 - [ ] 新容器的"收尾"是否等价：挂起的权限请求会不会悬空、端点文件会不会残留
 

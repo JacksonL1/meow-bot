@@ -11,16 +11,40 @@
 // 之前引入（见三份 HTML 的 <script> 顺序）：那些文件是顶层立刻读 window.clawd
 // 的，晚一步就只有"浏览器预览模式"那一支能走，桌宠会一直发呆。
 //
-// Electron 下这个文件是空转（window.__TAURI__ 不存在，第一行就 return），
+// Electron 下这个文件是空转（window.__TAURI_INTERNALS__ 不存在，第 24 行就 return），
 // 所以同一份 HTML 两边都能用，不需要维护两套页面。
+//
+// 2026-11-02（S10-6②）：`withGlobalTauri` 已关掉，`window.__TAURI__` 不再注入。
+// 这是**真实的安全性收缩**：那一整套便利 API 里有 `core.invoke`，
+// 任何注入到页面里的脚本都能发现它、用它调任意命令。
+// 现在页面只剩 `window.__TAURI_INTERNALS__`（Tauri 内部用的那个），
+// 它不是文档化的公开入口，名字也不出现在任何示例里——**但摘不掉**：
+// 它的属性描述符是 `writable:false, configurable:false`（实测，见 DEVLOG），
+// 所以"关掉 withGlobalTauri"缩小的是**可发现面**，不是"渲染层拿不到通用口子"。
+// 真正兜底的是 Rust 侧那层每窗口白名单（`only()`），那一条才是硬边界。
 // ============================================================================
 
 (function () {
-  const T = window.__TAURI__;
-  if (!T || !T.core || !T.event) return;
+  // 8 行自己拼 invoke / listen。为什么不用 @tauri-apps/api：
+  // 那个包最后也是调这两个内部接口，而项目对 Tauri 侧的约定是零 npm 依赖。
+  const I = window.__TAURI_INTERNALS__;
+  if (!I || typeof I.invoke !== "function") return;
 
-  const invoke = T.core.invoke;
-  const listen = T.event.listen;
+  const invoke = I.invoke.bind(I);
+  const transform = I.transformCallback.bind(I);
+
+  // `event.listen` 的等价物。三个参数一个都不能少：
+  //   event  —— 事件名
+  //   target —— { kind: "Any" }（枚举 EventTarget 是 #[serde(tag = "kind")]）
+  //   handler—— transformCallback 发出来的数字 id，不是函数
+  // 返回值是 Promise<EventId>，与原来的 listen 同形。
+  function listen(name, cb) {
+    return invoke("plugin:event|listen", {
+      event: name,
+      target: { kind: "Any" },
+      handler: transform(cb),
+    });
+  }
 
   // ------------------------------------------------------------
   // 下行：事件通道

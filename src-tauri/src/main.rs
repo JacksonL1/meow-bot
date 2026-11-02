@@ -295,33 +295,69 @@ fn toggle_dashboard(app: &AppHandle) {
 
 // ------------------------------------------------------------
 // 命令（前端 invoke 的入口，只暴露"具体动作"）
+//
+// 每个命令都带一个 `window: WebviewWindow` 参数——Tauri 会把**调用方那个
+// webview** 注入进来，于是每条命令都能自己判断"这扇窗有没有资格调我"。
+//
+// 为什么需要这一层：`withGlobalTauri` 关掉之后，页面上仍留着
+// `window.__TAURI_INTERNALS__.invoke`（属性描述符是 writable:false +
+// configurable:false，摘不掉）。也就是说**任何能注入脚本的东西都能调任意命令**。
+// 前端那 12 个动作只是"方便"，不是边界；边界必须在 Rust 这边。
+//
+// 不做的替代方案：Tauri v2 的 ACL 能给自定义命令写权限清单，但那要
+// build.rs 里生成 manifest + 每个命令一份 toml，改一个命令要动三处。
+// 这里 16 条命令、3 个窗口，一张表看得完，就这么写。
 // ------------------------------------------------------------
 
-#[tauri::command]
-fn drag_start(app: AppHandle, st: tauri::State<'_, AppState>) {
-    if st.dragging.swap(true, Ordering::SeqCst) {
-        return;
+/// 允许调用某条命令的窗口。`main` = index.html（桌宠本体）。
+const W_MAIN: &[&str] = &["main"];
+const W_BUBBLE: &[&str] = &["bubble"];
+const W_DASH: &[&str] = &["dashboard"];
+
+/// 每窗口白名单：不在名单里的调用一律拒绝，并且**要留痕**——
+/// 静默返回 Err 的话，将来真出问题时会分不清"没调"和"被拒了"。
+fn only(window: &WebviewWindow, allowed: &[&str]) -> Result<(), String> {
+    if allowed.contains(&window.label()) {
+        return Ok(());
     }
-    let Some(main) = app.get_webview_window("main") else { return };
+    eprintln!(
+        "[ipc] 拒绝：窗口 {} 调用了不属于它的命令",
+        window.label()
+    );
+    Err(format!("forbidden: window `{}`", window.label()))
+}
+
+#[tauri::command]
+fn drag_start(window: WebviewWindow, app: AppHandle, st: tauri::State<'_, AppState>) -> Result<(), String> {
+    only(&window, W_MAIN)?;
+    if st.dragging.swap(true, Ordering::SeqCst) {
+        return Ok(());
+    }
+    let Some(main) = app.get_webview_window("main") else { return Ok(()) };
     let cursor = sys::cursor_pos();
     let Ok(pos) = main.outer_position() else {
         st.dragging.store(false, Ordering::SeqCst);
-        return;
+        return Ok(());
     };
     *st.drag_origin.lock().unwrap() = Some((cursor, (pos.x, pos.y)));
+    Ok(())
 }
 
 #[tauri::command]
-fn drag_end(st: tauri::State<'_, AppState>) {
+fn drag_end(window: WebviewWindow, st: tauri::State<'_, AppState>) -> Result<(), String> {
+    only(&window, W_MAIN)?;
     st.dragging.store(false, Ordering::SeqCst);
     *st.drag_origin.lock().unwrap() = None;
+    Ok(())
 }
 
 #[tauri::command]
-fn mouse_ignore(app: AppHandle, ignore: bool) {
+fn mouse_ignore(window: WebviewWindow, app: AppHandle, ignore: bool) -> Result<(), String> {
+    only(&window, W_MAIN)?;
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.set_ignore_cursor_events(ignore);
     }
+    Ok(())
 }
 
 /// 把猫从睡着里叫醒一次。三条来源共用：鼠标压在宠物上（`pet:hover`）、
@@ -340,20 +376,27 @@ fn poke(app: &AppHandle) {
 }
 
 #[tauri::command]
-fn pet_hover(app: AppHandle) {
+fn pet_hover(window: WebviewWindow, app: AppHandle) -> Result<(), String> {
+    only(&window, W_MAIN)?;
     poke(&app);
+    Ok(())
 }
 
 #[tauri::command]
-fn app_quit(app: AppHandle) {
+fn app_quit(window: WebviewWindow, app: AppHandle) -> Result<(), String> {
+    only(&window, W_MAIN)?;
     // 同理：exit() 是往消息循环投一个"退出"消息就返回，
     // 但消息循环要是正卡在命令线程里，那条消息永远没人处理——表现是"点了退出没反应"。
     std::thread::spawn(move || app.exit(0));
+    Ok(())
 }
 
 #[tauri::command]
-fn pet_menu(app: AppHandle) -> Result<(), String> {
-    let window = app.get_webview_window("main").ok_or("没有主窗口")?;
+fn pet_menu(window: WebviewWindow, app: AppHandle) -> Result<(), String> {
+    only(&window, W_MAIN)?;
+    // 菜单挂在**调用方那扇窗**上。白名单已经保证它是 main，
+    // 再按 label 取一次只会拿到同一个东西——而且那样写会让
+    // "菜单弹在谁身上"取决于两次查询是否一致，多一个不必有的假设。
     let dash = MenuItemBuilder::with_id("dashboard", "会话看板")
         .build(&app)
         .map_err(|e| e.to_string())?;
@@ -370,58 +413,93 @@ fn pet_menu(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn dashboard_toggle(app: AppHandle) {
+fn dashboard_toggle(window: WebviewWindow, app: AppHandle) -> Result<(), String> {
+    only(&window, W_MAIN)?;
     // 必须挪到别的线程去建窗，不能在命令线程里直接 build()。
     // 理由写在 ensure_dashboard 上：命令线程 == 主线程，在里面建窗会卡死在
     // WebView2 的创建回调上（消息循环正卡在我们这一帧里，没人去泵它）。
     std::thread::spawn(move || toggle_dashboard(&app));
+    Ok(())
 }
 
 #[tauri::command]
-fn dashboard_snapshot(st: tauri::State<'_, AppState>) -> Snapshot {
-    st.store.lock().unwrap().snapshot()
+fn dashboard_snapshot(
+    window: WebviewWindow,
+    st: tauri::State<'_, AppState>,
+) -> Result<Snapshot, String> {
+    only(&window, W_DASH)?;
+    Ok(st.store.lock().unwrap().snapshot())
 }
 
 #[tauri::command]
-fn dashboard_copy_path(st: tauri::State<'_, AppState>, id: String) -> bool {
+fn dashboard_copy_path(
+    window: WebviewWindow,
+    st: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<bool, String> {
+    only(&window, W_DASH)?;
     // id 来自渲染层，但这里只按 Map 精确取，取不到就 false——
     // 不存在"拼一个 id 骗出别的会话路径"的路径。
     let full = {
         let s = st.store.lock().unwrap();
         s.full_cwd(&id).map(|v| v.to_string())
     };
-    match full {
+    Ok(match full {
         Some(p) => sys::set_clipboard_text(&p),
         None => false,
-    }
+    })
 }
 
 #[tauri::command]
-fn theme_get(st: tauri::State<'_, AppState>) -> Option<theme::Theme> {
-    st.theme.lock().unwrap().clone()
+fn theme_get(
+    window: WebviewWindow,
+    st: tauri::State<'_, AppState>,
+) -> Result<Option<theme::Theme>, String> {
+    only(&window, W_MAIN)?;
+    Ok(st.theme.lock().unwrap().clone())
 }
 
 #[tauri::command]
-fn theme_list(st: tauri::State<'_, AppState>) -> serde_json::Value {
+fn theme_list(
+    window: WebviewWindow,
+    st: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    only(&window, W_DASH)?;
     let current = st.theme.lock().unwrap().as_ref().map(|t| t.id.clone());
-    serde_json::json!({ "current": current, "themes": theme::list_themes() })
+    Ok(serde_json::json!({ "current": current, "themes": theme::list_themes() }))
 }
 
 #[tauri::command]
-fn theme_set(app: AppHandle, id: String) -> serde_json::Value {
-    match apply_theme(&app, &id, true) {
+fn theme_set(
+    window: WebviewWindow,
+    app: AppHandle,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    only(&window, W_DASH)?;
+    Ok(match apply_theme(&app, &id, true) {
         Ok(name) => serde_json::json!({ "ok": true, "id": id, "name": name }),
         Err(e) => serde_json::json!({ "ok": false, "error": e }),
-    }
+    })
 }
 
 #[tauri::command]
-fn permission_decide(st: tauri::State<'_, AppState>, id: u64, decision: String) -> bool {
-    st.center.decide(id, &decision)
+fn permission_decide(
+    window: WebviewWindow,
+    st: tauri::State<'_, AppState>,
+    id: u64,
+    decision: String,
+) -> Result<bool, String> {
+    only(&window, W_BUBBLE)?;
+    Ok(st.center.decide(id, &decision))
 }
 
 #[tauri::command]
-fn bubble_ready(app: AppHandle, st: tauri::State<'_, AppState>) {
+fn bubble_ready(
+    window: WebviewWindow,
+    app: AppHandle,
+    st: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    only(&window, W_BUBBLE)?;
     st.bubble_ready.store(true, Ordering::SeqCst);
     let pending = st.bubble_pending.lock().unwrap().take();
     if let Some(entry) = pending {
@@ -431,20 +509,29 @@ fn bubble_ready(app: AppHandle, st: tauri::State<'_, AppState>) {
             present_bubble(&app, &entry);
         }
     }
+    Ok(())
 }
 
 #[tauri::command]
-fn bubble_height(app: AppHandle, h: f64) {
-    let Some(bubble) = app.get_webview_window("bubble") else { return };
+fn bubble_height(window: WebviewWindow, app: AppHandle, h: f64) -> Result<(), String> {
+    only(&window, W_BUBBLE)?;
+    let Some(bubble) = app.get_webview_window("bubble") else { return Ok(()) };
     let clamped = clamp(h.round(), 80.0, 460.0);
     let _ = bubble.set_size(tauri::LogicalSize::new(BUBBLE_W, clamped));
     position_bubble(&app);
+    Ok(())
 }
 
 #[tauri::command]
-fn bubble_dismiss(st: tauri::State<'_, AppState>, id: u64) {
+fn bubble_dismiss(
+    window: WebviewWindow,
+    st: tauri::State<'_, AppState>,
+    id: u64,
+) -> Result<(), String> {
+    only(&window, W_BUBBLE)?;
     // 用户直接关掉气泡 = "不表态"，走 204
     st.center.settle(id, permission::Outcome::NoDecision);
+    Ok(())
 }
 
 // ------------------------------------------------------------

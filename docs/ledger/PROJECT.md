@@ -42,7 +42,7 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 | S9 | 鼠标叫醒：停在睡着的猫身上 → `pet:hover` → `store.wake()`（只认 sleeping），眼睛与 zZz 走同一条 `eyeOpen` 弹簧慢慢淡过来 | 已完成 | SEC-13（P3 记录在案）：第一条渲染层请求改状态的通道，无载荷；边界是**渲染层只能请求，改状态永远是主进程的事** |
 | S10 | 三条需求一次做完：① **分身 + 头巾**——≥2 条会话时同窗口横排多只猫（有重叠、点击切聚焦、久不接任务淡出 1600ms），每只猫的头巾上写 hook 侧抽出来的一个词；② **命令风险评级**——气泡里显示「风险 低/中/高/极高」+ 人能读懂的理由（`rm -rf /`、密钥读写、管道执行、多行 shell）；③ 资源瘦身的**前半段**：判据与迁移方案定案（Tauri，保住前端资产） | 已完成 | S10 四条新风险逐条挡法见 SECURITY.md；硬规则：**评级只影响显示，critical 也不自动 deny，超时仍 204** |
 | S10-5 | **容器换成 Rust**：Tauri 2.12.5 + WebView2。后端（HTTP / 状态机 / 主题 / 裁决 / 风险评级）用 Rust 重写，三个窗口与托盘改 `WebviewWindow` / `TrayIconBuilder`，Win32 四件事自己写（`sys.rs`）。渲染层靠 `src/tauri-bridge.js` **一行没改**。新增 `scripts/verify-tauri.js`（65 条），Electron 那份仍 191 条 | 已完成 | 三处没变（动作面 / SVG 白名单 / 四道锁）、**一处变松**（`withGlobalTauri` 把 `core.invoke` 放到 `window` 上，已记录为让渡）、两处已知差异（无 `res.on(close)`、无单实例锁） |
-| S10-6 | **收尾 S10-5 留下的四条**：① 单实例锁（`single.rs`：命名互斥量 + 命名事件，回归 65 → 68 条）；② 关 `withGlobalTauri` + 每窗口命令白名单；③ 锁屏从 2s 轮询换成 `WTSRegisterSessionNotification` 事件；④ 打包分发（NSIS）。改动逐项单独入库 | 进行中 | 每项都带判据：单实例看**端点文件字节未变**（不是"进程退了没"）；命令白名单看**越权调用返回 forbidden**；锁屏看**锁屏后 200ms 内隐藏**（不是 2s） |
+| S10-6 | **收尾 S10-5 留下的四条**：① 单实例锁（`single.rs`：命名互斥量 + 命名事件，回归 65 → 68 条）；② 关 `withGlobalTauri` + 每窗口命令白名单（回归 68 → 73 条，3 条越权断言直连 `__TAURI_INTERNALS__`）；③ 锁屏从 2s 轮询换成 `WTSRegisterSessionNotification` 事件；④ 打包分发（NSIS）。改动逐项单独入库 | 进行中 | 每项都带判据：单实例看**端点文件字节未变**（不是"进程退了没"）；命令白名单看**越权调用返回 forbidden**；锁屏看**锁屏后 200ms 内隐藏**（不是 2s） |
 
 安全问题全部记录在 [SECURITY.md](./SECURITY.md)，每阶段开工前先看对应小节。
 
@@ -135,4 +135,5 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 33. **「先存起来等握手」之前，必须先把窗体出来**。`bubble.html` 要先加载才会发 `bubble_ready`，窗口不建出来这个信号永远不会到，请求就一直躺在槽里挂到超时——而界面上什么都不发生。这条的隐蔽性在于：**第二次请求也不会好**，它不是竞态，是死锁。
 34. **「算 change」和「推 change」之间要有一根显式的线**。`apply()` 内部调了 `tick()`，`tick()` 顺手更新了 `last_visual`；心跳再 tick 时比的是「新值 vs 新值」→ 返回 false → 这次变化永远推不出去。Rust 侧把这两件事分到了两个文件（`state.rs` 算、`server.rs` 推），拆的时候没人负责那根线。跨文件拆分状态机时，**先确认「谁负责通知」有名字**。
 35. **两套容器的「渲染层能做什么」必须逐条对齐**。Electron 的 `preload.js` 和 Tauri 的 `tauri-bridge.js` 是同一份契约的两个实现，动作名、参数、返回值都得一一对应（回归里两边的键名清单是硬写的）。换容器时最容易漏的不是功能，是**边界**：`withGlobalTauri` 顺手就把 `core.invoke` 放到了 `window` 上，那不叫「等价迁移」。
-36. **先确认目标能不能被方案满足，再动手**。用户的原始目标是「常驻 15MB 以内」，而 Tauri 在 Windows 上仍然是 WebView2（Chromium）。实测：Rust 宿主私有内存 **11.2MB**（达标），WebView2 子进程 **202.4MB**，整机 **383MB**——和 Electron 的 **370MB** 基本持平。**这不是执行不到位，是目标与方案互斥**。遇到这种要先说清楚，不要把 383MB 描述成「接近 15MB」。
+36. **JS 侧关不干净的东西，边界就放到 Rust 侧**。S10-6② 关掉 `withGlobalTauri` 之后，`window.__TAURI_INTERNALS__.invoke` 还在（描述符 `writable:false` + `configurable:false`，删不掉），所以 16 条命令逐条加了 `only(&window, ...)`。**新增命令必须同时加这一句**——漏了不会报错，只会静默地多出一个越窗口的口子。
+37. **先确认目标能不能被方案满足，再动手**。用户的原始目标是「常驻 15MB 以内」，而 Tauri 在 Windows 上仍然是 WebView2（Chromium）。实测：Rust 宿主私有内存 **11.2MB**（达标），WebView2 子进程 **202.4MB**，整机 **383MB**——和 Electron 的 **370MB** 基本持平。**这不是执行不到位，是目标与方案互斥**。遇到这种要先说清楚，不要把 383MB 描述成「接近 15MB」。

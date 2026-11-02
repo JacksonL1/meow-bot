@@ -108,7 +108,7 @@ Tauri v2 的 IPC 是 `fetch("ipc://localhost/<cmd>")`，Windows 上落成 `http:
 
 #### 还没做的
 
-> S10-6 收尾进度：单实例锁 ✅ / 关 `withGlobalTauri` ⬜ / 锁屏换事件 ⬜ / 打包分发 ⬜
+> S10-6 收尾进度：单实例锁 ✅ / 关 `withGlobalTauri` ✅ / 锁屏换事件 ⬜ / 打包分发 ⬜
 
 - [ ] **打包分发**：`bundle.active` 现在是 `false`，只产出裸 exe。要发布得配 WiX/NSIS
       （`tauri build` 依赖 WiX 3，本机还没装）
@@ -764,3 +764,52 @@ spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"]);
 | 2026-10-26 | 安全 | 修复 SEC-01/02/03/04/06/09/10，加固 SEC-05，部分修 SEC-07；新增 `src/port-file.js`；`fake-feed.js` 改带 token。SEC-08 待大版本升级 |
 | 2026-10-26 | 决策 | 建立项目台账（`docs/ledger/`），并完成 S1-S3 全量安全审计，产出 10 条问题 |
 | 2026-10-26 | 部署 | `first commit`，8 个源文件入库 |
+
+#### ② 关掉 `withGlobalTauri` + 每窗口命令白名单（`tauri.conf.json` / `tauri-bridge.js` / `main.rs`）
+
+`tauri.conf.json` 的 `withGlobalTauri` 改 `false`，`window.__TAURI__` 整套消失
+（回归断言钉着）。`src/tauri-bridge.js` 从"调 `T.core.invoke` / `T.event.listen`"
+改成自己拼——8 行：
+
+```js
+const I = window.__TAURI_INTERNALS__;
+const invoke = I.invoke.bind(I);
+function listen(name, cb) {
+  return invoke("plugin:event|listen", {
+    event: name,
+    target: { kind: "Any" },          // EventTarget 是 #[serde(tag = "kind")]
+    handler: I.transformCallback(cb), // 要的是回调 id，不是函数
+  });
+}
+```
+
+`listen` 的三个参数一个都不能少，`handler` 尤其容易写成函数——它要的是
+`transformCallback` 发出来的**数字 id**。参数形状是抄 tauri 2.12.5 的
+`src/event/plugin.rs`（`listen(webview, event, target: EventTarget, handler: CallbackFn)`），
+不是猜的。
+
+**然后是最重要的一条：这一步并没有关掉通用的口子。**
+`window.__TAURI_INTERNALS__` 仍在，描述符实测是
+`{ writable: false, enumerable: false, configurable: false }`——删不掉、覆盖不了。
+所以：
+
+- 关掉 `withGlobalTauri` 缩小的是**可发现面**；
+- 真正的边界只能放在 Rust 侧。
+
+于是 16 条命令全部加了 `window: WebviewWindow` 参数 + 进门 `only(&window, W_*)?`：
+
+| 窗口 | 条数 | 命令 |
+|---|---|---|
+| `main` | 8 | `drag_start` `drag_end` `mouse_ignore` `pet_hover` `app_quit` `pet_menu` `dashboard_toggle` `theme_get` |
+| `bubble` | 4 | `permission_decide` `bubble_ready` `bubble_height` `bubble_dismiss` |
+| `dashboard` | 4 | `dashboard_snapshot` `dashboard_copy_path` `theme_list` `theme_set` |
+
+回归 68 → 73 条，新增 5 条：`__TAURI__` 不存在 / `__TAURI_INTERNALS__` 不可配置 /
+主调气泡被拒 / 主调看板被拒 / 看板调主被拒。**三条越权断言都绕过 `window.clawd`
+直连 `__TAURI_INTERNALS__.invoke`**——要测的是 Rust 拦不拦得住，不是桥拦不拦。
+
+白名单解决的是"越窗口"，不是"同窗口内的越权"：主窗口真被注入了脚本，它照样能调
+主窗口那 8 条（含 `app_quit`）。这条 Electron 版一模一样，不要以为加了白名单就安全了。
+
+顺手留了个诊断脚本 `scripts/probe-tauri-surface.js`：一分钟内把"页面上还剩哪些
+能调后端的入口"重新测一遍。结论会随 Tauri 版本变，这个脚本不会撒谎。

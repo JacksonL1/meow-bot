@@ -4,6 +4,82 @@
 
 ---
 
+## 2026-11-02 · 关掉 `withGlobalTauri` 之后，通用口子**还在**
+
+任务清单上写的是"关掉 `withGlobalTauri`，让 `core.invoke` 不再挂在 `window` 上"。
+做完之后才发现这句话只对了一半，而错的那一半比做对的那一半重要。
+
+### 先说对的部分
+
+`tauri.conf.json` 改一行 `false`，`window.__TAURI__` 就整套消失了——
+`core.invoke`、`event.listen`、`path`、`window` 全都没了，回归一条断言钉着。
+桥接改成自己拼 8 行（`invoke` + `plugin:event|listen`），
+事件推送一切正常（68 条断言全绿，说明 listen 那三个参数拼对了）。
+
+`listen` 这三个参数值得单独记一笔，因为**最容易错的是最后一个**：
+
+```js
+invoke("plugin:event|listen", {
+  event: name,
+  target: { kind: "Any" },
+  handler: I.transformCallback(cb),   // ← 不是 cb，是 transformCallback(cb)
+});
+```
+
+凭直觉会把 `cb` 直接传进去，然后得到一个"注册成功、但回调永远不触发"的静默失败。
+参数形状是去翻 `tauri-2.12.5/src/event/plugin.rs` 抄的
+（`listen(webview, event: EventName, target: EventTarget, handler: CallbackFn)`），
+`EventTarget` 是 `#[serde(tag = "kind")]`，所以是 `{ kind: "Any" }` 而不是字符串。
+
+### 再说错的那一半
+
+我以为 `__TAURI__` 是 Tauri 在 `__TAURI_INTERNALS__` 外面包的一层便利 API，
+那关掉它，底下的东西应该也不远。写了个探针一测：
+
+```
+typeof __TAURI__            : "undefined"
+typeof __TAURI_INTERNALS__  : "object"
+internals 自有键            : ["plugins"]
+internals 描述符            : {"value":{...},"writable":false,"enumerable":false,"configurable":false}
+可删除吗                    : false
+通用 invoke 还在吗          : "function"
+```
+
+`writable: false` + `configurable: false` = **既不能覆盖也不能删除**，
+而且它不在 `Object.keys(window)` 里（`enumerable: false`），所以肉眼扫一遍 `window`
+是看不见它的。Tauri 把它做成不可配置是有道理的：那是整个 IPC 的地基。
+
+所以结论必须写清楚，不能含混过去：
+
+> **关掉 `withGlobalTauri` 缩小的是"可发现面"，不是"通用调用口"。**
+> 想靠这一步把 Electron 那条边界（`contextIsolation` 下连 `ipcRenderer` 都摸不到）
+> 找回来，是找不回来的。
+
+最初我打算"取完引用就 `delete window.__TAURI_INTERNALS__`"，探针直接把这个方案否了。
+如果没有先测、直接按计划写，会得到一个看起来很严密、实际什么都没做的桥。
+
+### 于是边界换到 Rust 侧
+
+JS 那边关不干净，就只能在后端判。16 条命令全部加 `window: WebviewWindow`
+（Tauri 会注入调用方那个 webview），进门第一句 `only(&window, W_MAIN)?;`。
+
+写的时候发现一个小陷阱：`pet_menu` 原来是 `app.get_webview_window("main")` 拿到窗口再
+`popup_menu`。加了注入参数之后，如果继续用 `get_webview_window`，那"菜单弹在谁身上"
+就取决于"两处查询是否一致"——多了一个不必有的假设。改成直接用调用方那扇窗，
+白名单已经保证它是 main 了。
+
+回归里三条越权断言都**绕过 `window.clawd`、直连 `__TAURI_INTERNALS__.invoke`**。
+这是有意的：走桥测的是"桥有没有拦"，而桥是我们自己写的、随时能被下一个人改；
+直连测的是"Rust 拦不拦得住"，那才是边界。
+
+### 一条不许忘的边界说明
+
+白名单按**窗口**分，不按**调用来源**分。主窗口真被注入了脚本，它照样能调主窗口那 8 条
+（含 `app_quit`）。这不是新引入的问题——Electron 版注入了脚本同样能调 preload 那 12 个动作。
+但**别把"加了白名单"当成"渲染层被关起来了"**：它解决的是越窗口，不是同窗口内的越权。
+
+---
+
 ## 2026-11-02 · 单实例锁：**判据说反了，代码就会写反**
 
 补的是 S10-5 漏掉的 `requestSingleInstanceLock()` 等价物。但真正值得记的不是

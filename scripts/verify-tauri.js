@@ -244,6 +244,38 @@ async function main() {
     ok("桥没有把 invoke 本身漏给渲染层", (await R.eval("typeof window.clawd.invoke === 'undefined'")) === true);
     ok("桥没有把 __TAURI__ 整个挂到 clawd 上", (await R.eval("window.clawd.core === undefined && window.clawd.event === undefined")) === true);
 
+    // ---------- 1.5 命令边界（S10-6②） ----------
+    // withGlobalTauri 关掉之后，页面上少了一整套便利 API（里面有 core.invoke）。
+    // 但**通用的口子并没有消失**：__TAURI_INTERNALS__.invoke 还在，而且它的
+    // 属性描述符是 writable:false + configurable:false，删不掉也改不掉。
+    // 所以"关掉 withGlobalTauri"缩小的是可发现面，真正的边界是 Rust 侧的
+    // 每窗口白名单（main.rs 的 only()）。下面三条把这两件事一起钉住。
+    ok("withGlobalTauri 已关：window.__TAURI__ 不存在", (await R.eval("typeof window.__TAURI__")) === "undefined");
+    const internalsDesc = String(
+      await R.eval(
+        "JSON.stringify(Object.getOwnPropertyDescriptor(window,'__TAURI_INTERNALS__'),(k,v)=>typeof v==='function'?'[fn]':v)"
+      )
+    );
+    ok(
+      "__TAURI_INTERNALS__ 仍在且不可配置（所以边界必须在 Rust 侧）",
+      /"configurable":false/.test(internalsDesc) && /"writable":false/.test(internalsDesc),
+      internalsDesc.slice(0, 70)
+    );
+    // 用**主窗口**去调只有气泡才有资格调的命令。走 __TAURI_INTERNALS__ 直连，
+    // 不经过 window.clawd——这一条测的是 Rust 那边拦不拦得住，不是桥拦不拦。
+    const crossMain = String(
+      await R.eval(
+        "window.__TAURI_INTERNALS__.invoke('permission_decide',{id:1,decision:'allow'}).then(()=>'ALLOWED').catch(e=>'ERR:'+String(e))"
+      )
+    );
+    ok("主窗口调气泡的命令 → 被 Rust 白名单拒掉", /ERR:.*forbidden/.test(crossMain), crossMain.slice(0, 60));
+    const crossQuit = String(
+      await R.eval(
+        "window.__TAURI_INTERNALS__.invoke('dashboard_snapshot',{}).then(()=>'ALLOWED').catch(e=>'ERR:'+String(e))"
+      )
+    );
+    ok("主窗口调看板的命令（读会话快照）→ 也被拒", /ERR:.*forbidden/.test(crossQuit), crossQuit.slice(0, 60));
+
     // ---------- 2. 主题（绕不过 CSP 的那一步） ----------
     // getTheme 走的是 invoke → fetch("http://ipc.localhost/theme_get")，
     // 这是**唯一**会被 connect-src 拦的路径。它通，说明 CSP 那条口子开对了；
@@ -473,6 +505,14 @@ async function main() {
       ok("快照里没有完整 cwd（SEC-09 分层仍在）", typeof leak === "string" && !/[A-Za-z]:\\\\Users\\\\/.test(leak), "");
       const themes = JSON.parse((await D.eval("window.dashboard.listThemes().then(t=>JSON.stringify(t))")) || "null");
       ok("主题列表至少有一项", !!(themes && Array.isArray(themes.themes) && themes.themes.length > 0), themes && themes.current);
+      // 反过来再验一次：看板调主窗口的命令也必须被拒。
+      // 两向都测，是因为单向只能证明"白名单没把某一条放错"，不能证明它真的在按窗口判。
+      const crossDash = String(
+        await D.eval(
+          "window.__TAURI_INTERNALS__.invoke('theme_get',{}).then(()=>'ALLOWED').catch(e=>'ERR:'+String(e))"
+        )
+      );
+      ok("看板调主窗口的命令（取主题帧）→ 被拒", /ERR:.*forbidden/.test(crossDash), crossDash.slice(0, 60));
       D.close();
     }
     await R.eval("window.clawd.toggleDashboard(), 1");
