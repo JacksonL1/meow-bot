@@ -3,17 +3,18 @@
 > **2026-11-02 起有两套容器**：Electron（`src/` 下的 `main.js` + `preload.js`）和
 > Tauri（`src-tauri/` 下的 Rust）。渲染层与三份 HTML 两边共用，靠 `src/tauri-bridge.js` 切换。
 >
-> **39 个源文件 / 13503 行**：
+> **40 个源文件 / 13818 行**：
 > `src/` 17 个 = 14 个 `.js` 4579 行 + 3 个 `.html` 621 行；
-> `src-tauri/` 12 个 = 8 个 `.rs` 3860 行 + `build.rs` 3 行 + `tauri.conf.json` 21 行 +
+> `src-tauri/` 12 个 = 8 个 `.rs` 3860 行 + `build.rs` 3 行 + `tauri.conf.json` 33 行 +
 > `capabilities/default.json` 13 行 + `Cargo.lock`（4445 行，**生成物不计**）；
-> `hooks/` 2 个 645 行；`scripts/` 8 个 3761 行。
-> 实测 **2026-11-02 11:40**（S10-6③ 之后）。
-> 上一次是 22 个 / 8552 行（2026-10-30，S10 后）。
-> **差 +17 个文件 / +4951 行全部来自 Tauri 迁移与 S10-6 收尾**，其中 3318 行是把 `state/theme/risk/permission/server`
+> `hooks/` 2 个 645 行；`scripts/` 9 个 4064 行。
+> 实测 **2026-11-02 12:10**（S10-6④ 之后）。
+> 上一次是 39 个 / 13503 行（同日 11:40，S10-6③ 后），再上一次是 22 个 / 8552 行（2026-10-30，S10 后）。
+> **差 +18 个文件 / +5266 行全部来自 Tauri 迁移与 S10-6 收尾**，其中 3318 行是把 `state/theme/risk/permission/server`
 > 五个文件用 Rust 重写了一遍（重写不是翻译：正则换成 `regex` crate 之后两处环视要改写成显式逻辑，
 > 见 `src-tauri/src/risk.rs` 的 `has_single_gt` / `is_delete_without_where`）。
-> 另有 `src-tauri/target/`（4.0 GB）与 `src-tauri/gen/` 两个纯生成目录，**都不进台账也不进 git**。
+> 另有 `src-tauri/target/`（约 4.5 GB，含打包产物 `bundle/nsis/*.exe`）与 `src-tauri/gen/` 两个纯生成目录，
+> **都不进台账也不进 git**。
 > 配了巡检脚本 `node docs/ledger/scripts/check-filemap.js`，可发现「代码里有、台账没记」的文件；它只报告，不改本文件。
 
 ## 目录结构
@@ -29,7 +30,7 @@ clawd-starter/
 │                        build.rs 把 ../src 整个嵌进 exe；gen/ 与 target/ 是纯生成目录
 ├── themes/              主题包：<id>/theme.json + assets/*.svg（S7）
 ├── hooks/               agent hook 适配器 + 安装脚本（S4 / S5）
-├── scripts/             调试工具 + 回归闸门（两套）+ 截图 + 主题打包 + 图标生成
+├── scripts/             调试工具 + 回归闸门（两套宿主 + 打包验收）+ 截图 + 主题打包 + 图标生成
 ├── docs/ledger/         开发台账（本项目文档）
 ├── preview.html         静态预览页，浏览器直接打开
 ├── preview-bundle.js    由 themes/ 生成，只给预览页吃
@@ -71,8 +72,9 @@ clawd-starter/
 | `scripts/build-preview-bundle.js` | S7 | 把 `themes/` 打成 `preview-bundle.js`。preview.html 是 `file://` 打开的静态页，`fetch` 读不到本地文件，只能打包 | 只给预览用；桌宠运行时不读它，所以包过期不会影响实际形象 |
 | `scripts/make-icons.js` | S10-5 | 零依赖手写 PNG（zlib + CRC32）+ ICO（内嵌 PNG），产出 `src-tauri/icons/{icon.ico,tray.png,icon.png}`。tauri-build 在 Windows 上要一个 `.ico` 当资源图标，本机没有 PIL | 画的是猫头：三角耳 + 圆脸 + 深蓝眼 + 粉鼻。**不是设计稿**，是把打包流程跑通的最小占位物 |
 | `scripts/probe-tauri-surface.js` | S10-6② | 诊断：起一份临时实例，用 CDP 读「页面上还剩哪些能调后端的入口」——`__TAURI__` / `__TAURI_INTERNALS__` 及其属性描述符 / `window.clawd` 动作数 / 越权调一条命令看有没有被拒 | **95 行**。`node scripts/probe-tauri-surface.js --release`。留着它的理由：`withGlobalTauri` 关掉之后「通用口子还在不在」这个结论**不能靠读文档回答**，而且会随 Tauri 版本变；这个脚本一分钟能重测一遍 |
+| `scripts/verify-bundle.js` | S10-6④ | 打包验收：配置（`active` / `targets` / `.ico` / `currentUser`）、产物（体积 / 版本号 / MZ 头），加 `--install` 再**真装 → 真跑 → 真卸**，25 条断言（当前 25 PASS / 0 FAIL） | **303 行**。`npm run verify:bundle`（只读）/ `npm run verify:bundle:install`（会改这台机器状态）。三条判据都是踩出来的：①「装出来的 exe 与裸 exe sha256 相同」是错的——bundler 会把 `__TAURI_BUNDLE_TYPE_VAR_UNK` 打成 `_NSS`（3 个字节），且文件里有 **6 处**同名占位符（`match` 的 6 个分支），要取**最后一处**；② 卸载后开始菜单 `.lnk` 比 exe **晚删**，必须等两个痕迹都消失再断言，否则下一轮的基线断言会红；③ 本想用注册表 `Uninstall` 子键判断卸干净，但本机安全策略拦 `reg.exe`，改用「安装目录 + 快捷方式来去」两个落盘痕迹（**没有**用 PowerShell 的注册表 provider 绕过） |
 | `src-tauri/Cargo.toml` | S10-5 | Rust 依赖清单：`tauri`（`tray-icon` + `image-png`）、`serde`/`serde_json`、`regex`、`tiny_http`、`windows-sys`（6 个 Win32 feature） | **每多一个插件就多一块常驻内存**——这是选择不用 `tauri-plugin-*` 系列的理由，需要的能力都自己用 `windows-sys` 写（`sys.rs` 一共 91 行）。`tiny_http` 而不是 axum/tokio：同步阻塞模型对两个端点足够，省掉整个 async 运行时。release profile 开了 `lto` / `codegen-units=1` / `opt-level=s` / `panic=abort` / `strip` |
-| `src-tauri/tauri.conf.json` | S10-5 | `frontendDist: ../src`（**前端资源编译期嵌进二进制**）、`windows: []`（三扇窗全部代码里建）、`withGlobalTauri: false`（S10-6② 关掉）、`bundle.active: false` | 21 行。~~`withGlobalTauri` 是桥接的前提~~——S10-6② 已关掉，桥改成直接用 `window.__TAURI_INTERNALS__`（那个摘不掉，见 SECURITY 第二节）。**代价要记住：改一行前端也要 `cargo build`**，不是 Electron 那种即改即看 |
+| `src-tauri/tauri.conf.json` | S10-5 / S10-6 | `frontendDist: ../src`（**前端资源编译期嵌进二进制**）、`windows: []`（三扇窗全部代码里建）、`withGlobalTauri: false`（S10-6② 关掉）、`bundle.active: true` + `targets: ["nsis"]` + `installMode: currentUser`（S10-6④ 打开） | 33 行。~~`withGlobalTauri` 是桥接的前提~~——S10-6② 已关掉，桥改成直接用 `window.__TAURI_INTERNALS__`（那个摘不掉，见 SECURITY 第二节）。打包侧：`currentUser` = 不要管理员权限；没配 `webviewInstallMode`，走默认的 `downloadBootstrapper`（**离线机器装不上，见 PROJECT 已知限制**）。**代价要记住：改一行前端也要 `cargo build`**，不是 Electron 那种即改即看 |
 | `src-tauri/capabilities/default.json` | S10-5 | Tauri v2 的权限清单：只给 `core:default` + `set-ignore-cursor-events` / `start-dragging` / `set-position` / `outer-position` 四个窗口能力 | 13 行。**刻意不给 fs / shell / http**——渲染层需要的每一样能力都是自己写的 command，漏给一个 fs 就等于把整个文件系统开给页面 |
 | `src-tauri/src/main.rs` | S10-5 / S10-6 | Rust 侧的主进程：组装 `AppState`、16 条 `#[tauri::command]`、5 个后台线程（250ms 心跳 / 1s 分身 / 100ms gaze / 16ms 拖动轮询 / 2s 锁屏）、托盘、退出清理 | **838 行**（S10-6 加了每窗口命令白名单，16 条命令各多一个 `window: WebviewWindow` 参数 + 一句 `only()`）。和 `main.js` 的对应关系写在文件头（`ipcMain.on/handle` → command、`webContents.send` → `emit`、`screen.getCursorScreenPoint` → `GetCursorPos`、`powerMonitor` → 轮询 `OpenInputDesktop`）。**两条硬教训**：① 同步 command 跑在主线程上，**在里面建窗会卡死在 WebView2 的创建回调**（`dashboard_toggle`），`app.exit()` 也会因为消息循环没人泵而失效（`app_quit`）——两处都改成 `std::thread::spawn`；② `show_bubble` 在 `bubble_ready == false` 时**必须先把窗建出来**，否则页面永远不加载、永远收不到 ready、请求挂到超时（权限气泡在「第一次使用」时是死的） |
 | `src-tauri/src/state.rs` | S10-5 | `state.js` 的等价重写：`Visual` 枚举 + `priority()`、`EVENT_STATE` 映射、oneshot、入睡、`tick()`、`snapshot()`、入参清洗与 SEC-09 两层（`cwd` 存全、快照只出 basename） | **609 行**，6 条单测。**`oneshot_ms` 被提成自由函数 `oneshot_ms_with(&Timings, Visual)`**：做成方法的话，`sessions.values_mut()` 循环里就再也借不到 `&self`（E0502）。同理 `tick()` 先 `clone()` 时长表、`apply()` 先算 `target_oneshot`。`snapshot()` 按 id 排序——HashMap 迭代顺序不稳定，回归要可比 |

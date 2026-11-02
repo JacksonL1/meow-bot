@@ -42,7 +42,7 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 | S9 | 鼠标叫醒：停在睡着的猫身上 → `pet:hover` → `store.wake()`（只认 sleeping），眼睛与 zZz 走同一条 `eyeOpen` 弹簧慢慢淡过来 | 已完成 | SEC-13（P3 记录在案）：第一条渲染层请求改状态的通道，无载荷；边界是**渲染层只能请求，改状态永远是主进程的事** |
 | S10 | 三条需求一次做完：① **分身 + 头巾**——≥2 条会话时同窗口横排多只猫（有重叠、点击切聚焦、久不接任务淡出 1600ms），每只猫的头巾上写 hook 侧抽出来的一个词；② **命令风险评级**——气泡里显示「风险 低/中/高/极高」+ 人能读懂的理由（`rm -rf /`、密钥读写、管道执行、多行 shell）；③ 资源瘦身的**前半段**：判据与迁移方案定案（Tauri，保住前端资产） | 已完成 | S10 四条新风险逐条挡法见 SECURITY.md；硬规则：**评级只影响显示，critical 也不自动 deny，超时仍 204** |
 | S10-5 | **容器换成 Rust**：Tauri 2.12.5 + WebView2。后端（HTTP / 状态机 / 主题 / 裁决 / 风险评级）用 Rust 重写，三个窗口与托盘改 `WebviewWindow` / `TrayIconBuilder`，Win32 四件事自己写（`sys.rs`）。渲染层靠 `src/tauri-bridge.js` **一行没改**。新增 `scripts/verify-tauri.js`（65 条），Electron 那份仍 191 条 | 已完成 | 三处没变（动作面 / SVG 白名单 / 四道锁）、**一处变松**（`withGlobalTauri` 把 `core.invoke` 放到 `window` 上，已记录为让渡）、两处已知差异（无 `res.on(close)`、无单实例锁） |
-| S10-6 | **收尾 S10-5 留下的四条**：① 单实例锁（`single.rs`：命名互斥量 + 命名事件，回归 65 → 68 条）；② 关 `withGlobalTauri` + 每窗口命令白名单（回归 68 → 73 条，3 条越权断言直连 `__TAURI_INTERNALS__`）；③ 锁屏从 2s 轮询换成 `WTSRegisterSessionNotification` 事件（回归 73 → 74 条）；④ 打包分发（NSIS）。改动逐项单独入库 | 进行中 | 每项都带判据：单实例看**端点文件字节未变**（不是"进程退了没"）；命令白名单看**越权调用返回 forbidden**；锁屏看 **`/health` 的 `lock` 字段是 `event`**（表示注册成功、走的是事件；`hide/show` 那一段靠人工锁屏验） |
+| S10-6 | **收尾 S10-5 留下的四条**：① 单实例锁（`single.rs`：命名互斥量 + 命名事件，回归 65 → 68 条）；② 关 `withGlobalTauri` + 每窗口命令白名单（回归 68 → 73 条，3 条越权断言直连 `__TAURI_INTERNALS__`）；③ 锁屏从 2s 轮询换成 `WTSRegisterSessionNotification` 事件（回归 73 → 74 条）；④ 打包分发：NSIS 安装包 1.57MB + `verify-bundle.js` 25 条（真装/真卸）。改动逐项单独入库 | 已完成 | 每项都带判据：单实例看**端点文件字节未变**（不是"进程退了没"）；命令白名单看**越权调用返回 forbidden**；锁屏看 **`/health` 的 `lock` 字段是 `event`**（`hide/show` 那一段靠人工锁屏验）；打包看**装出来的 exe 与裸 exe 逐字节相同**（只允许 bundler 那 3 字节补丁）+ 装完 `/health` 仍是 `event` |
 
 安全问题全部记录在 [SECURITY.md](./SECURITY.md)，每阶段开工前先看对应小节。
 
@@ -87,7 +87,10 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
   2s 轮询降级为"注册失败时的兜底"。`/health` 里带 `"lock":"event"|"poll"`，
   两种模式失败的样子一模一样，不写出来没法问诊。**hide/show 那十行没有自动验证**——
   真锁屏不能进回归，靠人工锁一次屏验
-- **`bundle.active: false`**：只产出裸 exe，没有安装包。要分发得配 WiX/NSIS
+- **已有 NSIS 安装包（S10-6④）**：`src-tauri/target/release/bundle/nsis/clawd-starter_0.1.0_x64-setup.exe`
+  （1.57MB，`installMode: currentUser`，装到 `%LOCALAPPDATA%\clawd-starter`，不提权）。
+  两条限制要记住：**没有代码签名**（双击会看到 SmartScreen「未知发布者」，只能买证书解决）；
+  `webviewInstallMode` 是默认的 `downloadBootstrapper`，**没有 WebView2 的离线机器装不上**
 - **不能和主仓库 `clawd-on-desk` 同时运行**：都用 23333，且 hook URL 是安装时写死的
 - 命中判定用 `#pet` 的 176×176 包围盒，不是真实 alpha 遮罩——四个角上的透明区会误判为「可点击」
 - 看板的「复制路径」在回归里验的是返回值 + 剪贴板内容（实测能拿到完整路径）；但**环境不具备时**（某些会话读不到剪贴板）会降级成一条警告，不做假断言
@@ -140,3 +143,4 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 35. **两套容器的「渲染层能做什么」必须逐条对齐**。Electron 的 `preload.js` 和 Tauri 的 `tauri-bridge.js` 是同一份契约的两个实现，动作名、参数、返回值都得一一对应（回归里两边的键名清单是硬写的）。换容器时最容易漏的不是功能，是**边界**：`withGlobalTauri` 顺手就把 `core.invoke` 放到了 `window` 上，那不叫「等价迁移」。
 36. **JS 侧关不干净的东西，边界就放到 Rust 侧**。S10-6② 关掉 `withGlobalTauri` 之后，`window.__TAURI_INTERNALS__.invoke` 还在（描述符 `writable:false` + `configurable:false`，删不掉），所以 16 条命令逐条加了 `only(&window, ...)`。**新增命令必须同时加这一句**——漏了不会报错，只会静默地多出一个越窗口的口子。
 37. **先确认目标能不能被方案满足，再动手**。用户的原始目标是「常驻 15MB 以内」，而 Tauri 在 Windows 上仍然是 WebView2（Chromium）。实测：Rust 宿主私有内存 **11.2MB**（达标），WebView2 子进程 **202.4MB**，整机 **383MB**——和 Electron 的 **370MB** 基本持平。**这不是执行不到位，是目标与方案互斥**。遇到这种要先说清楚，不要把 383MB 描述成「接近 15MB」。
+38. **打包/搬运类操作的判据不是"哈希相同"，是"逐字节相同，且允许的差异能指名道姓"**。tauri-bundler 会把二进制里的 `__TAURI_BUNDLE_TYPE_VAR_UNK` 打成 `_NSS`（3 个字节），所以"装出来的 exe 与裸 exe sha256 必须相等"这条判据本身是错的——第一次跑就红了，而它指向的是一个不存在的 bug。同理，**卸载的验收要等所有痕迹都消失**：NSIS 删开始菜单 `.lnk` 比删 exe 晚一步，只查一次会把失败推到下一轮，看起来像"上一轮卸干净了"。

@@ -6,19 +6,26 @@
 
 S1–S10 全部完成。**2026-11-02 补上 S10-5：容器从 Electron 换成 Rust（Tauri 2.12.5）**，
 渲染层一行没改（靠 `src/tauri-bridge.js` 把 `window.clawd` 装回去）。
+同一天做完 **S10-6 收尾四项**：单实例锁、关掉 `withGlobalTauri` + 每窗口白名单、
+锁屏改事件、**打出 NSIS 安装包并真装真卸验过**。
 
-两套回归同时是绿的，且**判据同源**：
+三道闸门同时是绿的，前两道**判据同源**（后一道管的是"用户装不装得上"，判据天然不同源）：
 
-| 宿主 | 脚本 | 结果 | 断言数 |
+| 闸门 | 脚本 | 结果 | 断言数 |
 |---|---|---|---|
 | Electron 45 | `npm run verify:electron` | **191 PASS / 0 FAIL** | 191 |
-| Tauri 2.12.5 + WebView2 | `npm run verify:tauri` | **65 PASS / 0 FAIL** | 65 |
-| Rust 单测 | `cd src-tauri && cargo test` | **18 passed / 0 failed** | 18 |
+| Tauri 2.12.5 + WebView2 | `npm run verify:tauri` | **74 PASS / 0 FAIL** | 74 |
+| Rust 单测 | `cd src-tauri && cargo test` | **22 passed / 0 failed** | 22 |
+| 打包（NSIS 安装包） | `npm run verify:bundle:install` | **25 PASS / 0 FAIL** | 25 |
 
 Tauri 那份少，是**因为少测了宿主专属的东西**（Electron 那 191 条里有 12 条打的是
 主进程 Node inspector 的 `BrowserWindow` 属性，Rust 侧没有对应物），
 不是因为有跳过项。两边共用 `scripts/cdp.js`——同一套判据必须用同一段代码丢进页面，
 否则两边的绿没有可比性。
+
+打包那 25 条里，只有 10 条是随时可跑的（读配置 + 看产物）；另外 15 条要往这台机器上
+真装一份再卸掉，所以挂在 `--install` 后面。**"装得上"和"跑得对"是两件事**，
+`cargo build` 绿说明不了任何一条。
 
 **内存这件事必须说清楚**（用户原目标是"常驻 15MB 以内"）：
 
@@ -108,10 +115,11 @@ Tauri v2 的 IPC 是 `fetch("ipc://localhost/<cmd>")`，Windows 上落成 `http:
 
 #### 还没做的
 
-> S10-6 收尾进度：单实例锁 ✅ / 关 `withGlobalTauri` ✅ / 锁屏换事件 ✅ / 打包分发 ⬜
+> S10-6 收尾进度：单实例锁 ✅ / 关 `withGlobalTauri` ✅ / 锁屏换事件 ✅ / 打包分发 ✅
 
-- [ ] **打包分发**：`bundle.active` 现在是 `false`，只产出裸 exe。要发布得配 WiX/NSIS
-      （`tauri build` 依赖 WiX 3，本机还没装）
+- [x] **打包分发**：`bundle.active` 现在是 `true`，NSIS 出 `clawd-starter_0.1.0_x64-setup.exe`（1.57MB），
+      `installMode: currentUser`（不提权）、装到 `%LOCALAPPDATA%\clawd-starter`
+      → **S10-6 已做**（验收脚本 `verify-bundle.js` 25 条，含真装/真卸，见下）
 - [x] **开机自启 / 单实例**：Electron 版靠 `requestSingleInstanceLock()`，
       Tauri 侧没做等价物——现在开第二份会抢 23333 端口，回退随机端口并告警
       → **S10-6 已补**（`single.rs`，命名互斥量 + 命名事件，见下）
@@ -262,6 +270,61 @@ hide/show——那两个 API 要把请求投递到主线程并等回执，在 Wn
   代码靠**人工锁一次屏**验。这条写在这里，是因为 74 条全绿很容易被读成"锁屏行为整个被覆盖了"。
 
 `cargo test` 21 → **22 passed**，回归 73 → **74 PASS / 0 FAIL**。
+
+#### ④ 打包分发：NSIS（`tauri.conf.json` + 新增 `scripts/verify-bundle.js`）
+
+这一项不是"改个配置"，是**第一次让别人能装上**。`bundle.active` 从 `false` 打开。
+
+**为什么是 NSIS 不是 WiX**：`tauri build` 的 MSI 通道要系统装 WiX 3，本机没有；
+NSIS 是 Tauri 2 自带下载的（落到 `%LOCALAPPDATA%\tauri\NSIS\`，makensis 3.13），
+一条命令就能出安装包。Windows 上这是唯一不用先装构建依赖的路径。
+
+配置里每一条都不是装饰：
+
+| 配置 | 值 | 为什么 |
+|---|---|---|
+| `installMode` | `currentUser` | 桌宠要什么管理员权限。装到 `%LOCALAPPDATA%\clawd-starter`，不提权 |
+| `icon` | `.ico` + `.png` | NSIS 的安装器图标只认 `.ico`，给 png 会直接失败 |
+| `shortDescription` / `longDescription` | 中文 | 开始菜单和「应用和功能」里显示的就是这两行 |
+| `languages` | SimpChinese + English | 安装器界面跟着系统语言走 |
+
+产物：`clawd-starter_0.1.0_x64-setup.exe`，**1.57 MiB**（裸 exe 4.49MB，lzma 整包压）。
+
+**验收脚本 `scripts/verify-bundle.js`，25 条**（10 条只读 + 15 条 `--install`）。
+只读那部分可以每次提交前跑；`--install` 会真的装一份、跑起来、卸掉，所以默认不开。
+
+三条判据全是跑出来才定对的，写在这里比写在脚本注释里更该被看见：
+
+1. **"装出来的 exe 与裸 exe 的 sha256 相同"是错的判据。** 第一次跑就红了 3 个字节：
+   tauri-bundler 的 `patch_binary()` 会把二进制里的 `__TAURI_BUNDLE_TYPE_VAR_UNK`
+   改成 `__TAURI_BUNDLE_TYPE_VAR_NSS`（运行时 `tauri_utils::platform::bundle_type()` 读它）。
+   打包**不是纯复制**。改成"除这 3 个字节之外逐字节相同"。
+2. **这个占位符在文件里有 6 处。** `bundle_type()` 的 `match` 六个分支各是一份字面量
+   （DEB / RPM / APP / MSI / NSS / UNK），真正被打补丁的是**最后一处**那个 `static mut`。
+   第一版用 `indexOf` 取到的是 `_DEB`，于是断言报"占位符被改成了 DEB"——一个纯属自己找错的假失败。
+3. **卸载后开始菜单的 `.lnk` 比 exe 晚删。** 只看 exe 会读到"exe 没了、快捷方式还在"，
+   然后在**下一轮**的"安装前无残留"基线上炸出来。改成等两个痕迹都消失再断言，连跑两轮才稳。
+
+真装/真卸的实测：装 → `%LOCALAPPDATA%\clawd-starter\clawd-starter.exe` 逐字节对上 →
+启动 → `/health` 200 且 `lock: event` → 卸 → 目录空、快捷方式无。连跑两轮，机器上没有残留。
+
+**一条没能按原计划做的**：本来想用注册表 `HKCU\...\Uninstall` 子键的增删判断"卸干净"，
+本机的安全策略拦了 `reg.exe`。**没有用 PowerShell 的注册表 provider 绕过去**——
+那是同一个动作换个壳。判据换成两个不需要注册表的落盘痕迹（安装目录、开始菜单快捷方式）。
+
+打包本身带出两条**已知限制**（不是 bug，是现在的选择）：
+
+- **安装包没有代码签名**。用户第一次双击会看到 SmartScreen 的"未知发布者"。要消除得买证书
+  （EV 或 OV），这不是代码能解决的
+- `webviewInstallMode` 用默认的 `downloadBootstrapper`：机器上没有 WebView2 运行时会去微软下载，
+  **离线机器装不上**（会 `Abort`）。要离线得换 `offlineInstaller`，安装包从 1.57MB 涨到 ~130MB
+
+`cargo tauri build` 输出里那两条 `warning 6040: LangString "choowHowToInstall" is not set`
+**不是我们的问题**：那是 Tauri NSIS 模板里给旧拼写留的兼容兜底（模板自己也有 TODO 注释），
+在 `installMode: currentUser` 下根本走不到那个页面。
+
+**判据**：装出来的 exe 与裸 exe 逐字节相同（除 bundler 那 3 字节）+ 安装版 `/health` 是 `event`。
+前者证明"用户拿到的是刚验过的那一份"，后者证明"打包没把能力弄丢"。
 
 ### S9 鼠标经过，把睡着的猫叫醒（2026-10-28，紧接 S8 之后，同一天）
 

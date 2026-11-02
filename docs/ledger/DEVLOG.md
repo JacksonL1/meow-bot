@@ -4,6 +4,84 @@
 
 ---
 
+## 2026-11-02 · 打包不是复制：`cargo build` 绿，说明不了"别人能装上"
+
+第一次把这东西打成安装包。原以为就是 `bundle.active = true` 加几个字段，
+真正花时间的全在**验收**上——而且验收的第一版判据是错的。
+
+### 判据一："装出来的 exe 和裸 exe 的 sha256 相同"——错的
+
+跑第一次就红了，只差 3 个字节。差值落在 `0x438a7f`，一看上下文：
+
+```
+装出来的:  ...__TAURI_BUNDLE_TYPE_VAR_NSS...
+裸  exe :  ...__TAURI_BUNDLE_TYPE_VAR_UNK...
+```
+
+tauri-bundler 的 `patch_binary()` 会往二进制里打一个补丁，
+把占位符换成安装包类型（`_NSS` = NSIS，`_MSI` = MSI），运行时
+`tauri_utils::platform::bundle_type()` 读它。**打包从来不是复制。**
+
+所以正确的判据是「除这段占位符之外逐字节相同」，而不是「哈希相同」。
+
+### 判据二：这个占位符在文件里有 6 处
+
+改成"跳过占位符"之后仍然红，报的是**"占位符被改成了 DEB"**。DEB 是 Debian 的包类型，
+Windows 上不可能出现。原因是 `bundle_type()` 的 `match` 六个分支各是一份**字面量**：
+
+```rust
+"__TAURI_BUNDLE_TYPE_VAR_DEB" => Some(BundleType::Deb),
+"__TAURI_BUNDLE_TYPE_VAR_RPM" => ...,
+"__TAURI_BUNDLE_TYPE_VAR_APP" => ...,
+"__TAURI_BUNDLE_TYPE_VAR_MSI" => ...,
+"__TAURI_BUNDLE_TYPE_VAR_NSS" => ...,
+_ => None,
+```
+
+`indexOf` 找到的第一个是 `_DEB`（第一行），真正被打补丁的是**最后一处**那个
+`static mut __TAURI_BUNDLE_TYPE`。`lastIndexOf` 才对。
+
+教训不是"要用 lastIndexOf"，而是：**判据写错时，失败信息会指向一个不存在的 bug**。
+"占位符被改成了 DEB"这条如果不去核对，很容易变成"打包工具链有 bug"的结论。
+
+### 判据三：卸载比安装难测
+
+`uninstall.exe /S` 返回 0、exe 已经消失，但开始菜单那个 `.lnk` **还在**——
+它比 exe 晚一步删。只看 exe 的后果不是当场红，而是**下一轮**的
+"安装前不应有残留"基线断言红。一个错误的时间点，把失败推到了下一次运行。
+
+改成一次等两个痕迹（exe + 快捷方式）都消失再断言，连跑两轮才稳。
+
+### 工具被安全策略拦了：改判据，不改工具
+
+本来想用注册表 `HKCU\...\Uninstall` 子键的增删来判"卸干净"。这台机器的安全策略
+直接拦了 `reg.exe`。第一反应是"那我用 PowerShell 的注册表 provider"，但那是
+**同一个动作换个壳**——拦的是这个动作，不是这个命令名。
+
+换成两个真正的落盘痕迹：安装目录、开始菜单快捷方式。判据弱了一点（注册表条目不在覆盖范围内），
+但**它是真的在测用户能看见的东西**。这条也写进了脚本注释，免得下一个人以为是偷懒。
+
+### 打包带出来的两个"用户第一次装"才会遇到的问题
+
+代码里完全看不见，但它们是真实体验的一部分，所以必须记在台账里而不是心里：
+
+- **没有代码签名** → 双击是"Windows 已保护你的电脑 / 未知发布者"。要消除只能买证书
+- **`webviewInstallMode` 默认 `downloadBootstrapper`** → 没有 WebView2 的机器会去微软下载，
+  下载失败直接 `Abort`。**离线机器装不上**。要离线得换 `offlineInstaller`，
+  安装包从 1.57MB 变成约 130MB
+
+还有一个**不要去"修"的东西**：`cargo tauri build` 会吐两条
+
+```
+warning 6040: LangString "choowHowToInstall" is not set in language table of language English
+```
+
+`choow` 是 `choose` 的错拼，很容易当成"我们要补个语言字符串"。实际上这是 Tauri NSIS 模板
+自己留的向后兼容兜底（模板里两处注释都写着 TODO：以后的大版本再删），
+而且 `installMode: currentUser` 根本走不到那个页面。**看到一个 warning 先确认它是不是自己的。**
+
+---
+
 ## 2026-11-02 · `WTSRegisterSessionNotification`：为什么不塞进 tao 的消息循环
 
 "锁屏从轮询换成事件"听着是把 `OpenInputDesktop` 换成 `WTSRegisterSessionNotification`

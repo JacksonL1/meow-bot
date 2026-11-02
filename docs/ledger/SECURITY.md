@@ -11,8 +11,9 @@
 > （无 `res.on("close")`、无单实例锁），逐条记在 S10-5 小节。
 > **S10-6（收尾）进展**：单实例锁已补（`single.rs`）；`withGlobalTauri` 已关、每窗口命令白名单已加
 > （但 `__TAURI_INTERNALS__.invoke` 摘不掉，边界在 Rust 侧）；锁屏已换成
-> `WTSRegisterSessionNotification` 事件（2s 轮询降级为兜底）。**唯一剩下的差异**
-> 是 `res.on("close")` 没有等价物。
+> `WTSRegisterSessionNotification` 事件（2s 轮询降级为兜底）；NSIS 安装包已出并真装真卸验过，
+> 安装器自己的动作逐条列在「打包分发（S10-6④）」一节（**含一条 P2：没有代码签名**）。
+> **唯一剩下的功能差异**是 `res.on("close")` 没有等价物。
 
 ---
 
@@ -876,6 +877,36 @@ rig 构造的时候写的是 `this.sp = { bodyY: …, gazeX: … }`，一共 **2
 2. `index.html` 必须带 CSP meta。删它需要单独一次提交并在本文件留记录。
 3. 架构重写后必须比对回归通过数，**任何一项掉红都要能说出原因**，不能「先放着」。
 4. `petDebug` 的每个出口**要么删掉，要么有一条断言证明它返回的是真东西**（不是空对象 / `null` / 空数组）。观测窗口没有自检，它就只是装饰。
+
+---
+
+## 打包分发（S10-6④）：安装器自己也是一块攻击面
+
+代码审完了不等于发出去的东西审完了。**安装器的权限比程序本身大**——它在这个用户的
+身份下静默写盘、写注册表、可能还联网拉一个可执行文件。所以把"它到底做了什么"逐条记下来：
+
+| 动作 | 目标 | 说明 |
+|---|---|---|
+| 写文件 | `%LOCALAPPDATA%\clawd-starter\{clawd-starter.exe, uninstall.exe}` | `installMode: currentUser`，**不提权** |
+| 写快捷方式 | 开始菜单 `Programs\clawd-starter.lnk` | 卸载时删除（比删 exe 晚一步，见 DEVLOG） |
+| 写注册表 | `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\...` | 让"应用和功能"里能看到它 |
+| **联网下载并执行** | 缺 WebView2 时 `https://go.microsoft.com/fwlink/p/?LinkId=2124703` → `%TEMP%\MicrosoftEdgeWebview2Setup.exe` → `/silent` | Tauri 默认的 `downloadBootstrapper`，**不是我们加的**；下载失败直接 `Abort` |
+
+第 4 条要特别说清楚：**安装期间会从外网拉一个 exe 并以当前用户身份静默执行**。
+这是 Tauri 的默认策略（微软官方 fwlink，不是任意站点），但用户有权知道。
+不想要这条行为有两条路：`embedBootstrapper`（把引导器嵌进安装包，仍然联网）或
+`offlineInstaller`（完全不联网，安装包 ~130MB）。
+
+**没有代码签名**，这条是 P2：用户无法验证"这个安装包确实来自这个项目"，
+双击看到的是 SmartScreen 的「未知发布者」。要真正分发（而不是自己用），
+签名是上线前必须做的一件事；现在只能靠"从 GitHub Releases 下载 + 核对 sha256"。
+
+**用户数据不在安装目录**：端点文件在 `%APPDATA%\clawd-starter\clawd-starter.port`。
+所以卸载不会、也不应该动它——重装后 hook 的配置仍然有效。
+
+检查清单加一条：**改了 `bundle` 配置，要去看生成的 `target/release/nsis/x64/installer.nsi`**，
+而不是只看 `tauri.conf.json`。`INSTALLWEBVIEW2MODE` / 快捷方式 / 卸载项这些实际行为
+都在那份生成出来的脚本里，配置项只是它的输入。
 
 ---
 
