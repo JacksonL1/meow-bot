@@ -17,6 +17,13 @@ S1–S10 全部完成。**2026-11-02 补上 S10-5：容器从 Electron 换成 Ru
 | Tauri 2.12.5 + WebView2 | `npm run verify:tauri` | **76 PASS / 0 FAIL** | 76 |
 | Rust 单测 | `cd src-tauri && cargo test` | **23 passed / 0 failed** | 23 |
 | 打包（NSIS 安装包） | `npm run verify:bundle:install` | **25 PASS / 0 FAIL** | 25 |
+| 状态回放（真实事件序列） | `npm run verify:diag` | **10 步全中期望** | 10 |
+
+`verify:diag` 的位置特殊：它**起一份临时 Tauri 实例，把现场观察到的一轮事件
+照原样喂回去**（SessionStart → UserPromptSubmit → 补发 SessionStart → 工具 →
+PreCompact → 压缩后的 SessionStart → UserPromptSubmit → Stop → SessionEnd），
+每一步都拿「期望值」对照**服务端快照**和**渲染层画面**两个读数。
+它钉死的就是用户报的问题 1：thinking 不许掉、压缩后不许回 idle。
 
 Tauri 那份少，是**因为少测了宿主专属的东西**（Electron 那 191 条里有 12 条打的是
 主进程 Node inspector 的 `BrowserWindow` 属性，Rust 侧没有对应物），
@@ -71,7 +78,11 @@ S8 的「跟桌宠说话」**2026-10-30 整套删掉了**（理由见下方被�
 
 ### 已验证但未覆盖真实环境的部分
 
-- [ ] **问题 1 的根因未定**：thinking / 压缩上下文时掉成 idle。诊断口已就位（`petDebug.events()` + 未知事件告警 + 未知事件进快照），等现场数据
+- [x] ~~**问题 1 的根因未定**：thinking / 压缩上下文时掉成 idle~~ → **S10-7② 已定案**（见下）：
+      两个症状同一个根因——补发的 `SessionStart` 把已有会话清空，S10-6③ 的
+      "preserved" 修复就是根因修复；回放一轮真实事件序列 10 步全中期望值，
+      并落成第 5 道闸门 `npm run verify:diag`。诊断脚本第一版报的
+      "UserPromptSubmit 也掉了"是**脚本自己读太早**（`petDebug` 还没挂上），不是产品 bug
 - [ ] WorkBuddy 安装待用户在自己终端执行：`npm run install:hooks:workbuddy`（沙箱写不了 `~/.workbuddy/settings.json`）
 - [ ] **看板上的「模型」与「上下文用量」**：WorkBuddy 的 hook payload 只有 7 个字段，两样都没有。主仓库证明它们来自 **Claude Code 的 `statusLine.command`**（`hooks/claude-statusline.js` 读 `model` / `context_window` / `rate_limits`），而那条 hook **只注册给 Claude**（`install.js` 的 `STATUSLINE_MARKER`）。要做就得单开一个阶段：装一条接管终端状态行的脚本，契约是"必须永远快速打印点东西、绝不抛异常"。**在此之前不硬写空字段**（硬约束 25）
 
@@ -379,6 +390,33 @@ Electron **191** / Tauri **74** / `cargo test` **22** / 打包 **25**，外加�
 
 闸门：`cargo test` 23（autostart 两条合成一条，单例状态不能并行测）；
 Electron 194（+3）；Tauri 76（+2：两套容器的自启能力互为镜像的静态对齐断言）。
+
+#### ② 问题 1 定案：两个症状一个根因，S10-6③ 已经修对了
+
+用户报的两个症状——「thinking 时显示成 idle」和「压缩上下文时变 idle」——
+**是同一个 bug 的两次出现**：WorkBuddy 在 `UserPromptSubmit` 之后约 0.1s **补发**
+`SessionStart`（每轮都发），压缩完成后也会再发一个 `source=compact` 的
+`SessionStart`。它们都落在**一条已经存在的会话**上，按普通映射处理就是把
+thinking/working 清回 idle。S10-6③ 的「SessionStart 只给新会话定初值、
+已有会话记 `preserved` 不动手」就是根因修复——本轮缺的只是**证据**。
+
+证据由新建的 `scripts/diag-events.js` 补上：起一份临时 Tauri 实例，
+把现场观察到的**整轮事件序列照原样回放**，每步同时读服务端快照和渲染层画面、
+对照显式期望值。10 步全中，包括压缩那条路径。挂成 `npm run verify:diag`
+进了 `verify:all`。
+
+**过程中先抓到的是自己的 bug**：诊断脚本第一版报「UserPromptSubmit 也掉成了
+idle」，追下去发现是**脚本在页面还没挂上 `petDebug` 时就去读**——
+观测窗口自己没就绪，把时序读成了结论。修法是回放前先等
+`typeof window.petDebug === 'object'`（教训进了硬约束 40）。
+顺手堵的第二个坑：`verify-tauri.js` 默认用 `target/debug` 的二进制，
+而它是几小时前编的——`withGlobalTauri`、IPC 白名单、`/health` 的 lock 字段
+全是编译期定死的，拿旧二进制跑出 8 条假 FAIL，指向的是不存在的 bug。
+现在开跑前比对源码与 exe 的 mtime，旧了直接拦下来并打印该跑的命令（硬约束 39）。
+
+#### ③ 托盘图标超采样重绘
+
+（本节随 ③ 的代码提交一起补齐。）
 
 ### S9 鼠标经过，把睡着的猫叫醒（2026-10-28，紧接 S8 之后，同一天）
 

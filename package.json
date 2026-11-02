@@ -24,7 +24,9 @@
     "bundle:tauri": "cargo tauri build",
     "verify:bundle": "node scripts/verify-bundle.js",
     "verify:bundle:install": "node scripts/verify-bundle.js --install",
-    "verify:all": "node scripts/verify-electron.js && node scripts/verify-tauri.js --release"
+    "verify:diag": "node scripts/diag-events.js --replay",
+    "diag:events": "node scripts/diag-events.js",
+    "verify:all": "node scripts/verify-electron.js && node scripts/verify-tauri.js --release && node scripts/diag-events.js --replay"
   },
   "devDependencies": {
     "electron": "~45.0.0"

@@ -4,6 +4,29 @@
 
 ---
 
+## 2026-11-02 · 两个"假证据"：一个来自观测太早，一个来自二进制太旧
+
+追用户报的「thinking 掉成 idle」时，先抓到两个**看起来像真凶的假证据**。
+
+**假证据一：诊断脚本自己读太早。** `diag-events.js --replay` 第一版输出
+「SessionStart → null、UserPromptSubmit → idle ←– 掉了」。
+按这个输出追了很久"UserPromptSubmit 为什么没映射"——EVENT_STATE 里明明有。
+真相：回放第一步 POST 之后 150ms 就去 CDP 读渲染层，而页面还在加载，
+`window.petDebug` 尚未挂上；等它挂上后读到的 `idle` 是初始化默认值。
+**观测者把自己的时序写成了被观测系统的结论。** 修法：回放前轮询等
+`typeof window.petDebug === 'object'`，等到才开跑。修完同一条链路 10 步全中期望。
+
+**假证据二：debug 目录里的旧二进制。** 修完之后手滑跑了一次裸的
+`node scripts/verify-tauri.js`（不带 `--release`），8 条 FAIL 齐刷刷：
+`__TAURI__` 存在、白名单不拦、`/health` 缺 `lock` 字段——每一条都精确指向
+一个"已经被修掉的东西又回来了"。实际是 `target/debug` 停在几小时前，
+那批修复根本没编进去。这类失败最贵：现象完整、结论自洽，
+唯一的破绽是**产物时间戳**。现在 verify-tauri 开跑前比对
+源码 mtime 和 exe mtime，旧了直接退出并打印该跑的命令。
+
+两条合起来的教训是同一个：**工具的输出不是真相，工具的输出加上"工具本身
+处于什么状态"才是**。观测前确认观测窗口就绪，测试前确认被测物新鲜。
+
 ## 2026-11-02 · 开机自启：值必须带引号，勾必须写成功才动
 
 Tauri 侧没有现成的 `app.setLoginItemSettings()`，自己写注册表：
