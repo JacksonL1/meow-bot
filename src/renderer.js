@@ -1493,6 +1493,11 @@ let lastWakeAt = 0;
 // pin 住 gaze：主进程每 100ms 推一次真实光标，本地 mousemove 又写一遍，
 // 会盖掉注入值。回归要断言"瞳孔朝哪"，就得先让注入值稳定成立。
 let gazePinned = false;
+// 主进程推来的 gaze 收到过几次（S10-5）。
+// 为什么需要这个数：光看瞳孔位置证明不了"是主进程按真实光标推过来的"，
+// 还是"本地 mousemove 恰好算出了同样的值"。容器换成 Rust 之后，
+// 这条链路换了实现（GetCursorPos + 100ms 线程），只有计数能证明它真的接通了。
+let gazePushes = 0;
 
 if (window.clawd) {
   // 主题落地的唯一入口：换主题必须走这里，否则 window.VISUAL_STATES 会跟着漂。
@@ -1527,6 +1532,7 @@ if (window.clawd) {
   });
 
   window.clawd.onGaze((gaze) => {
+    gazePushes++;
     if (gazePinned) return;
     if (gaze && typeof gaze.x === "number" && typeof gaze.y === "number") {
       lastGaze = gaze;
@@ -1756,6 +1762,9 @@ window.petDebug = {
         }
       : {},
   builds: () => buildCount,
+  // 主进程的 gaze 推送收到过几次。静止时不发（省 IPC），所以这个数
+  // 不该一直涨；它只证明"至少通过了一次"。
+  gazePushes: () => gazePushes,
   // 醒猫请求发出去多少次。回归靠它证明 S9 那条上行链路是通的——
   // 光看画面证明不了"是渲染层真的发了请求"还是"主进程自己转回了 idle"。
   wakeSends: () => wakeSends,

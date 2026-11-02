@@ -22,6 +22,7 @@ const net = require("node:net");
 const path = require("node:path");
 
 const ROOT = path.join(__dirname, "..");
+const { Cdp } = require("./cdp");
 const MAIN_PORT = 9229;
 const RENDERER_PORT = 9222;
 
@@ -148,80 +149,10 @@ function postPermission(ep, body, extraHeaders = {}) {
 }
 
 
-// ---- 极简 CDP 客户端：只做一件事——发 Runtime.evaluate 拿返回值 ----
-class Cdp {
-  constructor(ws) {
-    this.ws = ws;
-    this.id = 0;
-    this.waiting = new Map();
-    ws.addEventListener("message", (ev) => {
-      let msg;
-      try {
-        msg = JSON.parse(ev.data);
-      } catch {
-        return;
-      }
-      const slot = this.waiting.get(msg.id);
-      if (!slot) return;
-      this.waiting.delete(msg.id);
-      slot.resolve(msg);
-    });
-    ws.addEventListener("close", () => {
-      for (const slot of this.waiting.values()) slot.resolve({ error: { message: "socket closed" } });
-      this.waiting.clear();
-    });
-  }
-
-  static async connect(wsUrl) {
-    const ws = new WebSocket(wsUrl);
-    await new Promise((resolve, reject) => {
-      ws.addEventListener("open", resolve, { once: true });
-      ws.addEventListener("error", () => reject(new Error("ws error")), { once: true });
-    });
-    await sleep(100);
-    return new Cdp(ws);
-  }
-
-  send(method, params = {}) {
-    const id = ++this.id;
-    return new Promise((resolve) => {
-      this.waiting.set(id, { resolve });
-      this.ws.send(JSON.stringify({ id, method, params }));
-      setTimeout(() => {
-        if (this.waiting.has(id)) {
-          this.waiting.delete(id);
-          resolve({ error: { message: "timeout" } });
-        }
-      }, 5000);
-    });
-  }
-
-  // 返回 JS 表达式的值；异常返回 undefined
-  // includeCommandLineAPI 是为主进程准备的：Node inspector 的全局里没有 require
-  // （require 是模块作用域的），打开这个开关才会注入一个 console 风格的 require。
-  async eval(expression) {
-    const r = await this.send("Runtime.evaluate", {
-      expression,
-      returnByValue: true,
-      awaitPromise: true,
-      includeCommandLineAPI: true,
-    });
-    if (r.error) return undefined;
-    const res = r.result || {};
-    if (res.exceptionDetails) {
-      console.log("      [eval 异常] " + expression.slice(0, 60) + " → " + (res.exceptionDetails.text || ""));
-      return undefined;
-    }
-    return res.result ? res.result.value : undefined;
-  }
-
-  close() {
-    try {
-      this.ws.close();
-    } catch {}
-  }
-}
-
+// ---- 极简 CDP 客户端 ----
+// 实现挪到 scripts/cdp.js，和 verify-tauri.js 共用一份。
+// 共用是刻意的：两个脚本比的是同一套判据，连"怎么把表达式丢进页面"
+// 都得是同一段代码，否则两边的绿色没有可比性。
 // ------------------------------------------------------------
 // S8：把 hook 当成真宿主来调用
 //

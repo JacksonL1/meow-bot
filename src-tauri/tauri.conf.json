@@ -1,0 +1,21 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "clawd-starter",
+  "version": "0.1.0",
+  "identifier": "com.clawd.starter",
+  "build": {
+    "frontendDist": "../src"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    },
+    "withGlobalTauri": true
+  },
+  "bundle": {
+    "active": false,
+    "targets": [],
+    "icon": []
+  }
+}

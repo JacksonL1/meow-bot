@@ -1,0 +1,609 @@
+// ============================================================
+// S2-1  状态机（本项目的"心脏"）
+//
+// 只做三件事：
+//   1. 把 agent 事件翻译成逻辑状态
+//   2. 多会话时按优先级仲裁出一个"该显示谁"
+//   3. 让 oneshot 状态播完自动退回，让闲置会话自己睡着
+//
+// 与 src/state.js 等价。两处行为**必须**一起改，否则 Electron 版和 Tauri 版
+// 会在同一个 hook 事件下演出不同的画面——那种不一致最难查，因为它看起来
+// 只是"偶尔怪怪的"。
+// ============================================================
+use serde::Serialize;
+use std::collections::{HashMap, VecDeque};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Visual {
+    Error,
+    Notification,
+    Attention,
+    Working,
+    Thinking,
+    Idle,
+    Sleeping,
+}
+
+impl Visual {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Visual::Error => "error",
+            Visual::Notification => "notification",
+            Visual::Attention => "attention",
+            Visual::Working => "working",
+            Visual::Thinking => "thinking",
+            Visual::Idle => "idle",
+            Visual::Sleeping => "sleeping",
+        }
+    }
+
+    // 数字越大越"响"。error 永远压过 working，这是桌宠的灵魂。
+    fn priority(self) -> u8 {
+        match self {
+            Visual::Error => 8,
+            Visual::Notification => 7,
+            Visual::Attention => 5,
+            Visual::Working => 3,
+            Visual::Thinking => 2,
+            Visual::Idle => 1,
+            Visual::Sleeping => 0,
+        }
+    }
+}
+
+// oneshot = 播一次就结束的状态。value 是建议播放时长（毫秒）。
+//
+// 但 notification 那一条的语义**不是播放时长，是上限**，而且它比另外两个
+// 长了两个数量级。差别来自"它在表达什么"：
+//   error / attention —— 一个瞬间的事实，播完就该消失，留着是噪音。
+//   notification     —— 一个**持续的状态**：agent 正卡在那里等你点"允许"。
+// 真正的释放不靠这个计时器，靠下一个事件把它顶掉；这个数只是"从此再没有
+// 任何事件"时的兜底，否则提示会永远挂在屏幕上。
+const NOTIFICATION_MAX_MS: u64 = 10 * 60 * 1000;
+
+fn builtin_oneshot(v: Visual) -> Option<u64> {
+    match v {
+        Visual::Error => Some(2600),
+        Visual::Notification => Some(NOTIFICATION_MAX_MS),
+        Visual::Attention => Some(2400),
+        _ => None,
+    }
+}
+
+// 下面是**内置默认**，只有主题没写 timings 时才用。
+// 默认值的真相只放在这一处：theme.rs 遇到没写 timings 的主题返回 None，
+// 而不是自己也存一份默认——两边各写一套，分叉是静默的。
+const SLEEP_AFTER_MS: u64 = 60_000;
+pub const TICK_MS: u64 = 250;
+
+// SEC-04：请求来自网络侧，任何字段都不能直接进内存结构。
+const MAX_SESSION_ID: usize = 64;
+const MAX_SESSIONS: usize = 100;
+const MAX_EVENT_LEN: usize = 64;
+const MAX_TITLE: usize = 60;
+const MAX_TOOL: usize = 64;
+// 关键词写在猫的头巾上，超过这个长度就糊成一团（头巾只有那么大）。
+const MAX_KEYWORD: usize = 8;
+const MAX_CWD_STORE: usize = 1024;
+const MAX_CWD_PUBLIC: usize = 200;
+
+/// 主题给的状态时长。`None` = 主题没写，用内置默认。
+/// oneshot 时长查表。做成自由函数是为了能在 `sessions.values_mut()` 里调用——
+/// 那时 self 已经被可变借用，再调 `&self` 的方法会同时要可变+不可变借用。
+fn oneshot_ms_with(t: &Timings, v: Visual) -> Option<u64> {
+    let base = builtin_oneshot(v)?;
+    match t.oneshot.get(v.as_str()) {
+        Some(&ms) if ms > 0 => Some(ms),
+        _ => Some(base),
+    }
+}
+
+#[derive(Clone, Default, Debug, Serialize)]
+pub struct Timings {
+    pub oneshot: HashMap<String, u64>,
+    pub sleep_after_ms: Option<u64>,
+}
+
+// agent 事件 → 逻辑状态。这张表的权威版本是原项目 docs/guides/state-mapping.md
+// 注意：SessionStart 的 idle 是**新建会话时的初值**，不是"把已有会话切回 idle"，
+// apply() 里有专门的前置判断管它。
+fn event_state(event: &str) -> Option<Visual> {
+    Some(match event {
+        "SessionStart" => Visual::Idle,
+        "UserPromptSubmit" => Visual::Thinking,
+        "PreToolUse" => Visual::Working,
+        "PostToolUse" => Visual::Working,
+        "PostToolUseFailure" => Visual::Error,
+        "PermissionRequest" => Visual::Notification,
+        "Notification" => Visual::Notification,
+        "PreCompact" => Visual::Working,
+        "Stop" => Visual::Attention,
+        _ => return None,
+    })
+}
+
+#[derive(Clone, Debug)]
+pub struct Session {
+    pub id: String,
+    pub state: Visual,
+    pub state_since: Instant,
+    pub last_at: Instant,
+    pub cwd: Option<String>,
+    pub title: Option<String>,
+    pub tool: Option<String>,
+    pub keyword: Option<String>,
+}
+
+#[derive(Clone, Serialize, Debug)]
+pub struct SessionView {
+    pub id: String,
+    pub state: Visual,
+    pub cwd: Option<String>,
+    pub title: Option<String>,
+    pub tool: Option<String>,
+    pub keyword: Option<String>,
+    #[serde(rename = "idleMs")]
+    pub idle_ms: u64,
+}
+
+#[derive(Clone, Serialize, Debug)]
+pub struct EventLog {
+    pub t: u64,
+    pub event: String,
+    pub sid: String,
+    pub from: String,
+    pub to: String,
+    pub how: String,
+}
+
+#[derive(Clone, Serialize, Debug)]
+pub struct Snapshot {
+    pub visual: Option<Visual>,
+    pub sessions: Vec<SessionView>,
+    pub recent: Vec<EventLog>,
+}
+
+// ---- 清洗 ------------------------------------------------------------
+fn strip_control(raw: &str) -> String {
+    raw.chars().filter(|c| !c.is_control()).collect()
+}
+
+fn sanitize_title(raw: Option<&str>) -> Option<String> {
+    let raw = raw?;
+    let t = strip_control(raw).trim().to_string();
+    let t: String = t.chars().take(MAX_TITLE).collect();
+    if t.is_empty() { None } else { Some(t) }
+}
+
+fn sanitize_tool(raw: Option<&str>) -> Option<String> {
+    let raw = raw?;
+    let t: String = raw
+        .chars()
+        .filter(|c| ('\u{20}'..='\u{7e}').contains(c))
+        .collect();
+    let t: String = t.trim().chars().take(MAX_TOOL).collect();
+    if t.is_empty() { None } else { Some(t) }
+}
+
+fn sanitize_keyword(raw: Option<&str>) -> Option<String> {
+    let raw = raw?;
+    let k: String = strip_control(raw).trim().chars().take(MAX_KEYWORD).collect();
+    if k.is_empty() { None } else { Some(k) }
+}
+
+fn sanitize_session_id(raw: Option<&str>) -> String {
+    let Some(raw) = raw else { return "default".into() };
+    let id: String = raw
+        .chars()
+        .filter(|c| ('\u{20}'..='\u{7e}').contains(c))
+        .take(MAX_SESSION_ID)
+        .collect();
+    if id.is_empty() { "default".into() } else { id }
+}
+
+fn sanitize_cwd(raw: Option<&str>) -> Option<String> {
+    let raw = raw?;
+    if raw.is_empty() {
+        return None;
+    }
+    let c: String = strip_control(raw).chars().take(MAX_CWD_STORE).collect();
+    if c.is_empty() { None } else { Some(c) }
+}
+
+// SEC-09：分层处理，不要一刀切。
+//   存储层：保留完整路径——S6 的「复制路径」需要它
+//   快照层：只输出最后一段目录名——快照会进渲染进程、进看板、上屏幕
+fn public_cwd(full: &Option<String>) -> Option<String> {
+    let full = full.as_ref()?;
+    let base = full
+        .split(['\\', '/'])
+        .filter(|s| !s.is_empty())
+        .next_back()
+        .unwrap_or("");
+    let b: String = base.chars().take(MAX_CWD_PUBLIC).collect();
+    if b.is_empty() { None } else { Some(b) }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+pub struct Store {
+    sessions: HashMap<String, Session>,
+    oneshot: Option<(Visual, Instant)>,
+    last_visual: Option<Visual>,
+    last_unknown: Option<String>,
+    recent: VecDeque<EventLog>,
+    pub timings: Timings,
+}
+
+impl Store {
+    pub fn new(timings: Timings) -> Self {
+        Self {
+            sessions: HashMap::new(),
+            oneshot: None,
+            last_visual: None,
+            last_unknown: None,
+            recent: VecDeque::new(),
+            timings,
+        }
+    }
+
+    pub fn set_timings(&mut self, t: Timings) {
+        self.timings = t;
+    }
+
+    // oneshot 播放时长：主题可以改，但**只能改本来就属于 oneshot 的那三个**。
+    fn oneshot_ms(&self, v: Visual) -> Option<u64> {
+        oneshot_ms_with(&self.timings, v)
+    }
+
+    fn log(&mut self, event: &str, sid: &str, from: &str, to: &str, how: &str) {
+        self.recent.push_back(EventLog {
+            t: now_ms(),
+            event: event.to_string(),
+            sid: sid.chars().take(8).collect(),
+            from: from.to_string(),
+            to: to.to_string(),
+            how: how.to_string(),
+        });
+        // 环形是为了有界：agent 一次会话能推几千个事件，全留着内存不肯往下掉。
+        while self.recent.len() > 30 {
+            self.recent.pop_front();
+        }
+    }
+
+    pub fn snapshot(&self) -> Snapshot {
+        let now = Instant::now();
+        let mut sessions: Vec<SessionView> = self
+            .sessions
+            .values()
+            .map(|s| SessionView {
+                id: s.id.clone(),
+                state: s.state,
+                cwd: public_cwd(&s.cwd),
+                title: s.title.clone(),
+                tool: s.tool.clone(),
+                keyword: s.keyword.clone(),
+                idle_ms: now.saturating_duration_since(s.last_at).as_millis() as u64,
+            })
+            .collect();
+        // HashMap 顺序不稳定；按 id 排一下，让快照可比、回归可断言
+        sessions.sort_by(|a, b| a.id.cmp(&b.id));
+        Snapshot {
+            visual: self.last_visual,
+            sessions,
+            recent: self.recent.iter().cloned().collect(),
+        }
+    }
+
+    // 多会话仲裁：谁优先级高显示谁。只有一条规则，但足以撑起整个 Dashboard。
+    fn dominant(&self) -> Visual {
+        let mut best: Option<&Session> = None;
+        for s in self.sessions.values() {
+            match best {
+                None => best = Some(s),
+                Some(b) if s.state.priority() > b.state.priority() => best = Some(s),
+                _ => {}
+            }
+        }
+        best.map(|s| s.state).unwrap_or(Visual::Idle)
+    }
+
+    fn sessions_have(&self, v: Visual) -> bool {
+        self.sessions.values().any(|s| s.state == v)
+    }
+
+    /// 应用一条 hook 事件。返回 (快照, visual 是否变化)。
+    pub fn apply(&mut self, payload: &serde_json::Value) -> (Snapshot, bool) {
+        if !payload.is_object() {
+            return (self.snapshot(), false);
+        }
+        let id = sanitize_session_id(payload.get("session_id").and_then(|v| v.as_str()));
+        let event = payload
+            .get("event")
+            .and_then(|v| v.as_str())
+            .map(|s| s.chars().take(MAX_EVENT_LEN).collect::<String>())
+            .unwrap_or_else(|| "Unknown".to_string());
+        let cwd = sanitize_cwd(payload.get("cwd").and_then(|v| v.as_str()));
+        let now = Instant::now();
+
+        if event == "SessionEnd" {
+            // 删会话是最容易被忽略的"变 idle"元凶：没有会话时 dominant() 直接返回 idle。
+            self.log(&event, &id, "(session)", "(removed)", "session-end");
+            self.sessions.remove(&id);
+            let changed = self.tick();
+            return (self.snapshot(), changed);
+        }
+
+        // ---- SessionStart：只给**新会话**定初值，不许碰已经存在的会话 ----
+        // WorkBuddy 每一轮都会在 UserPromptSubmit 之后约 0.1 秒补发一个 SessionStart。
+        // 按普通映射处理的结果是：thinking → 0.1s → idle → 一直挂 idle，
+        // 用户看到的就是"明明在 thinking，桌宠却显示 idle"。
+        if event == "SessionStart" {
+            if let Some(existing) = self.sessions.get_mut(&id) {
+                existing.last_at = now;
+                if cwd.is_some() {
+                    existing.cwd = cwd;
+                }
+                let st = existing.state.as_str();
+                self.log(&event, &id, st, st, "preserved");
+                let changed = self.tick();
+                return (self.snapshot(), changed);
+            }
+        }
+
+        if !self.sessions.contains_key(&id) {
+            self.sessions.insert(
+                id.clone(),
+                Session {
+                    id: id.clone(),
+                    state: Visual::Idle,
+                    state_since: now,
+                    last_at: now,
+                    cwd: None,
+                    title: None,
+                    tool: None,
+                    keyword: None,
+                },
+            );
+            if self.sessions.len() > MAX_SESSIONS {
+                self.evict_oldest();
+            }
+        }
+
+        let title = sanitize_title(payload.get("title").and_then(|v| v.as_str()));
+        let keyword = sanitize_keyword(payload.get("keyword").and_then(|v| v.as_str()));
+        let tool = sanitize_tool(payload.get("tool_name").and_then(|v| v.as_str()));
+        let is_prompt = event == "UserPromptSubmit";
+        // target 与 oneshot 时长在这里算好：下面 s 会可变借用 sessions，
+        // 到那时再调 &self 的方法就是同时可变+不可变借用。
+        let target = event_state(&event);
+        let target_oneshot = target.and_then(|t| oneshot_ms_with(&self.timings, t));
+
+        let s = self.sessions.get_mut(&id).expect("刚插入过");
+        s.last_at = now;
+        if cwd.is_some() {
+            s.cwd = cwd;
+        }
+        // 标题是**粘的**：绝大多数事件都不带标题，让它们参与覆盖就等于
+        // 每来一条 PreToolUse 把好标题抹掉一次。**只有真的拿到了才写**。
+        if title.is_some() {
+            s.title = title;
+        }
+        // 关键词跟着标题一起"粘"。新一轮 UserPromptSubmit 会带新词覆盖旧的——
+        // 这正是要的，头巾上写的是**这一轮**在干什么。
+        if keyword.is_some() {
+            s.keyword = keyword;
+        }
+        // 工具名是"这一轮到目前为止最后用到的那个"。新一轮开始时清掉——
+        // 不清的话 thinking 阶段会挂着上一轮的工具名，那是在说一件已经不成立的事。
+        if is_prompt {
+            s.tool = None;
+        }
+        if tool.is_some() {
+            s.tool = tool;
+        }
+
+        let prev = s.state;
+        let mut how = "ignored";
+        match target {
+            Some(t) if t != s.state => {
+                s.state = t;
+                s.state_since = now;
+                if let Some(ms) = target_oneshot {
+                    self.oneshot = Some((t, now + std::time::Duration::from_millis(ms)));
+                }
+                how = "mapped";
+            }
+            Some(_) => how = "same", // 映射了但状态没变
+            None => {
+                // 只报一次：未知事件通常是每一轮都发的，刷屏会把别的告警淹掉。
+                if self.last_unknown.as_deref() != Some(event.as_str()) {
+                    self.last_unknown = Some(event.clone());
+                    eprintln!("[state] 未知事件 {event:?}（没在 EVENT_STATE 里，它不会改变任何状态）");
+                }
+            }
+        }
+        let (from, to) = if how == "mapped" {
+            (prev.as_str(), s.state.as_str())
+        } else {
+            (s.state.as_str(), s.state.as_str())
+        };
+        self.log(&event, &id, from, to, how);
+
+        let changed = self.tick();
+        (self.snapshot(), changed)
+    }
+
+    /// 用户把鼠标停到它身上 = 把它弄醒（S9）。
+    ///
+    /// 为什么这一件事必须落在状态机里：`sleeping` 是 tick() 按"idle 持续了多久"
+    /// 推出来的结果，渲染层擅自把画面改成 idle，下一个 250ms 的推送就把它顶回去，
+    /// 看起来是"闪一下又睡"。
+    ///
+    /// 只动 sleeping：working / thinking / error 是 agent 的真实进展，
+    /// 用户的鼠标不该改写它们。
+    pub fn wake(&mut self) -> bool {
+        let now = Instant::now();
+        let mut woke = 0;
+        for s in self.sessions.values_mut() {
+            if s.state != Visual::Sleeping {
+                continue;
+            }
+            s.state = Visual::Idle;
+            // state_since 必须一起重置。不重置的话它已经"闲了很久"，
+            // 下一个 tick 立刻判定又该睡了——表现是碰一下就醒、随即又睡，像抽搐。
+            s.state_since = now;
+            woke += 1;
+        }
+        if woke == 0 {
+            return false;
+        }
+        self.log("Hover", "-", "sleeping", "idle", "woke");
+        self.tick();
+        true
+    }
+
+    /// 心跳：所有"随时间发生的状态变化"都收敛到这一个函数。
+    /// 返回 visual 是否变了（变了才推给渲染层）。
+    pub fn tick(&mut self) -> bool {
+        let now = Instant::now();
+        // 先拷一份时长表：循环里 sessions 被可变借用，不能再借 self.timings
+        let timings = self.timings.clone();
+        let sleep_after = timings.sleep_after_ms.unwrap_or(SLEEP_AFTER_MS);
+
+        for s in self.sessions.values_mut() {
+            let since = now.saturating_duration_since(s.state_since).as_millis() as u64;
+
+            // 1) oneshot 播完 → 回 idle（否则 attention 会永远挂在屏幕上）
+            if let Some(ms) = oneshot_ms_with(&timings, s.state) {
+                if since > ms {
+                    s.state = Visual::Idle;
+                    s.state_since = now;
+                    continue;
+                }
+            }
+            // 2) 闲得太久 → 睡着。
+            //
+            // 计时从**进入 idle 多久**算（state_since），不是"多久没收到事件"（last_at）。
+            // 这两者差得很远：一次跑 40 秒的构建期间一个事件都没有，
+            // 按 last_at 算就是"闲置"→ agent 明明在干活却被判睡着。
+            // 而且只认 idle：working / thinking / error 期间不累计睡意。
+            if s.state == Visual::Idle && since > sleep_after {
+                s.state = Visual::Sleeping;
+                s.state_since = now;
+            }
+        }
+
+        // 3) 视觉层：oneshot 在时长内霸屏，否则看仲裁结果。
+        //
+        // 霸屏的前提是**真的还有会话处在这个状态**。原来只判 `now < until`，
+        // 于是：权限提示挂上来（上限 10 分钟）→ 用户点了允许 → agent 继续干活
+        // （PreToolUse → working）→ 画面上猫还在喊，因为 until 还没到。
+        // 同样的 bug，短的算瑕疵（800ms 没人看得出来），长的就是"猫喊了整整十分钟"。
+        let visual = match self.oneshot {
+            Some((st, until)) if now < until && self.sessions_have(st) => st,
+            _ => {
+                self.oneshot = None;
+                self.dominant()
+            }
+        };
+
+        let changed = self.last_visual != Some(visual);
+        self.last_visual = Some(visual);
+        changed
+    }
+
+    // SEC-09 的兑现点：完整 cwd 永远不进快照、不进渲染层。
+    // 只有"用户对某一条会话显式做了动作"（点复制路径）时，按 id 取出这一条。
+    pub fn full_cwd(&self, id: &str) -> Option<&str> {
+        self.sessions.get(id).and_then(|s| s.cwd.as_deref())
+    }
+
+    // 超出上限时淘汰最久没动静的那条，保证内存有界
+    fn evict_oldest(&mut self) {
+        let oldest = self
+            .sessions
+            .values()
+            .min_by_key(|s| s.last_at)
+            .map(|s| s.id.clone());
+        if let Some(id) = oldest {
+            self.sessions.remove(&id);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn ev(event: &str) -> serde_json::Value {
+        json!({ "session_id": "s1", "event": event, "cwd": "E:\\work\\proj" })
+    }
+
+    #[test]
+    fn events_map_to_visuals() {
+        let mut st = Store::new(Timings::default());
+        let (snap, _) = st.apply(&ev("UserPromptSubmit"));
+        assert_eq!(snap.visual, Some(Visual::Thinking));
+        let (snap, _) = st.apply(&ev("PreToolUse"));
+        assert_eq!(snap.visual, Some(Visual::Working));
+        let (snap, _) = st.apply(&ev("Stop"));
+        assert_eq!(snap.visual, Some(Visual::Attention));
+    }
+
+    // 这条是 Class-B bug 的护栏：WorkBuddy 每轮补发的 SessionStart 不能把
+    // 刚进入的 thinking 打回 idle。
+    #[test]
+    fn late_session_start_does_not_reset_thinking() {
+        let mut st = Store::new(Timings::default());
+        st.apply(&ev("UserPromptSubmit"));
+        let (snap, _) = st.apply(&ev("SessionStart"));
+        assert_eq!(snap.visual, Some(Visual::Thinking));
+    }
+
+    #[test]
+    fn session_end_removes_the_cat() {
+        let mut st = Store::new(Timings::default());
+        st.apply(&ev("PreToolUse"));
+        let (snap, _) = st.apply(&ev("SessionEnd"));
+        assert!(snap.sessions.is_empty());
+        assert_eq!(snap.visual, Some(Visual::Idle));
+    }
+
+    #[test]
+    fn hidden_cwd_is_only_basename_in_snapshot() {
+        let mut st = Store::new(Timings::default());
+        let (snap, _) = st.apply(&ev("PreToolUse"));
+        assert_eq!(snap.sessions[0].cwd.as_deref(), Some("proj"));
+        // 但完整路径仍按 id 可取（复制路径要用）
+        assert_eq!(st.full_cwd("s1"), Some("E:\\work\\proj"));
+    }
+
+    #[test]
+    fn title_and_keyword_stick_until_replaced() {
+        let mut st = Store::new(Timings::default());
+        st.apply(&json!({"session_id":"s1","event":"UserPromptSubmit","title":"改登录页","keyword":"登录"}));
+        st.apply(&ev("PreToolUse")); // 不带标题/关键词
+        let snap = st.snapshot();
+        assert_eq!(snap.sessions[0].title.as_deref(), Some("改登录页"));
+        assert_eq!(snap.sessions[0].keyword.as_deref(), Some("登录"));
+        // 新一輪会覆盖旧词
+        st.apply(&json!({"session_id":"s1","event":"UserPromptSubmit","keyword":"风险评级"}));
+        assert_eq!(st.snapshot().sessions[0].keyword.as_deref(), Some("风险评级"));
+    }
+
+    #[test]
+    fn only_sleeping_can_be_woken() {
+        let mut st = Store::new(Timings::default());
+        st.apply(&ev("PreToolUse"));
+        assert!(!st.wake(), "working 不该被鼠标改写");
+    }
+}

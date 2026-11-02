@@ -17,7 +17,11 @@
     "install:hooks:workbuddy": "node hooks/install.js --agent workbuddy",
     "uninstall:hooks:workbuddy": "node hooks/install.js --agent workbuddy --uninstall",
     "install:hooks:codebuddy": "node hooks/install.js --agent codebuddy",
-    "uninstall:hooks:codebuddy": "node hooks/install.js --agent codebuddy --uninstall"
+    "uninstall:hooks:codebuddy": "node hooks/install.js --agent codebuddy --uninstall",
+    "start:tauri": "cargo run --release --manifest-path src-tauri/Cargo.toml",
+    "build:tauri": "cargo build --release --manifest-path src-tauri/Cargo.toml",
+    "verify:tauri": "node scripts/verify-tauri.js --release",
+    "verify:all": "node scripts/verify-electron.js && node scripts/verify-tauri.js --release"
   },
   "devDependencies": {
     "electron": "~45.0.0"

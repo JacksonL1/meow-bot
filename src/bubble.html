@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; connect-src 'none'"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; connect-src ipc: http://ipc.localhost"
     />
     <title>权限请求</title>
     <style>
@@ -184,6 +184,9 @@
         不点任何按钮会在 2 分钟后交还给 Claude Code 自己提示；按 Esc 立即交还。
       </div>
     </div>
+    <!-- 顺序不能反：bubble-renderer.js 末尾就是 onRequest(render) → ready() 的握手，
+         桥必须在那之前挂好（理由见 tauri-bridge.js 里 channel() 的注释）。 -->
+    <script src="./tauri-bridge.js"></script>
     <script src="./bubble-renderer.js"></script>
   </body>
 </html>

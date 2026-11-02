@@ -5,10 +5,17 @@
   <!-- SEC-03：默认全禁，再按需开口。
        内联 <style> 需要 'unsafe-inline'；如果不想开，把样式挪进独立 css 文件。
        **这条 meta 不能删**：它是最后一道闸。CSP 一旦缺席，主题里的 SVG 只要漏过
-       白名单（或某个包里塞了 <script>），就有执行权。 -->
+       白名单（或某个包里塞了 <script>），就有执行权。
+
+       connect-src 从 'none' 放宽到 "ipc: http://ipc.localhost" 的理由（S10-5）：
+       容器换 Rust 后 IPC 不再是 ipcRenderer（进程内、不受 CSP 管），
+       而是 Tauri 的 fetch("ipc://localhost/<cmd>")——Windows 上落成
+       http://ipc.localhost，属于标准网络请求，会被 connect-src 拦。
+       这里**只放行这一个假域名**，公网依然一个都连不上；Tauri 官方文档
+       给的也正是这两个值（tauri-utils/src/config.rs 的 csp 注释）。 -->
   <meta
     http-equiv="Content-Security-Policy"
-    content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; connect-src 'none'"
+    content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; connect-src ipc: http://ipc.localhost"
   />
   <title>clawd-starter · 布偶猫</title>
   <style>
@@ -135,6 +142,10 @@
     </div>
     <div id="hint">拖动我 · 摸头撸猫 · 双击看板 · 右键菜单</div>
   </div>
+  <!-- 顺序不能反：renderer.js 顶层就会读 window.clawd，晚一步它就走
+       "浏览器预览模式"那一支，桌宠从此一直发呆（见 tauri-bridge.js 开头）。
+       Electron 下这个文件第一行就 return，装不装都一样。 -->
+  <script src="./tauri-bridge.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>

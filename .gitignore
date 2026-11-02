@@ -4,5 +4,10 @@ dist/
 /.idea
 docs/ledger/.last-check.json
 
+# cargo 的构建产物：本机实测 4.0 GB / 7588 个文件，绝不能入库
+src-tauri/target/
+# Tauri 每次构建都会重写的 ACL schema 快照
+src-tauri/gen/
+
 # 显卡驱动按进程 CWD 写的着色器日志：启动 Electron 时会落在仓库根目录
 NVIDIA Corporation/

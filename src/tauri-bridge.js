@@ -1,0 +1,146 @@
+"use strict";
+// ============================================================================
+// Tauri 版的 window.clawd / window.bubble / window.dashboard
+//
+// 为什么不改渲染层：src/renderer.js 里那些 `if (window.clawd)` 的判断是
+// 有意的——它让同一份页面跑在三种宿主里（Electron、Tauri、纯浏览器预览）。
+// 所以容器换 Rust 这件事，在渲染层看来应该**完全无感**：只要有个形状相同的
+// 对象挂在 window 上，1800 行渲染代码一行都不用动。
+//
+// 这个文件**必须**在 renderer.js / bubble-renderer.js / dashboard-renderer.js
+// 之前引入（见三份 HTML 的 <script> 顺序）：那些文件是顶层立刻读 window.clawd
+// 的，晚一步就只有"浏览器预览模式"那一支能走，桌宠会一直发呆。
+//
+// Electron 下这个文件是空转（window.__TAURI__ 不存在，第一行就 return），
+// 所以同一份 HTML 两边都能用，不需要维护两套页面。
+// ============================================================================
+
+(function () {
+  const T = window.__TAURI__;
+  if (!T || !T.core || !T.event) return;
+
+  const invoke = T.core.invoke;
+  const listen = T.event.listen;
+
+  // ------------------------------------------------------------
+  // 下行：事件通道
+  //
+  // Tauri 的 listen 是**异步**的（返回 Promise），而 Electron 的
+  // ipcRenderer.on 是同步的。三个渲染层都是"先 on、后 ready"的顺序假设，
+  // 最要紧的是气泡：bubble-renderer.js 先 onRequest(render) 再 ready()，
+  // 主进程收到 ready 就会把攒着的第一个权限请求吐出来。如果注册是异步的、
+  // 而握手是同步的，第一个请求就会在监听器挂上之前被 emit 掉——表现是
+  // "第一次弹权限框永远是空的"，而第二次正常，最难查的那类 bug。
+  //
+  // 挡法：每条通道只 listen 一次，且**在脚本加载时就挂上**，把"注册"
+  // 提前到任何调用方之前；ready() 再显式等一次这条 Promise。
+  // ------------------------------------------------------------
+  const subs = Object.create(null);
+  const reading = Object.create(null);
+
+  function channel(name) {
+    if (!reading[name]) {
+      subs[name] = subs[name] || [];
+      reading[name] = listen(name, (e) => {
+        // 一个订阅者抛错不能连累其他订阅者（比如 theme 有两个订阅者：
+        // adoptTheme 和看板的 onTheme）。否则一次主题应用出错就再也收不到推送。
+        for (const cb of subs[name]) {
+          try {
+            cb(e.payload);
+          } catch (err) {
+            console.error("[bridge] 订阅者抛错:", name, err);
+          }
+        }
+      }).catch((err) => {
+        // 注册失败不吞声：吞了以后表现是"功能静默失效"，比报错难查得多。
+        console.error("[bridge] 订阅失败:", name, err);
+      });
+    }
+    return reading[name];
+  }
+
+  function on(name, cb) {
+    const ready = channel(name);
+    if (typeof cb === "function") subs[name].push(cb);
+    return ready;
+  }
+
+  // ------------------------------------------------------------
+  // 上行：命令
+  //
+  // send  = 发完不管（对应 Electron 的 ipcRenderer.send）
+  // call  = 等结果（对应 ipcRenderer.invoke）
+  //
+  // send 一定要吞掉异常：Electron 的 send 从不 reject，渲染层因此一行
+  // catch 都没写。Tauri 的 invoke 会 reject（命令不存在、参数类型不符、
+  // 命令里 return Err），不吞的话拖一次窗口就是一条 unhandled rejection，
+  // 而且这类报错会一直刷屏，把真正的问题埋掉。
+  // ------------------------------------------------------------
+  function send(cmd, args) {
+    return invoke(cmd, args || {}).catch((err) => {
+      console.error("[bridge] 命令失败:", cmd, err);
+      return undefined;
+    });
+  }
+
+  function call(cmd, args) {
+    return invoke(cmd, args || {});
+  }
+
+  // ------------------------------------------------------------
+  // 主窗口
+  // 动作清单与 src/preload.js 的 12 条一一对应，顺序也照抄，
+  // 方便两边 diff 时一眼看出漏了谁。
+  // ------------------------------------------------------------
+  window.clawd = {
+    onState: (cb) => on("state", cb),
+    // 和 onState 分开的两条线：state 只在 visual 变化时推，
+    // 分身要的是每条会话自己的状态（见 main.js 的 castTimer）。
+    onCast: (cb) => on("cast", cb),
+    onGaze: (cb) => on("gaze", cb),
+    dragStart: () => send("drag_start"),
+    dragEnd: () => send("drag_end"),
+    setIgnoreMouse: (ignore) => send("mouse_ignore", { ignore: Boolean(ignore) }),
+    // 鼠标停上去只是"请求"醒来，真正改状态的是主进程的状态机。
+    wake: () => send("pet_hover"),
+    quit: () => send("app_quit"),
+    petMenu: () => send("pet_menu"),
+    toggleDashboard: () => send("dashboard_toggle"),
+    // 拉（启动时一次）+ 推（看板里切主题）两条，与 Electron 版同构。
+    getTheme: () => call("theme_get"),
+    onTheme: (cb) => on("theme", cb),
+  };
+
+  // ------------------------------------------------------------
+  // 权限气泡
+  // ------------------------------------------------------------
+  window.bubble = {
+    onRequest: (cb) => on("permission:request", cb),
+    decide: (id, decision) => send("permission_decide", { id, decision }),
+    setHeight: (h) => send("bubble_height", { h }),
+    // 握手：只有监听器真的挂上了才通知主进程放行。
+    // 这里调 channel() 而不是依赖调用方先调过 onRequest——少一个隐含顺序。
+    ready: () => {
+      channel("permission:request").then(() => send("bubble_ready"));
+    },
+  };
+
+  // ------------------------------------------------------------
+  // 会话看板
+  //
+  // 同样没有"取完整 cwd"的接口：完整路径留在 Rust 侧，
+  // 只有用户点了"复制路径"才由主进程塞进剪贴板（SEC-09 的分层）。
+  // ------------------------------------------------------------
+  window.dashboard = {
+    getSnapshot: () => call("dashboard_snapshot"),
+    copyPath: (id) => call("dashboard_copy_path", { id }),
+    listThemes: () => call("theme_list"),
+    setTheme: (id) => call("theme_set", { id }),
+    onTheme: (cb) => on("theme", cb),
+  };
+
+  // 诊断用：回归脚本要靠它判断"现在到底是哪个宿主在跑"。
+  // Electron 下 window.__TAURI__ 不存在，这个键也就不会出现，
+  // 所以 verify-electron.js 的老断言不会被它影响。
+  window.__CLAWD_HOST__ = "tauri";
+})();

@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "三个窗口（桌宠 / 气泡 / 看板）的核心能力。刻意不给文件系统、shell、http 插件权限——后端自己能做的绝不下放给前端",
+  "windows": ["main", "bubble", "dashboard"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-set-ignore-cursor-events",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-position",
+    "core:window:allow-outer-position"
+  ]
+}

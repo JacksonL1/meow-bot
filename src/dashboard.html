@@ -3,11 +3,12 @@
   <head>
     <meta charset="utf-8" />
     <!-- SEC-03：和主窗口同样的策略——默认全禁，只开需要的。
-         这里多开了 form-action/connect-src 之外没有额外口子：
-         页面不发任何网络请求，数据全部来自 preload 的 IPC。 -->
+         connect-src 只放行 IPC 假域名（理由同 index.html 的 meta 注释，
+         Tauri 的 invoke 在 Windows 上是 fetch 到 http://ipc.localhost）。
+         除此之外页面不发任何网络请求：会话数据全部来自主进程的快照。 -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; connect-src 'none'"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; connect-src ipc: http://ipc.localhost"
     />
     <title>Clawd · 会话</title>
     <style>
@@ -271,6 +272,7 @@
       <span>双击桌宠打开/收起</span>
     </footer>
 
+    <script src="./tauri-bridge.js"></script>
     <script src="./dashboard-renderer.js"></script>
   </body>
 </html>

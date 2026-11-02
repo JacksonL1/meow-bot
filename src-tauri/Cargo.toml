@@ -1,0 +1,43 @@
+[package]
+name = "clawd-starter"
+version = "0.1.0"
+description = "Agent 桌宠：Rust 后端 + WebView2 前端"
+authors = ["clawd"]
+edition = "2021"
+rust-version = "1.77.2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# tauri 本体。features 刻意开得很小：
+#  - "tray-icon"：托盘（桌宠没有标题栏，托盘是唯一常驻入口）
+# 其余插件一概不用——每多一个插件就多一块常驻内存，而本项目存在的理由就是省资源。
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 风险评级要认几十种命令写法。手写扫描器会退化成一堆 if，正则更好维护；
+# 这里只用最基础的匹配（不用 fancy-regex 的环视），那两处否定前瞻改成了显式逻辑，
+# 理由写在 risk.rs 的 has_single_gt / is_delete_without_where 上。
+regex = "1"
+# HTTP 服务（hook 侧用）。选 tiny_http 而不是 axum/tokio：
+# 我们只需要"收一个 POST、等一个决定、回一个 JSON"，同步模型足够，
+# 换 async 运行时要多带一个线程池 + 几 MB 常驻，不值。
+tiny_http = "0.12"
+# 取光标位置（拖动窗口、gaze 采样）、工作区、剪贴板、锁屏检测。
+# 只要四个系统调用，所以逐个 feature 开——不用 windows 的完整绑定层。
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_StationsAndDesktops",
+] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"        # 体积优先：常驻内存里有一部分是二进制本体被 mmap 进来的
+panic = "abort"
+strip = true
