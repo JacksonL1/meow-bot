@@ -38,6 +38,12 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Threading",
     # 上面几个 API 的签名里带 SECURITY_ATTRIBUTES（我们传 null，但类型要能解析）
     "Win32_Security",
+    # 锁屏 / 解锁事件：WTSRegisterSessionNotification（以及消息专用窗口要的 GetModuleHandleW）
+    "Win32_System_RemoteDesktop",
+    "Win32_System_LibraryLoader",
+    # RegisterClassW / WNDCLASSW 被 GDI 门禁挡着（结构体里带 HICON / HBRUSH）。
+    # 我们只是建一个消息专用窗口，一个像素都不画。
+    "Win32_Graphics_Gdi",
 ] }
 
 [profile.release]

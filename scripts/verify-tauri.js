@@ -330,6 +330,17 @@ async function main() {
     ok("Content-Type 不是 json → 415（挡住免预检的简单请求）", badType.code === 415, String(badType.code));
     const health = await post("/health", null, ep.token, { method: "GET" });
     ok("/health 带 token → 200", health.code === 200, health.body.slice(0, 40));
+    // S10-6③：锁屏走的是事件还是 2s 轮询。/health 里带这个字段就是为了
+    // "锁屏后没藏窗口"这种没法当场复现的问题——两种模式的失败长得一模一样。
+    let healthJson = null;
+    try {
+      healthJson = JSON.parse(health.body);
+    } catch {}
+    ok(
+      "锁屏走事件（WTSRegisterSessionNotification 注册成功，不是退回轮询）",
+      healthJson && healthJson.lock === "event",
+      healthJson && healthJson.lock
+    );
 
     // ---------- 5. 状态推送：从 HTTP 一路走到画面 ----------
     //

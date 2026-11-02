@@ -620,37 +620,60 @@ fn spawn_timers(app: AppHandle) {
     // ---- SEC-07：锁屏 / 休眠时把窗口收起来 ----
     // 'screen-saver' 是最高常规层级，不收起来会浮在锁屏界面之上；
     // 而气泡里会显示"正在执行什么命令"，看板会列出项目目录名——那就是信息泄露。
+    //
+    // S10-6③ 起走事件（`WTSRegisterSessionNotification`），不再是 2s 轮询。
+    // 轮询留着，但只在注册失败时启动：非交互会话 / 以后换权限模型都可能注册不上，
+    // 那时不能让 SEC-07 直接失效——**宁可 2 秒后才藏，也不要一直亮在锁屏界面上**。
     {
-        let app = app.clone();
-        std::thread::spawn(move || {
-            let mut last = false;
-            loop {
-                std::thread::sleep(std::time::Duration::from_millis(2000));
-                let locked = sys::is_locked();
-                if locked == last {
-                    continue;
-                }
-                last = locked;
-                let st = app.state::<AppState>();
-                if locked {
-                    st.hidden_by_lock.store(true, Ordering::SeqCst);
-                    for id in ["main", "bubble", "dashboard"] {
-                        if let Some(w) = app.get_webview_window(id) {
-                            let _ = w.hide();
-                        }
-                    }
-                } else if st.hidden_by_lock.swap(false, Ordering::SeqCst) {
-                    if let Some(w) = app.get_webview_window("main") {
-                        let _ = w.show();
-                    }
-                    if st.bubble_current.lock().unwrap().is_some() {
-                        if let Some(b) = app.get_webview_window("bubble") {
-                            let _ = b.show();
-                        }
-                    }
-                }
-            }
+        let watcher_app = app.clone();
+        let wired = sys::watch_session(move |locked| {
+            // 回调跑在那条消息线程上。这里再 spawn 一次，是为了不在 WndProc 里
+            // 长时间阻塞（隐藏/显示窗口要投递到主线程并能等到回执）。
+            // 锁屏事件一天也就几次，一个线程的代价可以忽略。
+            let app = watcher_app.clone();
+            std::thread::spawn(move || apply_lock(&app, locked));
         });
+        if !wired {
+            eprintln!("[lock] 会话通知注册失败，退回 2s 轮询（最多晚 2 秒藏窗口）");
+            let app = app.clone();
+            std::thread::spawn(move || {
+                let mut last = false;
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(2000));
+                    let locked = sys::is_locked();
+                    if locked == last {
+                        continue;
+                    }
+                    last = locked;
+                    apply_lock(&app, locked);
+                }
+            });
+        }
+    }
+}
+
+/// 锁屏时把三扇窗收起来，解锁时只把"本来就该在的"放回去。
+///
+/// 放回去的判据是 `hidden_by_lock`：只有"被我们藏起来的"才需要重新显示。
+/// 看板不参与——它是用户自己开的窗口，锁屏前没开就不该在解锁后凭空出现。
+fn apply_lock(app: &AppHandle, locked: bool) {
+    let Some(st) = app.try_state::<AppState>() else { return };
+    if locked {
+        st.hidden_by_lock.store(true, Ordering::SeqCst);
+        for id in ["main", "bubble", "dashboard"] {
+            if let Some(w) = app.get_webview_window(id) {
+                let _ = w.hide();
+            }
+        }
+    } else if st.hidden_by_lock.swap(false, Ordering::SeqCst) {
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.show();
+        }
+        if st.bubble_current.lock().unwrap().is_some() {
+            if let Some(b) = app.get_webview_window("bubble") {
+                let _ = b.show();
+            }
+        }
     }
 }
 

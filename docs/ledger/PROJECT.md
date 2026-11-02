@@ -42,7 +42,7 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 | S9 | 鼠标叫醒：停在睡着的猫身上 → `pet:hover` → `store.wake()`（只认 sleeping），眼睛与 zZz 走同一条 `eyeOpen` 弹簧慢慢淡过来 | 已完成 | SEC-13（P3 记录在案）：第一条渲染层请求改状态的通道，无载荷；边界是**渲染层只能请求，改状态永远是主进程的事** |
 | S10 | 三条需求一次做完：① **分身 + 头巾**——≥2 条会话时同窗口横排多只猫（有重叠、点击切聚焦、久不接任务淡出 1600ms），每只猫的头巾上写 hook 侧抽出来的一个词；② **命令风险评级**——气泡里显示「风险 低/中/高/极高」+ 人能读懂的理由（`rm -rf /`、密钥读写、管道执行、多行 shell）；③ 资源瘦身的**前半段**：判据与迁移方案定案（Tauri，保住前端资产） | 已完成 | S10 四条新风险逐条挡法见 SECURITY.md；硬规则：**评级只影响显示，critical 也不自动 deny，超时仍 204** |
 | S10-5 | **容器换成 Rust**：Tauri 2.12.5 + WebView2。后端（HTTP / 状态机 / 主题 / 裁决 / 风险评级）用 Rust 重写，三个窗口与托盘改 `WebviewWindow` / `TrayIconBuilder`，Win32 四件事自己写（`sys.rs`）。渲染层靠 `src/tauri-bridge.js` **一行没改**。新增 `scripts/verify-tauri.js`（65 条），Electron 那份仍 191 条 | 已完成 | 三处没变（动作面 / SVG 白名单 / 四道锁）、**一处变松**（`withGlobalTauri` 把 `core.invoke` 放到 `window` 上，已记录为让渡）、两处已知差异（无 `res.on(close)`、无单实例锁） |
-| S10-6 | **收尾 S10-5 留下的四条**：① 单实例锁（`single.rs`：命名互斥量 + 命名事件，回归 65 → 68 条）；② 关 `withGlobalTauri` + 每窗口命令白名单（回归 68 → 73 条，3 条越权断言直连 `__TAURI_INTERNALS__`）；③ 锁屏从 2s 轮询换成 `WTSRegisterSessionNotification` 事件；④ 打包分发（NSIS）。改动逐项单独入库 | 进行中 | 每项都带判据：单实例看**端点文件字节未变**（不是"进程退了没"）；命令白名单看**越权调用返回 forbidden**；锁屏看**锁屏后 200ms 内隐藏**（不是 2s） |
+| S10-6 | **收尾 S10-5 留下的四条**：① 单实例锁（`single.rs`：命名互斥量 + 命名事件，回归 65 → 68 条）；② 关 `withGlobalTauri` + 每窗口命令白名单（回归 68 → 73 条，3 条越权断言直连 `__TAURI_INTERNALS__`）；③ 锁屏从 2s 轮询换成 `WTSRegisterSessionNotification` 事件（回归 73 → 74 条）；④ 打包分发（NSIS）。改动逐项单独入库 | 进行中 | 每项都带判据：单实例看**端点文件字节未变**（不是"进程退了没"）；命令白名单看**越权调用返回 forbidden**；锁屏看 **`/health` 的 `lock` 字段是 `event`**（表示注册成功、走的是事件；`hide/show` 那一段靠人工锁屏验） |
 
 安全问题全部记录在 [SECURITY.md](./SECURITY.md)，每阶段开工前先看对应小节。
 
@@ -83,7 +83,10 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 - **回归脚本不能并行跑**：两套都用 CDP 9333、都要占 23333，同时开会互相踩。踩出来的现象很有误导性——第二个进程会因为 CDP 端口被占而 panic（exit 101），看起来像"单实例锁坏了"
 - **改前端也要 `cargo build`**：`frontendDist` 是编译期嵌进二进制的，不是 Electron 那种即改即看。改一版形象要等一次链接
 
-- **锁屏检测是 2s 轮询**（`OpenInputDesktop`），不是事件。锁屏后最多 2 秒才藏窗口
+- **锁屏已换成事件（S10-6③）**：`WTSRegisterSessionNotification` + `HWND_MESSAGE` 消息窗口，
+  2s 轮询降级为"注册失败时的兜底"。`/health` 里带 `"lock":"event"|"poll"`，
+  两种模式失败的样子一模一样，不写出来没法问诊。**hide/show 那十行没有自动验证**——
+  真锁屏不能进回归，靠人工锁一次屏验
 - **`bundle.active: false`**：只产出裸 exe，没有安装包。要分发得配 WiX/NSIS
 - **不能和主仓库 `clawd-on-desk` 同时运行**：都用 23333，且 hook URL 是安装时写死的
 - 命中判定用 `#pet` 的 176×176 包围盒，不是真实 alpha 遮罩——四个角上的透明区会误判为「可点击」

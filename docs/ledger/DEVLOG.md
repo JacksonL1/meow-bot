@@ -4,6 +4,91 @@
 
 ---
 
+## 2026-11-02 · `WTSRegisterSessionNotification`：为什么不塞进 tao 的消息循环
+
+"锁屏从轮询换成事件"听着是把 `OpenInputDesktop` 换成 `WTSRegisterSessionNotification`
+就完事，真正要决策的只有一件事：**注册时交出去的那个 HWND 用谁的**。
+
+### 三个选项，只有第三个能用
+
+1. **塞进 tao 的窗口**。`WM_WTSSESSION_CHANGE` 是投给某个 HWND 的，要接住它就得改
+   那个窗口的 wndproc。tao 没开放这个口子（Tauri 也没在外面再包一层），
+   唯一能碰到的机会是 Tauri 自己的内部钩子——踩到别人实现细节上，升版本就碎。
+2. **建一个普通窗口**。能注册，但它会进任务栏 / 参与 Z 序 / 出现在 Alt-Tab 里，
+   为了接一条消息在用户桌面上多一个窗口，代价比晚 2 秒藏起来大得多。
+3. **消息专用窗口**：`CreateWindowExW(..., HWND_MESSAGE, ...)`，父窗口给 `HWND_MESSAGE`。
+   不显示、不进任务栏、不参与 Z 序，只收消息。**选这个。**
+
+顺带一个好处：它跑在自己那条线程的 `GetMessageW` 循环里，和 tao 的消息循环完全不相交。
+这个窗口出任何问题（注册失败、消息循环挂掉），画面那边一无所知——**故障不扩散**。
+
+### `HWND_MESSAGE` 的代价：`RegisterClassW` 要 GDI feature
+
+```rust
+use windows_sys::Win32::UI::WindowsAndMessaging::{RegisterClassW, WNDCLASSW};
+```
+
+看着都在 `WindowsAndMessaging` 里，编译报 `E0432: unresolved import`。原因是
+`WNDCLASSW` 结构体里有 `HICON` / `HBRUSH`，这两个类型归 `Win32_Graphics_Gdi` 管，
+于是整个 `WNDCLASSW` 和配套的 `RegisterClassW` 都被 feature 门禁挡住了。
+
+我们一个像素都不画，但**得在 `Cargo.toml` 里把 `Win32_Graphics_Gdi` 打开**，
+否则连窗口类都注册不了。这类"要用 A 就得开 B 的 feature"的错误信息只说
+`unresolved import`，不说为什么，得去翻 windows-sys 的 `features` 定义。
+
+### `WndProc` 里不能等
+
+第一版在回调里直接 `w.hide()`。`hide` / `show` 是 Tauri 的 API，它要把请求投递到
+主线程并**等一个回执**——在 `WndProc` 里等，就是把这条消息线程卡住，
+后面的锁/解锁消息全排队。所以回调只做一件事：把 `bool` 丢出去，`spawn` 一个线程再动窗口。
+
+```rust
+let wired = sys::watch_session(move |locked| {
+    let app = watcher_app.clone();
+    std::thread::spawn(move || apply_lock(&app, locked));   // 不在 WndProc 里等
+});
+```
+
+这里同时踩了个借用错误：`let app = app.clone()` 之后外层 `if !wired` 里还要用 `app`，
+`E0382: borrow of moved value`。改名 `watcher_app` 解决——**名字取成两个不同的，
+比在脑子里记"这个 app 已经被移走了"可靠。**
+
+### 只认两个 `wParam`
+
+`WM_WTSSESSION_CHANGE` 的 `wParam` 有 8 种取值。第一反应是"不是 `UNLOCK` 就算锁屏"，
+这个写法会把三条完全不该藏的场景算进去：
+
+- `WTS_REMOTE_DISCONNECT` (3)：远程桌面断开，**人还在电脑前**，只是换了块屏幕
+- `WTS_CONSOLE_DISCONNECT` (4)：同上
+- `WTS_LOGOFF` (5)：注销，进程本来就该退
+
+所以是白名单，不是黑名单：只有 `LOCK` (7) 藏、`UNLOCK` (8) 显，其余 `return 0` 不动。
+
+### 把"当前是什么模式"暴露出来
+
+"锁屏后没藏窗口"这种问题**没法当场复现**——你得先锁屏，而锁屏之后你看不见窗口。
+更麻烦的是：事件注册失败时会自动退回 2s 轮询，**两种模式下"没藏"的样子一模一样**。
+
+所以 `/health` 多了一个字段：
+
+```json
+{ "ok": true, "lock": "event" }
+```
+
+回归里钉一条 `lock === "event"`。这条断言的价值不在"验证功能正常"，
+而在于**下次有人报"锁屏没生效"时，第一句话能问出"是 event 还是 poll"**。
+
+### 最后：哪一段没被验证
+
+单测覆盖"投 `WM_WTSSESSION_CHANGE` → 回调收到 true/false"，
+回归覆盖"注册成功（`lock: event`）"。**中间那段没覆盖**：事件 → `apply_lock()` →
+窗口 `hide()`/`show()`。真锁屏没法进回归（会把跑测试的人踢出桌面）。
+
+所以这条必须写在台账里，否则 **74 条全绿会被读成"锁屏行为整个被覆盖了"**。
+剩下那十行靠人工锁一次屏验——今天验过了。
+
+---
+
 ## 2026-11-02 · 关掉 `withGlobalTauri` 之后，通用口子**还在**
 
 任务清单上写的是"关掉 `withGlobalTauri`，让 `core.invoke` 不再挂在 `window` 上"。

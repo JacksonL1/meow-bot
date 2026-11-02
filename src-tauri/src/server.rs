@@ -158,7 +158,8 @@ fn handle(
     }
 
     if method == "GET" && path == "/health" {
-        return respond_json(req, 200, r#"{"ok":true}"#);
+        let lock = if crate::sys::lock_is_event() { "event" } else { "poll" };
+        return respond_json(req, 200, &format!(r#"{{"ok":true,"lock":"{lock}"}}"#));
     }
 
     if method == "GET" && path == "/state" {

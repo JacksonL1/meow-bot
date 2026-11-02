@@ -108,15 +108,16 @@ Tauri v2 的 IPC 是 `fetch("ipc://localhost/<cmd>")`，Windows 上落成 `http:
 
 #### 还没做的
 
-> S10-6 收尾进度：单实例锁 ✅ / 关 `withGlobalTauri` ✅ / 锁屏换事件 ⬜ / 打包分发 ⬜
+> S10-6 收尾进度：单实例锁 ✅ / 关 `withGlobalTauri` ✅ / 锁屏换事件 ✅ / 打包分发 ⬜
 
 - [ ] **打包分发**：`bundle.active` 现在是 `false`，只产出裸 exe。要发布得配 WiX/NSIS
       （`tauri build` 依赖 WiX 3，本机还没装）
 - [x] **开机自启 / 单实例**：Electron 版靠 `requestSingleInstanceLock()`，
       Tauri 侧没做等价物——现在开第二份会抢 23333 端口，回退随机端口并告警
       → **S10-6 已补**（`single.rs`，命名互斥量 + 命名事件，见下）
-- [ ] **锁屏检测**是 2s 轮询 `OpenInputDesktop`，Electron 版是 `powerMonitor` 事件。
+- [x] **锁屏检测**是 2s 轮询 `OpenInputDesktop`，Electron 版是 `powerMonitor` 事件。
       轮询在锁屏后仍会跑（便宜，但确实在跑）
+      → **S10-6 已换**（`WTSRegisterSessionNotification`，轮询降为注册失败时的兜底，见下）
 - [ ] **托盘图标**是脚本手画的 PNG（`scripts/make-icons.js`），不是设计稿
 
 ### S10-6 收尾四项（2026-11-02，S10-5 之后同一天）
@@ -155,6 +156,112 @@ hook 仍然打给第一只（端口没变）"。**后半句不成立**——`ser
 所以分层处理：事件机制本身由单测 `wake_first_reaches_watcher` 覆盖
 （`SetEvent` → `WaitForSingleObject` → 回调，全链路真跑），只留这两行接线靠人工。
 
+#### ② 关掉 `withGlobalTauri` + 每窗口命令白名单（`tauri.conf.json` / `tauri-bridge.js` / `main.rs`）
+
+`tauri.conf.json` 的 `withGlobalTauri` 改 `false`，`window.__TAURI__` 整套消失
+（回归断言钉着）。`src/tauri-bridge.js` 从"调 `T.core.invoke` / `T.event.listen`"
+改成自己拼——8 行：
+
+```js
+const I = window.__TAURI_INTERNALS__;
+const invoke = I.invoke.bind(I);
+function listen(name, cb) {
+  return invoke("plugin:event|listen", {
+    event: name,
+    target: { kind: "Any" },          // EventTarget 是 #[serde(tag = "kind")]
+    handler: I.transformCallback(cb), // 要的是回调 id，不是函数
+  });
+}
+```
+
+`listen` 的三个参数一个都不能少，`handler` 尤其容易写成函数——它要的是
+`transformCallback` 发出来的**数字 id**。参数形状是抄 tauri 2.12.5 的
+`src/event/plugin.rs`（`listen(webview, event, target: EventTarget, handler: CallbackFn)`），
+不是猜的。
+
+**然后是最重要的一条：这一步并没有关掉通用的口子。**
+`window.__TAURI_INTERNALS__` 仍在，描述符实测是
+`{ writable: false, enumerable: false, configurable: false }`——删不掉、覆盖不了。
+所以：
+
+- 关掉 `withGlobalTauri` 缩小的是**可发现面**；
+- 真正的边界只能放在 Rust 侧。
+
+于是 16 条命令全部加了 `window: WebviewWindow` 参数 + 进门 `only(&window, W_*)?`：
+
+| 窗口 | 条数 | 命令 |
+|---|---|---|
+| `main` | 8 | `drag_start` `drag_end` `mouse_ignore` `pet_hover` `app_quit` `pet_menu` `dashboard_toggle` `theme_get` |
+| `bubble` | 4 | `permission_decide` `bubble_ready` `bubble_height` `bubble_dismiss` |
+| `dashboard` | 4 | `dashboard_snapshot` `dashboard_copy_path` `theme_list` `theme_set` |
+
+回归 68 → 73 条，新增 5 条：`__TAURI__` 不存在 / `__TAURI_INTERNALS__` 不可配置 /
+主调气泡被拒 / 主调看板被拒 / 看板调主被拒。**三条越权断言都绕过 `window.clawd`
+直连 `__TAURI_INTERNALS__.invoke`**——要测的是 Rust 拦不拦得住，不是桥拦不拦。
+
+白名单解决的是"越窗口"，不是"同窗口内的越权"：主窗口真被注入了脚本，它照样能调
+主窗口那 8 条（含 `app_quit`）。这条 Electron 版一模一样，不要以为加了白名单就安全了。
+
+顺手留了个诊断脚本 `scripts/probe-tauri-surface.js`：一分钟内把"页面上还剩哪些
+能调后端的入口"重新测一遍。结论会随 Tauri 版本变，这个脚本不会撒谎。
+
+#### ③ 锁屏从 2s 轮询换成事件（`sys.rs` / `main.rs` / `server.rs`，91 → 302 行）
+
+SEC-07 要求"锁屏时把猫藏起来"。Electron 版用 `powerMonitor` 事件，Tauri 迁移时先落成
+`OpenInputDesktop` 每 2 秒问一次——**能工作，但语义是"最多晚 2 秒才藏"**。
+锁屏本身就是"你不在，别让旁边的人看见屏幕上的东西"，晚 2 秒正好落在那 2 秒里。
+
+换成事件：`WTSRegisterSessionNotification` + 自建消息专用窗口。
+
+- 为什么自己开窗口，而不是把消息塞进 tao 的消息循环：`WM_WTSSESSION_CHANGE` 是投给
+  **某个 HWND** 的，注册时就得交出一个句柄。塞进 tao 那条循环意味着要 hook 它的 wndproc
+  （Tauri 没开这个口子），而且那个窗口一旦被销毁重建，注册就静默失效。
+- 消息专用窗口：`HWND_MESSAGE` 当父窗口，不显示、不进任务栏、不参与 Z 序，
+  自己那条线程跑 `GetMessageW` 循环。**和 tao 完全不相交**，它出问题不会拖累画面。
+
+只认两个参数，其余一律返回 0 不动：
+
+| `wParam` | 含义 | 处理 |
+|---|---|---|
+| `WTS_SESSION_LOCK` (7) | 锁屏 | 藏 |
+| `WTS_SESSION_UNLOCK` (8) | 解锁 | 显 |
+| `REMOTE_DISCONNECT` (3) / `CONSOLE_DISCONNECT` (4) / `LOGOFF` (5) | 换显示通道 / 注销 | **忽略** |
+
+忽略那三条是刻意的：远程桌面断开时用户还在（只是换了块屏幕），注销是进程本来就该退，
+两者都不该触发"藏起来"——按 `!= UNLOCK` 一刀切会把这类场景全算成锁屏。
+
+`WndProc` 里只做一件事：把锁/解锁交给回调，立刻返回。回调里再 `spawn` 一次才去
+hide/show——那两个 API 要把请求投递到主线程并等回执，在 WndProc 里等就是卡住这条消息线程。
+
+**降级是有意留的**：注册失败（非交互会话、以后换权限模型都可能）就退回原来的 2s 轮询，
+并打一行日志。理由写在 `main.rs` 里——**宁可 2 秒后才藏，也不要一直亮在锁屏界面上**。
+
+`/health` 因此多了个字段：
+
+```json
+{ "ok": true, "lock": "event" }
+```
+
+不是为了好看。"锁屏后没藏窗口"这种问题没法当场复现，而事件和轮询**失败的样子一模一样**，
+不把模式写在探针上，就只能靠猜。回归里这条断言实测拿到 `event`。
+
+编译/结构上踩了两处：
+
+- `RegisterClassW` / `WNDCLASSW` 被 `Win32_Graphics_Gdi` feature 门禁挡着（结构体里带
+  `HICON` / `HBRUSH`），报 `E0432`。加 feature，注释写明"我们只是建消息专用窗口，一个像素都不画"。
+- `let app = app.clone()` 之后又在 `if !wired` 里用 `app` → `E0382`。改名 `watcher_app`。
+
+测试按"能被自动验证到哪一步"分层：
+
+- 单测 1 条 `session_messages_drive_the_callback`：直接投 `WM_WTSSESSION_CHANGE`，
+  验 LOCK → true / UNLOCK → false / 那三条 → 不触发。**合成一个测试而不是拆三个**，
+  因为 `SESSION_CB` / `SESSION_HWND` 是进程级单例，cargo 默认并行跑会把回调互相覆盖。
+- 回归 +1 条：`/health` 的 `lock === "event"`。
+- **没被自动验证的一段**：事件 → `apply_lock()` → 窗口 hide/show。真锁屏没法放进回归
+  （会把跑测试的人踢出桌面），单测只覆盖到"消息 → 回调"为止，后面那十行调 Tauri API 的
+  代码靠**人工锁一次屏**验。这条写在这里，是因为 74 条全绿很容易被读成"锁屏行为整个被覆盖了"。
+
+`cargo test` 21 → **22 passed**，回归 73 → **74 PASS / 0 FAIL**。
 
 ### S9 鼠标经过，把睡着的猫叫醒（2026-10-28，紧接 S8 之后，同一天）
 
@@ -764,52 +871,3 @@ spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"]);
 | 2026-10-26 | 安全 | 修复 SEC-01/02/03/04/06/09/10，加固 SEC-05，部分修 SEC-07；新增 `src/port-file.js`；`fake-feed.js` 改带 token。SEC-08 待大版本升级 |
 | 2026-10-26 | 决策 | 建立项目台账（`docs/ledger/`），并完成 S1-S3 全量安全审计，产出 10 条问题 |
 | 2026-10-26 | 部署 | `first commit`，8 个源文件入库 |
-
-#### ② 关掉 `withGlobalTauri` + 每窗口命令白名单（`tauri.conf.json` / `tauri-bridge.js` / `main.rs`）
-
-`tauri.conf.json` 的 `withGlobalTauri` 改 `false`，`window.__TAURI__` 整套消失
-（回归断言钉着）。`src/tauri-bridge.js` 从"调 `T.core.invoke` / `T.event.listen`"
-改成自己拼——8 行：
-
-```js
-const I = window.__TAURI_INTERNALS__;
-const invoke = I.invoke.bind(I);
-function listen(name, cb) {
-  return invoke("plugin:event|listen", {
-    event: name,
-    target: { kind: "Any" },          // EventTarget 是 #[serde(tag = "kind")]
-    handler: I.transformCallback(cb), // 要的是回调 id，不是函数
-  });
-}
-```
-
-`listen` 的三个参数一个都不能少，`handler` 尤其容易写成函数——它要的是
-`transformCallback` 发出来的**数字 id**。参数形状是抄 tauri 2.12.5 的
-`src/event/plugin.rs`（`listen(webview, event, target: EventTarget, handler: CallbackFn)`），
-不是猜的。
-
-**然后是最重要的一条：这一步并没有关掉通用的口子。**
-`window.__TAURI_INTERNALS__` 仍在，描述符实测是
-`{ writable: false, enumerable: false, configurable: false }`——删不掉、覆盖不了。
-所以：
-
-- 关掉 `withGlobalTauri` 缩小的是**可发现面**；
-- 真正的边界只能放在 Rust 侧。
-
-于是 16 条命令全部加了 `window: WebviewWindow` 参数 + 进门 `only(&window, W_*)?`：
-
-| 窗口 | 条数 | 命令 |
-|---|---|---|
-| `main` | 8 | `drag_start` `drag_end` `mouse_ignore` `pet_hover` `app_quit` `pet_menu` `dashboard_toggle` `theme_get` |
-| `bubble` | 4 | `permission_decide` `bubble_ready` `bubble_height` `bubble_dismiss` |
-| `dashboard` | 4 | `dashboard_snapshot` `dashboard_copy_path` `theme_list` `theme_set` |
-
-回归 68 → 73 条，新增 5 条：`__TAURI__` 不存在 / `__TAURI_INTERNALS__` 不可配置 /
-主调气泡被拒 / 主调看板被拒 / 看板调主被拒。**三条越权断言都绕过 `window.clawd`
-直连 `__TAURI_INTERNALS__.invoke`**——要测的是 Rust 拦不拦得住，不是桥拦不拦。
-
-白名单解决的是"越窗口"，不是"同窗口内的越权"：主窗口真被注入了脚本，它照样能调
-主窗口那 8 条（含 `app_quit`）。这条 Electron 版一模一样，不要以为加了白名单就安全了。
-
-顺手留了个诊断脚本 `scripts/probe-tauri-surface.js`：一分钟内把"页面上还剩哪些
-能调后端的入口"重新测一遍。结论会随 Tauri 版本变，这个脚本不会撒谎。
