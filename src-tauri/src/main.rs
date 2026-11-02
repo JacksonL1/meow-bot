@@ -12,6 +12,7 @@
 mod permission;
 mod risk;
 mod server;
+mod single;
 mod state;
 mod sys;
 mod theme;
@@ -323,8 +324,10 @@ fn mouse_ignore(app: AppHandle, ignore: bool) {
     }
 }
 
-#[tauri::command]
-fn pet_hover(app: AppHandle, st: tauri::State<'_, AppState>) {
+/// 把猫从睡着里叫醒一次。三条来源共用：鼠标压在宠物上（`pet:hover`）、
+/// 用户第二次点开图标（单实例锁）、以后可能还有别的"招呼一下"。
+fn poke(app: &AppHandle) {
+    let Some(st) = app.try_state::<AppState>() else { return };
     let woke = {
         let mut s = st.store.lock().unwrap();
         s.wake()
@@ -334,6 +337,11 @@ fn pet_hover(app: AppHandle, st: tauri::State<'_, AppState>) {
         let _ = app.emit("state", &snap);
         let _ = app.emit("cast", &snap.sessions);
     }
+}
+
+#[tauri::command]
+fn pet_hover(app: AppHandle) {
+    poke(&app);
 }
 
 #[tauri::command]
@@ -588,6 +596,19 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 }
 
 fn main() {
+    // ---- 单实例锁：必须在**一切之前** ----
+    // 端口、端点文件、托盘图标全是"每个进程一份"的东西。第二份进程一旦走到
+    // setup，就会 bind 23333 失败 → 退回随机端口 → 覆盖端点文件，
+    // 于是 hook 把事件送进第二份，而用户看的是第一份那只猫：画面永远不动。
+    //
+    // Electron 版就是这一段（main.js:28 的 requestSingleInstanceLock），
+    // 迁移时漏了，现在补上。
+    let Some(_instance) = single::acquire() else {
+        eprintln!("[single] 已经有一份在跑，这份只负责叫醒它");
+        single::wake_first();
+        return;
+    };
+
     let app = tauri::Builder::default()
         .setup(|app| {
             let handle = app.handle().clone();
@@ -626,6 +647,16 @@ fn main() {
                 gaze_x: AtomicI32::new(0),
                 gaze_y: AtomicI32::new(0),
             });
+
+            // ---- 单实例的另一半：等第二份进程来捅 ----
+            // 锁在 main() 开头已经抢过了，这里只开那个命名事件。
+            // 为什么要有这一下：Electron 的 second-instance 会 focus 窗口，
+            // 但桌宠窗口是 skip_taskbar + focused(false) 的，抢焦点等于打断用户；
+            // 让它醒一下是同一个意思又不动别人的鼠标。
+            {
+                let h = handle.clone();
+                single::watch(move || poke(&h));
+            }
 
             // ---- HTTP ----
             let token = server::random_token();

@@ -24,8 +24,9 @@ regex = "1"
 # 我们只需要"收一个 POST、等一个决定、回一个 JSON"，同步模型足够，
 # 换 async 运行时要多带一个线程池 + 几 MB 常驻，不值。
 tiny_http = "0.12"
-# 取光标位置（拖动窗口、gaze 采样）、工作区、剪贴板、锁屏检测。
-# 只要四个系统调用，所以逐个 feature 开——不用 windows 的完整绑定层。
+# 取光标位置（拖动窗口、gaze 采样）、工作区、剪贴板、锁屏检测、
+# 以及单实例锁（命名互斥量 + 命名事件）。
+# 只要几个系统调用，所以逐个 feature 开——不用 windows 的完整绑定层。
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
@@ -33,6 +34,10 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Memory",
     "Win32_System_Ole",
     "Win32_System_StationsAndDesktops",
+    # 单实例锁：CreateMutexW / CreateEventW / OpenEventW / SetEvent / WaitForSingleObject
+    "Win32_System_Threading",
+    # 上面几个 API 的签名里带 SECURITY_ATTRIBUTES（我们传 null，但类型要能解析）
+    "Win32_Security",
 ] }
 
 [profile.release]

@@ -3,13 +3,14 @@
 > **2026-11-02 起有两套容器**：Electron（`src/` 下的 `main.js` + `preload.js`）和
 > Tauri（`src-tauri/` 下的 Rust）。渲染层与三份 HTML 两边共用，靠 `src/tauri-bridge.js` 切换。
 >
-> **37 个源文件 / 12756 行**：
+> **38 个源文件 / 12945 行**：
 > `src/` 17 个 = 14 个 `.js` 4555 行 + 3 个 `.html` 621 行；
-> `src-tauri/` 11 个 = 7 个 `.rs` 3318 行 + `build.rs` 3 行 + `tauri.conf.json` 21 行 +
+> `src-tauri/` 12 个 = 8 个 `.rs` 3507 行 + `build.rs` 3 行 + `tauri.conf.json` 21 行 +
 > `capabilities/default.json` 13 行 + `Cargo.lock`（4445 行，**生成物不计**）；
 > `hooks/` 2 个 645 行；`scripts/` 7 个 3580 行。
-> 实测 **2026-11-02 10:30**（S10-5 Tauri 迁移后）。上一次是 22 个 / 8552 行（2026-10-30，S10 后）。
-> **差 +15 个文件 / +4204 行全部来自 Tauri 迁移**，其中 3318 行是把 `state/theme/risk/permission/server`
+> 实测 **2026-11-02 10:30**（S10-5 Tauri 迁移后；`single.rs` 按 S10-6 补入）。
+> 上一次是 22 个 / 8552 行（2026-10-30，S10 后）。
+> **差 +16 个文件 / +4393 行全部来自 Tauri 迁移**，其中 3318 行是把 `state/theme/risk/permission/server`
 > 五个文件用 Rust 重写了一遍（重写不是翻译：正则换成 `regex` crate 之后两处环视要改写成显式逻辑，
 > 见 `src-tauri/src/risk.rs` 的 `has_single_gt` / `is_delete_without_where`）。
 > 另有 `src-tauri/target/`（4.0 GB）与 `src-tauri/gen/` 两个纯生成目录，**都不进台账也不进 git**。
@@ -79,6 +80,7 @@ clawd-starter/
 | `src-tauri/src/permission.rs` | S10-5 | 裁决台：`Entry { view, tx: Sender<Outcome> }`，HTTP 线程拿 `Receiver` 阻塞等待；`settle()` 是唯一出口（`pending.remove` 保证二次点击落空） | **289 行**，4 条单测（决定只送达一次 / 超时不是 deny / risk 快照进 view / dispose 清空）。**已知差异**：tiny_http 没有 `res.on(close)`，对端掐断只能等超时兜底（结论仍是 204）。`create()` 里**只登记不等待**——在那里等会把 accept 循环卡死 |
 | `src-tauri/src/server.rs` | S10-5 | 本地 HTTP 服务（tiny_http）：`/state` `/health` 四道锁、`/permission` 三道；固定 23333，被占回退随机并告警；端点文件格式与 `port-file.js` 完全一致 | **328 行**，3 条单测。**每条请求一个线程**（`/permission` 会阻塞到用户点为止，不分开第二条就被挡在门外）。`random_token()` 用 `RandomState` + 纳秒熵凑 64 位十六进制，不引入 rand crate。**`OnChange` 回调是这次补的**：`apply()` 内部已经调过 `tick()`，`tick()` 顺手更新了 `last_visual`，心跳再 tick 时比的是「新值 vs 新值」→ 变化永远推不出去 |
 | `src-tauri/src/sys.rs` | S10-5 | Win32 四件事：`cursor_pos()`（GetCursorPos）／`work_area()`（SPI_GETWORKAREA）／`set_clipboard_text()`（GlobalAlloc + CF_UNICODETEXT）／`is_locked()`（OpenInputDesktop 失败 = 锁屏） | 91 行。**锁屏检测从事件变成轮询**（2s）：Electron 有 `powerMonitor`，Tauri 没有等价物 |
+| `src-tauri/src/single.rs` | S10-6 | 单实例锁：`CreateMutexW` 抢命名互斥量（`acquire`）、第二份进程 `SetEvent` 捅第一份（`wake_first`）、第一份起线程死等（`watch`）。3 条单测 | **189 行**。选互斥量而不是锁文件：进程被强杀 / 崩溃 / 断电后锁文件会留下，pid 还会被复用；互斥量的句柄归内核，进程怎么消失都会被释放，**不需要任何清理逻辑**。**锁名带端点文件路径的 FNV 哈希**——不是洁癖：回归脚本用 `CLAWD_PORT_FILE` 指临时文件，就是为了能在"用户正开着桌宠"时跑；名字固定的话回归一启动就被自己拦住。哈希用 FNV-1a 而不是 `DefaultHasher`：后者输出没有跨版本保证，升一次 Rust 就可能换个锁名，那属于"能开两份"的隐形 bug |
 | `src-tauri/build.rs` | S10-5 | `tauri_build::build()` 一行调用，编译期把 `tauri.conf.json` 和 capabilities 编译成 ACL 表，并把 `frontendDist` 指向的 `src/` 嵌进二进制 | 3 行。**它才是把前端塞进 exe 的那一步**——`tauri.conf.json` 只是声明；改了 `src/` 里的文件必须重跑 `cargo build`，只重启 exe 看到的还是旧页 |
 | `src-tauri/Cargo.lock` | S10-5 | 锁定的依赖树 | 4445 行，**不计入行数统计**（生成物，但命令行程序必须提交，`cargo build --release` 才对所有人生成同一棵依赖树）。看一眼就有用的数字：`window_vibrancy` 在里面——透明/毛玻璃不是我手写的 |
 | `hooks/clawd-hook.js` | S4 | agent hook 适配器，**只走一个方向**：读 stdin（2s 硬超时 / 1MB 上限）→ 只取 `session_id/event/cwd/tool_name/title` → 探端口 → POST（1.5s 超时）→ 永远 `exit(0)`。**不再往 stdout 写一个字节**（S8 的送信 2026-10-30 整套砍掉了）。`title` 由 `deriveTitle()` 在**本地**从 `session_title` 或 `UserPromptSubmit` 的 prompt 第一行推出来——**prompt 原文不进这条链路**，只有那一行派生结果出去；第一行命中 `TITLE_SECRET_RE` 就整个标题都不要 | **212 行**。**2026-10-30：Notification 的生命周期闲聊在源头滤掉**——`IGNORED_NOTIFICATION_TYPES = {idle_prompt, auth_success}`（这两个值抄自主仓库 `hooks/workbuddy-hook.js:30` 的实测注释：`idle_prompt` 是 Stop 之后约 60 秒的"再发一条消息吧"，`auth_success` 是每轮开头都发的登录 toast）。**必须在 hook 侧滤而不是交给状态机**：notification 一旦变成上面那个长状态，一条 `idle_prompt` 挂上来就是"猫凭空喊好几分钟"。是白名单式的（只丢明确列出的），没见过的 `notification_type` 照常放行。**2026-10-29：缺 `session_id` 的事件一律丢弃，绝不合成占位 id**（原来是 `|| "unknown"`）：多条真实会话会被塞进同一条幽灵会话，事件互相覆盖——A 正在 thinking，B 结束发一个 `Stop` → attention 播完回到 idle，**A 的画面就变 idle 了**。主仓库 `hooks/workbuddy-hook.js` 这条带着 bug 编号（#618 / #648），注释的原话是合成 id 会造出一个"后面的事件既更新不了也清除不掉"的幻影会话。`trim()` 之后再判空，否则 `"   "` 是 truthy 字符串会被当成有效会话号；警告走 stderr——**stdout 在 `UserPromptSubmit` 上是协议**（会被宿主收进上下文）。三条铁律：不阻塞、不打日志（**现在连"协议输出"都不存在了**，所以这条就是字面意思：什么都不打印）、不抛异常。stdin 排在探端口之前，这个顺序最初是为送信定的；送信砍掉后它是个**待议项**（单看收这一路，先探端口更省），改之前要想清楚宿主把 payload 写进管道时我们已经退出的后果 |

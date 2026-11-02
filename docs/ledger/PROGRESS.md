@@ -108,13 +108,53 @@ Tauri v2 的 IPC 是 `fetch("ipc://localhost/<cmd>")`，Windows 上落成 `http:
 
 #### 还没做的
 
+> S10-6 收尾进度：单实例锁 ✅ / 关 `withGlobalTauri` ⬜ / 锁屏换事件 ⬜ / 打包分发 ⬜
+
 - [ ] **打包分发**：`bundle.active` 现在是 `false`，只产出裸 exe。要发布得配 WiX/NSIS
       （`tauri build` 依赖 WiX 3，本机还没装）
-- [ ] **开机自启 / 单实例**：Electron 版靠 `requestSingleInstanceLock()`，
+- [x] **开机自启 / 单实例**：Electron 版靠 `requestSingleInstanceLock()`，
       Tauri 侧没做等价物——现在开第二份会抢 23333 端口，回退随机端口并告警
+      → **S10-6 已补**（`single.rs`，命名互斥量 + 命名事件，见下）
 - [ ] **锁屏检测**是 2s 轮询 `OpenInputDesktop`，Electron 版是 `powerMonitor` 事件。
       轮询在锁屏后仍会跑（便宜，但确实在跑）
 - [ ] **托盘图标**是脚本手画的 PNG（`scripts/make-icons.js`），不是设计稿
+
+### S10-6 收尾四项（2026-11-02，S10-5 之后同一天）
+
+S10-5 收尾时留下的四条"还没做"，逐条关掉。顺序按"风险从低到高、依赖从少到多"：
+单实例锁 → 关 `withGlobalTauri` → 锁屏换事件 → 打包分发（打包放最后，因为它要求前面三样都稳定）。
+
+#### ① 单实例锁（`src-tauri/src/single.rs`，189 行）
+
+**先纠一条台账自己的错**：S10-5 写的是"开第二份 → 回退随机端口 → 影响是桌面上出现两只猫、
+hook 仍然打给第一只（端口没变）"。**后半句不成立**——`server::start()` 里
+`write_port_file()` 是无条件执行的（`server.rs:234`），第二份进程拿着它的随机端口
+**覆盖**端点文件。真实后果是 **hook 改打第二份、用户看的是第一份**：事件全落进没人看的进程，
+画面永远不动。这比"两只猫"严重得多，而且完全没有报错。
+
+做法：
+- `CreateMutexW` 抢命名互斥量，名字 `Local\com.clawd.starter.singleton.v1`。
+  为什么不是锁文件：进程被强杀 / 崩溃 / 断电后锁文件会留下，靠 pid 查活又会被 pid 复用坑，
+  两种都得写清理逻辑，而清理逻辑本身会出错。互斥量的句柄归内核，进程怎么消失都会被释放。
+- 抢不到 → `wake_first()`（`SetEvent` 那个命名事件）+ `return`。**位置在 `Builder::build` 之前**，
+  所以端口、端点文件、托盘、三个窗口一个都不会被碰。
+- 第一份在 setup 里 `watch()` 起一个线程死等那个事件，等到就 `poke()` —— 让猫醒一下。
+  Electron 的 `second-instance` 是 focus 窗口，但桌宠窗口是 `skip_taskbar` + `focused(false)`，
+  抢焦点等于打断用户；醒一下是同一个意思又不动别人的鼠标。
+
+**锁名带端点文件路径的 FNV 哈希**，这是本轮最容易被当成洁癖的一处，理由在 `single.rs` 注释里：
+回归脚本用 `CLAWD_PORT_FILE` 指临时文件，就是为了能"在用户正开着桌宠的时候跑"。
+名字要是固定的，回归一启动就被自己拦住，68 条断言会变成"进程秒退、全挂"。
+
+判据不是"第二份退没退"，而是**端点文件一个字节都没变**——那条更接近真实需求。
+回归 +3 条（`verify-tauri.js` 65 → 68），单测 +3 条（18 → 21）。
+
+一个没测到的链接要说清楚：`watch(move || poke(&h))` 这两行**没有回归断言**。
+`wake()` 只在"某只猫正在 Sleeping"时才返回 true，而进入 Sleeping 要等 `sleepAfterMs`
+（默认几十秒）。为了这条断言去加一个环境变量覆盖睡眠时长，等于为了让测试好写而改产品代码，
+所以分层处理：事件机制本身由单测 `wake_first_reaches_watcher` 覆盖
+（`SetEvent` → `WaitForSingleObject` → 回调，全链路真跑），只留这两行接线靠人工。
+
 
 ### S9 鼠标经过，把睡着的猫叫醒（2026-10-28，紧接 S8 之后，同一天）
 

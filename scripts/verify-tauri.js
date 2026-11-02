@@ -477,10 +477,45 @@ async function main() {
     }
     await R.eval("window.clawd.toggleDashboard(), 1");
 
-    // ---------- 10. 页面无异常 ----------
+    // ---------- 10. 单实例锁 ----------
+    // 测的是"第二份进程不该活着"，但真正要钉的判据是**端点文件一个字节都没变**。
+    // 只看进程有没有退是不够的：原来的毛病正是"退是没退，可它已经把端口换成
+    // 随机值并覆盖了端点文件"，于是 hook 拿着新端口去找第二份，
+    // 而用户屏幕上还是第一份那只猫——事件全部落进没人看的进程。
+    const before = fs.readFileSync(PORT_FILE, "utf8");
+    const env2 = { ...process.env, CLAWD_PORT_FILE: PORT_FILE };
+    delete env2.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS; // 第二份不该活到建窗口那一步
+    const t2 = Date.now();
+    const second = spawn(EXE, [], { cwd: ROOT, env: env2, stdio: ["ignore", "pipe", "pipe"] });
+    const secondCode = await new Promise((resolve) => {
+      let settled = false;
+      const done = (v) => {
+        if (settled) return;
+        settled = true;
+        resolve(v);
+      };
+      const t = setTimeout(() => {
+        try {
+          spawnSync("taskkill", ["/PID", String(second.pid), "/T", "/F"], { stdio: "ignore" });
+        } catch {}
+        done("timeout");
+      }, 5000);
+      second.once("exit", (code) => {
+        clearTimeout(t);
+        done(code);
+      });
+    });
+    ok("第二份进程 5s 内自己退出（单实例锁生效）", secondCode === 0, `${Date.now() - t2}ms code=${secondCode}`);
+    ok("第二份没动端点文件（端口与 token 一字未变）", fs.readFileSync(PORT_FILE, "utf8") === before);
+    // 用端点文件里那个 token 去打 /health：200 同时证明两件事——
+    // 第一份还活着，且它认的还是原来那个 token（没被第二份换掉）。
+    const still = await post("/health", null, readEndpoint().token, { method: "GET" });
+    ok("第一份仍然健康、且认的还是原来那个 token", still.code === 200, `code=${still.code}`);
+
+    // ---------- 11. 页面无异常 ----------
     ok("整轮跑下来页面没抛过未捕获异常", pageErrors.length === 0, pageErrors.slice(0, 2).join(" | "));
 
-    // ---------- 11. 退出清理 ----------
+    // ---------- 12. 退出清理 ----------
     // 挂着的请求必须被 204 掉，否则对端的 HTTP 连接会一直悬着，
     // 而用户已经看不到任何气泡了 —— 那是最难受的一种"卡住"。
     const hanging = post("/permission", { session_id: "bye", tool_name: "Bash", tool_input: { command: "ls" } }, null, { timeout: 15000 });
