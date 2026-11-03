@@ -137,7 +137,7 @@
 | SEC-05 | 🟡 已加固 | `src/renderer.js`：`innerHTML` 改为 `DOMParser` + 标签白名单（svg/g/path/rect/text…）+ 属性清洗（剥 `on*`、非 `#` 的 `href`、`javascript:`、`url(`）；解析失败返回 `null`，`setState` 直接跳过 | 恶意 SVG 的 `<script>`/`<foreignObject>`/`<image>`/`onclick`/`onload` 全部被剥；正常帧与 `.pupils` 不受影响；非法 XML 返回 null |
 | SEC-06 | ✅ 已修 | `webPreferences` 显式写 `sandbox: true`、`webSecurity: true`、`allowRunningInsecureContent: false` | 启动、IPC、拖拽、穿透全部正常 |
 | SEC-07 | 🟡 部分修 | `powerMonitor` 监听 `lock-screen`/`suspend` 隐藏窗口，`unlock-screen`/`resume` 恢复；气泡内容脱敏留到 S5 | 仅逻辑实现，未做真机锁屏/投屏回归 |
-| SEC-08 | ✅ 已修（10-27） | 升到 `electron@45.0.0`，`~` 版本范围。见下一节 | `npm audit` → 0 漏洞；回归 37/37 |
+| SEC-08 | ✅ 已消除（2026-11-03） | 升到 `electron@45.0.0` 之后**整个 Electron 依赖随容器删除**：`package.json` 的 `dependencies` / `devDependencies` 均为空，`npm audit` 的审计对象归零。历史修复记录见下一节（留作"依赖面也是攻击面"的样本） | `npm ls --all` 只剩空壳；`package-lock.json` 里 electron 计数 0 |
 | SEC-09 | ✅ 已修（10-27 修正） | `src/state.js`：`cwd` 只保留最后一段目录名，限 200 字符。**S6 时修正为分层**：存储层留完整（限 1024），快照层只出 basename，完整路径只在显式点击时单条释放 | 传 `C:\Users\Think\secret-folder\my-proj`，快照里只剩 `my-proj`；看板 DOM 里查不到盘符 |
 | SEC-10 | ✅ 已修 | 端点文件统一写 `userData`（`src/port-file.js` 统一算路径，`fake-feed.js` 复用同一份逻辑）；`app.requestSingleInstanceLock()` 单实例锁 | 文件落在 `%APPDATA%\clawd-starter\clawd-starter.port`；第二个实例直接退出 |
 
@@ -148,6 +148,10 @@
 ---
 
 ## 2026-10-27 修复记录（SEC-08 依赖升级）
+
+> **2026-11-03 补记**：这一节记录的对象（`electron` 及那 8 条公告）已经不存在了——容器整套删除、
+> npm 依赖归零。留着的理由不是"这个漏洞还在"，而是它示范了一件事：一个桌宠为了显示几张 SVG
+> 引入了 300+ 个传递依赖，其中 8 条带 high。评测"要不要自己写容器"时，这部分经常被漏算。
 
 **结论**：`electron 41.10.7 → 45.0.0`，`npm audit` 从 8 条公告降到 0。
 
@@ -954,7 +958,7 @@ cargo tree --target x86_64-pc-windows-msvc -i proc-macro-error@1.0.4
 
 审计不是只挑毛病，以下三点是这个骨架最容易在后续开发中被破坏、必须守住的东西：
 
-1. **`preload.js` 只暴露动作，不暴露 `ipcRenderer`** —— 这是 Electron 安全的核心边界，S7 加主题功能时最容易被「顺手」开个大口子。
+1. **进程间桥只暴露动作，不暴露通用调用口**（S10-9 起是 `src/tauri-bridge.js` 与每条命令上的 `only(&window, …)`；Electron 时代是 `preload.js` 不暴露 `ipcRenderer`）——这是加功能时最容易被「顺手」开大口子的地方。`withGlobalTauri` 曾经把它开过一次（S10-6② 关掉），现在 `__TAURI_INTERNALS__` 摘不掉，靠**命令侧白名单**兜。
 2. **服务端强制 256KB 请求体上限，且超限立即 `req.destroy()`** —— 很多本地服务忘掉这条。
 3. **渲染层的状态白名单 + 唯一出口**：`svgNode()` 之外没有任何地方拼接 HTML，主题内容只能经 `DOMParser` + `ALLOWED_TAGS` 进 DOM。这让「`themes/` 下的任意字符串」无法直接变成 DOM。
    ⚠️ 这一条**被破坏过一次**（见上一节），破坏的方式是 `innerHTML = frames.join("")`。守它不是抄一遍函数，是保证 `innerHTML` 在 `src/` 下**零出现**。

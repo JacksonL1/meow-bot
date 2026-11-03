@@ -1,19 +1,19 @@
 # clawd-starter
 
-> 从零重搭 Clawd 桌宠的骨架：做一个透明置顶、会跟着鼠标看你的桌面宠物（2026-11-02 起容器有 Electron 和 Tauri 两套），先把「agent 事件 → 状态机 → 画面」这条数据链路跑通，之后每个阶段都往这条链路上加东西，而不是推倒重来。
+> 从零重搭 Clawd 桌宠的骨架：做一个透明置顶、会跟着鼠标看你的桌面宠物。先把「agent 事件 → 状态机 → 画面」这条数据链路跑通，之后每个阶段都往这条链路上加东西，而不是推倒重来。**2026-11-03 起只有一套容器：Tauri（Electron 已整套删除）。**
 
 | 项 | 内容 |
 |---|---|
-| 状态 | ACTIVE（S1–S10 完成；S10-5 容器换成 Rust） |
+| 状态 | ACTIVE（S1–S10 完成；S10-5 容器换成 Rust；S10-9 删掉 Electron + 接上签名） |
 | 路径 | `E:\JacksonLee\project\clawd-starter` |
-| 技术栈 | **两套容器，同一套渲染层**：① Electron 45.0.0（`nodeIntegration: false` + `contextIsolation: true` + `sandbox: true`）+ Node 原生 `http`/`fs`；② Tauri 2.12.5 + WebView2（Rust `tiny_http` + `regex` + `windows-sys`，**不用任何 `tauri-plugin-*`**）。渲染层纯手写 SVG 无框架、无构建工具 |
-| 入口 | Electron：`src/main.js`；Tauri：`src-tauri/src/main.rs` |
-| 启动 | `npm install` → `npm start`（`electron .`）；或 `npm run start:tauri`（`cargo run --release`） |
+| 技术栈 | **Tauri 2.12.5 + WebView2**（Rust `tiny_http` + `regex` + `windows-sys`，**不用任何 `tauri-plugin-*`**）。渲染层纯手写 SVG 无框架、无构建工具。`package.json` 的 `dependencies` / `devDependencies` 均为空 |
+| 入口 | Tauri：`src-tauri/src/main.rs`；渲染层：`src/index.html` |
+| 启动 | `npm run build` → `npm run start`（`cargo run --release`）；打包 `npm run bundle`（含签名，见 README） |
 | 端口 | **固定 23333**（与主仓库一致），只绑 `127.0.0.1`。为什么不能随机：权限 HTTP hook 的 url 是安装时写死进 `settings.json` 的，端口漂移就等于 hook 指向死端口。被占用时退回随机端口并显式 warn，但必须重跑 `install:hooks` |
 | 端点文件 | `%APPDATA%\clawd-starter\clawd-starter.port`，内容 `{port, token}`，权限 0600 |
-| 依赖服务 | 无。不连任何外部服务，只在本机开一个 HTTP 端口接收事件 |
-| 版本控制 | git，远端 `github.com/JacksonL1/meow-bot`，分支 `main`，与 origin 同步。S7 之后的每一次改动都已入库，最新一批是 S10-5：`081921f 容器换成 Rust：迁到 Tauri`（代码）+ `616cd41 台账：S10-5 Tauri 迁移`。**这一格不再写提交总数**：写下一个数字的那个提交本身会让数字 +1，改一次错一次——上一版写着「5 次提交、S7 尚未提交」，从 S7 烂到 S10-5 整整一个月没人对过账。要看数就 `git log --oneline \| wc -l`。**台账里凡是带计数的字段都有这个毛病**（体积那年改了七次，六次是在改数法），要么连口径和实测时间一起写，要么不写 |
-| 体积 | **41 个源文件，14328 行**（`src/` 17 个 = 14 js 4604 + 3 html 621、`src-tauri/` 12 个 = 8 rs 3970 + `build.rs` 3 + `tauri.conf.json` 33 + `capabilities/default.json` 13、`hooks/` 2 个 645、`scripts/` 10 个 4439；`Cargo.lock` 4445 行是生成物不计），另有 `themes/` 下 22 个 SVG 资产。**2026-11-02 16:52 实测**（上一次是同日 10:30 的 37 个 / 12756 行，差额主要是 S10-5～S10-7 的 `src-tauri/` 与新增的 `scripts/diag-events.js`、`verify-bundle.js`、`probe-tauri-surface.js`）。这条被改了七次，七次里六次不是代码变了、是**数法**变了（漏 html、漏 `src-tauri`、把 JSON 不算源文件、生成物混进来）。写体积时必须**连文件数、口径、实测时间一起写**，只写总数没法被复查 |
+| 依赖服务 | 无。不连任何外部服务，只在本机开一个 HTTP 端口接收事件；签名时才会连一次时间戳服务（`timestamp.digicert.com`） |
+| 版本控制 | git，远端 `github.com/JacksonL1/meow-bot`，分支 `main`，与 origin 同步。**这一格不写提交总数**：写下一个数字的那个提交本身会让数字 +1，改一次错一次。要看数就 `git log --oneline \| wc -l`。**台账里凡是带计数的字段都有这个毛病**（体积那年改了七次，六次是在改数法），要么连口径和实测时间一起写，要么不写 |
+| 体积 | **34 个源文件，10361 行**（`src/` 9 个 = 6 js 2855 + 3 html 621、`src-tauri/` 13 个 = 8 rs 3972 + `build.rs` 3 + `Cargo.toml` 56 + `tauri.conf.json` 37 + `capabilities/default.json` 13、`hooks/` 2 个 644、`scripts/` 10 个 2160；`Cargo.lock` 是生成物不计），另有 `themes/` 下 22 个 SVG 资产。**2026-11-03 实测**（删掉 Electron 的 9 个文件之后；上一次是 2026-11-02 的 41 个 / 14328 行）。这条被改了八次，八次里六次不是代码变了、是**数法**变了（漏 html、漏 `src-tauri`、把 JSON 不算源文件、生成物混进来）。写体积时必须**连文件数、口径、实测时间一起写**，只写总数没法被复查 |
 
 ## 它解决什么问题
 
@@ -44,27 +44,29 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 | S10-5 | **容器换成 Rust**：Tauri 2.12.5 + WebView2。后端（HTTP / 状态机 / 主题 / 裁决 / 风险评级）用 Rust 重写，三个窗口与托盘改 `WebviewWindow` / `TrayIconBuilder`，Win32 四件事自己写（`sys.rs`）。渲染层靠 `src/tauri-bridge.js` **一行没改**。新增 `scripts/verify-tauri.js`（65 条），Electron 那份仍 191 条 | 已完成 | 三处没变（动作面 / SVG 白名单 / 四道锁）、**一处变松**（`withGlobalTauri` 把 `core.invoke` 放到 `window` 上，已记录为让渡）、两处已知差异（无 `res.on(close)`、无单实例锁） |
 | S10-6 | **收尾 S10-5 留下的四条**：① 单实例锁（`single.rs`：命名互斥量 + 命名事件，回归 65 → 68 条）；② 关 `withGlobalTauri` + 每窗口命令白名单（回归 68 → 73 条，3 条越权断言直连 `__TAURI_INTERNALS__`）；③ 锁屏从 2s 轮询换成 `WTSRegisterSessionNotification` 事件（回归 73 → 74 条）；④ 打包分发：NSIS 安装包 1.57MB + `verify-bundle.js` 25 条（真装/真卸）。改动逐项单独入库 | 已完成 | 每项都带判据：单实例看**端点文件字节未变**（不是"进程退了没"）；命令白名单看**越权调用返回 forbidden**；锁屏看 **`/health` 的 `lock` 字段是 `event`**（`hide/show` 那一段靠人工锁屏验）；打包看**装出来的 exe 与裸 exe 逐字节相同**（只允许 bundler 那 3 字节补丁）+ 装完 `/health` 仍是 `event` |
 
+| S10-9 | **删掉 Electron 容器**（9 个文件 `git rm`，`DEFAULT_PORT` 迁进 `port-file.js`，`preview-shot` 移植到 Tauri）+ **接上发布物签名**（`scripts/sign-release.js`，PFX / 证书库指纹两种来源，强制时间戳） | 已完成 | 删除前先做依赖拓扑（三个发现，见 PROGRESS S10-9）；签名两条硬性事实：`signCommand` 的 cwd 是 `src-tauri/`、打包后裸 exe 被覆写。**配了证书却签失败 = 打包必须红**，不产出"没签成功"的安装包 |
+
 安全问题全部记录在 [SECURITY.md](./SECURITY.md)，每阶段开工前先看对应小节。
 
 ## 核心模块
 
 | 模块 | 职责 | 关键文件 |
 |---|---|---|
-| 窗口与进程 | 创建透明置顶窗口、拖拽轮询、眼球追踪采样、气泡窗口生命周期 | `src/main.js` |
-| 事件接入 | 本地 HTTP 服务，`GET /health`、`GET /state`、`POST /state`、`POST /permission` | `src/server.js` |
-| 状态机 | 事件→状态映射、多会话优先级仲裁、oneshot 自动回落、闲置 60s 入睡、`wake()`（鼠标唤醒，只认 sleeping） | `src/state.js` |
-| 权限裁决 | 挂起请求、等待决定、唯一出口 `settle()` 保证恰好响应一次 | `src/permission.js` |
-| 权限气泡 | 卡片 UI、两个按钮、Esc 不表态、量高度回传 | `src/bubble.html` + `bubble-renderer.js` + `bubble-preload.js` |
-| 会话看板 | 独立窗口、双击开关、1s 轮询快照、按「最吵的排前面」排序、演示模式、复制路径 | `src/dashboard.html` + `dashboard-renderer.js` + `dashboard-preload.js` |
-| 渲染 | **两条路径**：① 骨骼弹簧（`rigType: ragdoll-spring-v2`，JS 直接拼 SVG + 二阶弹簧阻尼通道，60fps）；② 帧序列（双图层交叉淡入、帧轮播、瞳孔位移插值）。两条都共用 `svgNode()` 白名单出口 | `src/renderer.js` |
-| 主题 | 扫目录、校验 schema 与资产、校验 `motion`/`gags` 规则、缺状态补齐、全坏兜底（主进程）；换主题 = 换帧数据 + 重画 | `src/theme.js` + `themes/<id>/theme.json` |
-| 进程间桥 | 只暴露具体动作，不泄漏 `ipcRenderer` | `src/preload.js`（主窗口 13 个）+ `src/dashboard-preload.js`（看板 5 个）|
+| 窗口与进程 | 创建透明置顶窗口、拖拽轮询、眼球追踪采样、气泡/看板窗口生命周期、托盘 | `src-tauri/src/main.rs` |
+| 事件接入 | 本地 HTTP 服务，`GET /health`、`GET /state`、`POST /state`、`POST /permission` | `src-tauri/src/server.rs` |
+| 状态机 | 事件→状态映射、多会话优先级仲裁、oneshot 自动回落、闲置 60s 入睡、`wake()`（鼠标唤醒，只认 sleeping）、事件账本 `recent` | `src-tauri/src/state.rs` |
+| 权限裁决 | 挂起请求、等待决定、唯一出口 `settle()` 保证恰好响应一次 | `src-tauri/src/permission.rs` |
+| 风险评级 | 命令词 + 参数两级判定，输出 低/中/高/极高 + 最多 4 条理由（纯函数，可单测） | `src-tauri/src/risk.rs` |
+| 权限气泡 | 卡片 UI、两个按钮、Esc 不表态、量高度回传 | `src/bubble.html` + `bubble-renderer.js` |
+| 会话看板 | 独立窗口、双击开关、1s 轮询快照、按「最吵的排前面」排序、演示模式、复制路径 | `src/dashboard.html` + `dashboard-renderer.js` |
+| 渲染 | **两条路径**：① 骨骼弹簧（`rigType: ragdoll-spring-v2`，JS 直接拼 SVG + 二阶弹簧阻尼通道，60fps）；② 帧序列（双图层交叉淡入、帧轮播、瞳孔位移插值）。两条都共用 `svgNode()` 白名单出口；分身 / 头巾也在这层 | `src/renderer.js` |
+| 主题 | 扫目录、校验 schema 与资产、校验 `motion` 规则、缺状态补齐、全坏兜底（Rust）；换主题 = 换帧数据 + 重画 | `src-tauri/src/theme.rs` + `themes/<id>/theme.json` |
+| 进程间桥 | 在 `window` 上装出与旧 `preload.js` 形状相同的 `clawd` / `bubble` / `dashboard`，只暴露动作 | `src/tauri-bridge.js` |
+| 端点约定 | 端点文件路径规则（纯 Node 也能算）+ `DEFAULT_PORT`，hook 与回归都用它 | `src/port-file.js` |
 | 调试 | 假数据源，三种用法（完整剧本 / 单事件 / 保持某状态）；形象对照截图；主题打包 | `scripts/fake-feed.js`、`preview-shot.js`、`build-preview-bundle.js` |
-| 回归闸门 | 主进程 inspector + 渲染进程 CDP，**191 条断言；当前 191 PASS / 0 FAIL**（剪贴板那条环境不可读时 `[warn]` 降级）；两条渲染路径用同一批断言、`rigMode` 分叉判据 | `scripts/verify-electron.js` |
-| 容器（Rust 侧） | 与上面每一行同构的 Rust 实现：HTTP（`server.rs`）、状态机（`state.rs`）、主题（`theme.rs`）、裁决（`permission.rs`）、风险评级（`risk.rs`）、窗口与线程（`main.rs`）、Win32（`sys.rs`） | `src-tauri/src/*.rs` |
-| Tauri 桥 | 在 `window` 上装出与 `preload.js` 形状相同的 `clawd` / `bubble` / `dashboard` | `src/tauri-bridge.js` |
-| 回归闸门（Tauri） | WebView2 CDP（`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=`），**74 条断言；当前 74 PASS / 0 FAIL** | `scripts/verify-tauri.js` + 共用的 `scripts/cdp.js` |
+| 回归闸门 | WebView2 CDP（`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=`），**75 条断言；当前 75 PASS / 0 FAIL**。开跑前比对源码与 exe 的 mtime，旧了直接拒跑 | `scripts/verify-tauri.js` + 共用的 `scripts/cdp.js` |
 | 打包闸门 | NSIS 安装包，**25 条断言；当前 25 PASS / 0 FAIL**（10 条只读 + 15 条真装/真跑/真卸） | `scripts/verify-bundle.js` + `src-tauri/tauri.conf.json` 的 `bundle` 段 |
+| 签名 | 由 `bundle.windows.signCommand` 调用；接 PFX 或证书库指纹，强制带 RFC3161 时间戳；也支持手工 `--verify` | `scripts/sign-release.js` |
 
 ## 已知限制
 
@@ -89,9 +91,13 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
   两种模式失败的样子一模一样，不写出来没法问诊。**hide/show 那十行没有自动验证**——
   真锁屏不能进回归，靠人工锁一次屏验
 - **已有 NSIS 安装包（S10-6④）**：`src-tauri/target/release/bundle/nsis/clawd-starter_0.1.0_x64-setup.exe`
-  （1.57MB，`installMode: currentUser`，装到 `%LOCALAPPDATA%\clawd-starter`，不提权）。
-  两条限制要记住：**没有代码签名**（双击会看到 SmartScreen「未知发布者」，只能买证书解决）；
-  `webviewInstallMode` 是默认的 `downloadBootstrapper`，**没有 WebView2 的离线机器装不上**
+  （1.59 MiB，`installMode: currentUser`，装到 `%LOCALAPPDATA%\clawd-starter`，不提权）。
+  **签名已接上（S10-9）**但用的是**自签名证书**（`CN=clawd-starter (local dev)`，仅本机可信）：
+  别人的机器上仍会看到 SmartScreen「未知发布者」。要真正消除只能买 OV 证书或上 Azure 制品签名，
+  价格与可用地区见 README「代码签名」。
+  另一条限制：`webviewInstallMode` 是默认的 `downloadBootstrapper`，**没有 WebView2 的离线机器装不上**
+- **`cargo tauri build` 结束后裸 exe 不带签名**（S10-9 实测）：打包器在签名之后又覆写了
+  `target/release/clawd-starter.exe`。安装包不受影响；`npm run bundle` 已串了一次补签，单独发裸 exe 时别忘了这一刀
 - **不能和主仓库 `clawd-on-desk` 同时运行**：都用 23333，且 hook URL 是安装时写死的
 - 命中判定用 `#pet` 的 176×176 包围盒，不是真实 alpha 遮罩——四个角上的透明区会误判为「可点击」
 - 看板的「复制路径」在回归里验的是返回值 + 剪贴板内容（实测能拿到完整路径）；但**环境不具备时**（某些会话读不到剪贴板）会降级成一条警告，不做假断言
@@ -107,10 +113,10 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 
 ## 硬约束（改代码前先看）
 
-1. **`preload.js` / `bubble-preload.js` / `dashboard-preload.js` 只暴露动作，不暴露 `ipcRenderer`**——这是 Electron 的安全边界，加功能时最容易顺手破坏。主窗口的动作数被回归钉死（现在 **12** 个），多一个少一个都会红。
+1. **`tauri-bridge.js` 只暴露动作，不暴露 `__TAURI_INTERNALS__`**——这是现在的进程间边界（Electron 版的 `preload.js` / `*dashboard-preload.js` 已随容器删除）。两层要同时守：**桥**只挂具体方法，**命令**侧每条 `#[tauri::command]` 都必须带 `only(&window, ...)` 做窗口白名单（硬约束 36）。主窗口的动作数被回归钉死（现在 **12** 个），多一个少一个都会红。
 2. **状态名必须存在于 `VISUAL_STATES`**，渲染层靠白名单挡住任意字符串进 DOM。
-3. **`transparent: true` 必须同时给 `backgroundColor: '#00000000'` 和 `hasShadow: false`**，缺一个就露底色。
-4. 环境里若有 `ELECTRON_RUN_AS_NODE=1`，`electron .` 会退化成纯 Node，表现为 `require('electron')` 返回字符串。启动前 `env -u ELECTRON_RUN_AS_NODE npm start`。
+3. **透明窗口的三个参数必须一套给全**：`transparent(true)` + `decorations(false)` + `shadow(false)`（Tauri）／`backgroundColor: '#00000000'` + `hasShadow: false`（Electron 史）。缺一个就露底色或露出边框阴影。
+4. ~~环境里若有 `ELECTRON_RUN_AS_NODE=1`…~~ **已失效**：Electron 容器 2026-11-03 删除，`electron .` 这条启动路径不存在了。留作历史注脚（`docs/ledger/DEVLOG.md` 有一整节讲它怎么骗人）。
 5. **权限的所有结局必须走 `settle()`**——任何绕开它直接写 `res` 的分支都会破坏「恰好响应一次」。
 6. **`/permission` 不能加 token 校验**，加了气泡就永远不出现（调用方 Claude Code 读不到端点文件）。
 7. **观察型 hook `async: true`，裁决型 hook 绝不写 `async`**——两者语义相反，不要统一。
@@ -141,7 +147,7 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 32. **窗口不能在 `#[tauri::command]` 里建**（同步 command 跑在主线程上，建窗会卡死在 WebView2 的创建回调；`app.exit()` 同理，消息循环正卡在那一帧里没人泵）。要建窗、要退出，先进 `std::thread::spawn`。判据不是「能不能建窗」，是**从哪个线程建**——同一段代码从 HTTP 线程调就是好的。
 33. **「先存起来等握手」之前，必须先把窗体出来**。`bubble.html` 要先加载才会发 `bubble_ready`，窗口不建出来这个信号永远不会到，请求就一直躺在槽里挂到超时——而界面上什么都不发生。这条的隐蔽性在于：**第二次请求也不会好**，它不是竞态，是死锁。
 34. **「算 change」和「推 change」之间要有一根显式的线**。`apply()` 内部调了 `tick()`，`tick()` 顺手更新了 `last_visual`；心跳再 tick 时比的是「新值 vs 新值」→ 返回 false → 这次变化永远推不出去。Rust 侧把这两件事分到了两个文件（`state.rs` 算、`server.rs` 推），拆的时候没人负责那根线。跨文件拆分状态机时，**先确认「谁负责通知」有名字**。
-35. **两套容器的「渲染层能做什么」必须逐条对齐**。Electron 的 `preload.js` 和 Tauri 的 `tauri-bridge.js` 是同一份契约的两个实现，动作名、参数、返回值都得一一对应（回归里两边的键名清单是硬写的）。换容器时最容易漏的不是功能，是**边界**：`withGlobalTauri` 顺手就把 `core.invoke` 放到了 `window` 上，那不叫「等价迁移」。
+35. **两套容器的「渲染层能做什么」曾必须逐条对齐**（历史，2026-11-03 起容器只剩一套）。当年 Electron 的 `preload.js` 与 Tauri 的 `tauri-bridge.js` 是同一份契约的两个实现，换容器时最容易漏的不是功能，是**边界**：`withGlobalTauri` 顺手就把 `core.invoke` 放到了 `window` 上，那不叫「等价迁移」。**结论留用**：迁移的验收要按契约逐条对照，不是按"功能看起来还在"。
 36. **JS 侧关不干净的东西，边界就放到 Rust 侧**。S10-6② 关掉 `withGlobalTauri` 之后，`window.__TAURI_INTERNALS__.invoke` 还在（描述符 `writable:false` + `configurable:false`，删不掉），所以 16 条命令逐条加了 `only(&window, ...)`。**新增命令必须同时加这一句**——漏了不会报错，只会静默地多出一个越窗口的口子。
 37. **先确认目标能不能被方案满足，再动手**。用户的原始目标是「常驻 15MB 以内」，而 Tauri 在 Windows 上仍然是 WebView2（Chromium）。实测：Rust 宿主私有内存 **11.2MB**（达标），WebView2 子进程 **202.4MB**，整机 **383MB**——和 Electron 的 **370MB** 基本持平。**这不是执行不到位，是目标与方案互斥**。遇到这种要先说清楚，不要把 383MB 描述成「接近 15MB」。
 38. **打包/搬运类操作的判据不是"哈希相同"，是"逐字节相同，且允许的差异能指名道姓"**。tauri-bundler 会把二进制里的 `__TAURI_BUNDLE_TYPE_VAR_UNK` 打成 `_NSS`（3 个字节），所以"装出来的 exe 与裸 exe sha256 必须相等"这条判据本身是错的——第一次跑就红了，而它指向的是一个不存在的 bug。同理，**卸载的验收要等所有痕迹都消失**：NSIS 删开始菜单 `.lnk` 比删 exe 晚一步，只查一次会把失败推到下一轮，看起来像"上一轮卸干净了"。

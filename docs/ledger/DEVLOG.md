@@ -4,6 +4,68 @@
 
 ---
 
+## 2026-11-03 · 删容器之前，先把"谁还在用它的零件"画出来
+
+用户说「现在有两个容器 Electron 与 Tauri，删掉 Electron」。九个文件，`git rm` 一行就完事——
+真正花时间的是**在按删除键之前回答"删了之后谁会缺东西"**。三个发现，每种都能单独让构建红：
+
+| 发现 | 如果不处理 |
+|---|---|
+| `src/server.js` 里躺着 `DEFAULT_PORT = 23333`，而 `hooks/install.js` 用它拼端点 URL | hook 装出来的 URL 变成 `undefined`，或者静默退回随机端口 |
+| `src/theme.js` 被 `scripts/build-preview-bundle.js` 用（`listThemeIds` / `loadTheme`） | `npm run build:preview` 直接崩，预览页再也刷不出来 |
+| `scripts/preview-shot.js` 整个是**基于 Electron 写的**（临时 app + CDP） | 七状态对照图从此没人能重新生成，而 README 里那张图会一直挂在那儿，看起来还挺好 |
+
+处置分别是：`DEFAULT_PORT` 迁进 `src/port-file.js`（它本来就是"端点约定"的一部分，比 `server.js` 更该拥有这个数）；
+`theme.js` 原位保留（它跟容器无关，只被 Node 脚本用）；`preview-shot.js` 移植到 Tauri——
+起 release exe + `CLAWD_PORT_FILE` 隔离 + `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333`，
+连上 CDP 后用 `Page.navigate` 把宿主窗口导到 `preview.html`。**WebView2 和 Electron 是同一套 CDP**，
+所以移植的实质只有一句 `Page.navigate`。移植完实测七个状态全画出来了（目视确认）。
+
+**教训**：`git rm` 是零成本的，找回功能不是。删除类任务的正确顺序是
+"先列依赖 → 逐条迁出或确认共存 → 再删 → 跑闸门"，而不是"删完看什么报错"。
+另有一条具体的：**别用目录名猜结构**。这次差点按 `ui/` 去找渲染层，
+而这个项目的渲染层是平铺在 `src/` 下的（`index.html` / `renderer.js` / 三份 html + 两个 bridge）。
+
+## 2026-11-03 · 签名三件事：cwd、被覆写的 exe、乱码日志
+
+给发布物接签名，`signCommand` 配好、证书也生成了，仍然连撞三次。三次都长得像"签名没生效"，成因完全不同：
+
+1. **`Cannot find module '...\src-tauri\scripts\sign-release.js'`**
+   `signCommand` 的工作目录是 `src-tauri/`，不是仓库根。路径要写 `../scripts/sign-release.js`。
+2. **日志说签了，产物却是 `NotSigned`**
+   `cargo tauri build` 的日志里明明有 `[sign] signed: clawd-starter.exe`，但打包结束时
+   `target\release\clawd-starter.exe` 的大小回到 4682752（签过的应该是 4690224，多出的是证书表），
+   且 `Get-AuthenticodeSignature` 报 `NotSigned`——**打包器在签名之后又覆写了一次这个文件**。
+   安装包不受影响（`makensis` 生成后才签）。所以 `npm run bundle` 里串了一刀补签。
+   **教训**：验证"签没签"只能问产物（`Get-AuthenticodeSignature` / `signtool verify`），
+   不能看日志。日志只能证明"命令跑过"。
+3. **`[sign] 宸茬鍚嶏細nst45DE.tmp`**
+   这个脚本的 stdout 会被 `makensis` 的管道接走，多字节代码页下中文被重编码。
+   签名本身是对的，只是没法读。→ 脚本对外输出一律 ASCII，注释照旧中文。
+
+还有一条差点误判的：`signtool` 报 `The file is being used by another process`——
+上一轮回归留下的 `clawd-starter.exe` 还开着。这不是签名问题，先 `taskkill`。
+
+## 2026-11-03 · 一条断言挪了 3px，永远够不着阈值
+
+`gaze` 那条断言反复红。它本来就不稳定：gaze 线程有变化检测（偏差 < 0.02 不发），
+光标静止时 0 次推送是**正确行为**，而断言写的是"这一轮至少推过一次"——
+于是成败取决于测试期间有没有人碰鼠标。
+
+上一轮的修法是"自己把光标挪一下再挪回"，挪 **3px**。今天读 `main.rs` 才发现为什么它照样红：
+
+```
+nx = (cx - 窗口中心) / 260        // 归一化
+if (nx - ox).abs() < 0.02 { continue }   // 阈值
+3 / 260 ≈ 0.0115  <  0.02        // 永远不触发
+```
+
+**要挪 ≥ 5.2px 才够得着**，改 8px（≈0.031）之后立刻稳定。
+教训是两层：① 造"变化"之前先算清被测系统的判定单位，别拿感觉凑数字；
+② 一条"看心情"的断言比没有断言更糟——它会训练你忽略红色。
+
+---
+
 ## 2026-11-03 · 审计报告按 crate 名报，不看 target
 
 `cargo audit` 第一次跑，425 个依赖、1402 条公告，结果 0 漏洞 / 2 条警告：

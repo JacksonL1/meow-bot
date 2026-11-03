@@ -9,12 +9,15 @@ S1–S10 全部完成。**2026-11-02 补上 S10-5：容器从 Electron 换成 Ru
 同一天做完 **S10-6 收尾四项**：单实例锁、关掉 `withGlobalTauri` + 每窗口白名单、
 锁屏改事件、**打出 NSIS 安装包并真装真卸验过**。
 
-三道闸门同时是绿的，前两道**判据同源**（后一道管的是"用户装不装得上"，判据天然不同源）：
+**2026-11-03：Electron 容器整套删除，Tauri 成为唯一容器**（S10-9，见下方「已完成」）；
+同一天接上发布物签名（自签名证书已在本机跑通端到端）。
+现在只剩**一道 UI 闸门**，原来那行 Electron 的 193–194 已成为历史注脚。
+
+四道闸门同时是绿的，前两道**判据同源**（后两道管的是"用户装不装得上 / 状态掉不掉"，判据天然不同源）：
 
 | 闸门 | 脚本 | 结果 | 断言数 |
 |---|---|---|---|
-| Electron 45 | `npm run verify:electron` | **193–194 PASS / 0 FAIL** | 194 |
-| Tauri 2.12.5 + WebView2 | `npm run verify:tauri` | **76 PASS / 0 FAIL** | 76 |
+| Tauri 2.12.5 + WebView2 | `npm run verify:tauri` | **75 PASS / 0 FAIL** | 75 |
 | Rust 单测 | `cd src-tauri && cargo test` | **23 passed / 0 failed** | 23 |
 | 打包（NSIS 安装包） | `npm run verify:bundle:install` | **25 PASS / 0 FAIL** | 25 |
 | 状态回放（真实事件序列） | `npm run verify:diag` | **10 步全中期望** | 10 |
@@ -26,17 +29,17 @@ PreCompact → 压缩后的 SessionStart → UserPromptSubmit → Stop → Sessi
 每一步都拿「期望值」对照**服务端快照**和**渲染层画面**两个读数。
 它钉死的就是用户报的问题 1：thinking 不许掉、压缩后不许回 idle。
 
-Electron 那一行的 **193–194** 不是笔误：`剪贴板拿到的是完整路径` 这条要先读回
-主进程写进剪贴板的值，而 Windows 上只要有别的进程（剪贴板管理器、另一个
-Electron）正握着剪贴板，`readText()` 就返回空串。重试 6 次仍不一致时会做一次
-"能不能读写"的探针，探针也失败就**打印** `[warn] 本环境读不到剪贴板内容，跳过校验`
-然后少跑一条——跳过是响的，不是静默的。总条数因此在一个区间里浮动，
-看闸门时认的是 **FAIL=0**，不是 PASS 的绝对值。
+**75 这个数比迁移当天少 1，是因为删掉了一条依赖 Electron 的断言**（见 S10-9）：
+原来有一条"自启的 Electron 侧与 Rust 侧是否对齐"，`src/main.js` 没了，这条判据失去了对象。
+其余的减法都发生在迁移当天：Electron 的 191 条里有 12 条打的是主进程 Node inspector 的
+`BrowserWindow` 属性，Rust 侧没有对应物，迁移时就没有搬。
+两边共用 `scripts/cdp.js`——同一套判据必须用同一段代码丢进页面，否则两边的绿没有可比性。
 
-Tauri 那份少，是**因为少测了宿主专属的东西**（Electron 那 191 条里有 12 条打的是
-主进程 Node inspector 的 `BrowserWindow` 属性，Rust 侧没有对应物），
-不是因为有跳过项。两边共用 `scripts/cdp.js`——同一套判据必须用同一段代码丢进页面，
-否则两边的绿没有可比性。
+> 历史（Electron 时代，2026-11-03 前的读数）：`npm run verify:electron` **193–194 PASS / 0 FAIL**。
+> 那个区间不是笔误：`剪贴板拿到的是完整路径` 要先读回主进程写进剪贴板的值，而 Windows 上只要有
+> 别的进程（剪贴板管理器、另一个 Electron）正握着剪贴板，`readText()` 就返回空串。重试 6 次
+> 仍不一致时会做一次"能不能读写"的探针，探针也失败就**打印** `[warn] 本环境读不到剪贴板内容，
+> 跳过校验` 然后少跑一条——跳过是响的，不是静默的。看闸门认的是 **FAIL=0**，不是 PASS 的绝对值。
 
 打包那 25 条里，只有 10 条是随时可跑的（读配置 + 看产物）；另外 15 条要往这台机器上
 真装一份再卸掉，所以挂在 `--install` 后面。**"装得上"和"跑得对"是两件事**，
@@ -102,6 +105,57 @@ S8 的「跟桌宠说话」**2026-10-30 整套删掉了**（理由见下方被�
 - [x] ~~状态时长（25s 发呆 / 60s 入睡）仍写死在 `state.js`~~ → **已进 `theme.json.timings`**（2026-10-28）。注意原来写的「25s 发呆」是个误会：那个 `IDLE_AFTER_MS` **从头没有消费者**，连配置项都算不上，已删（见 DEVLOG）。搬过去的是 `oneshot` 三个时长 + `sleepAfterMs`
 
 ## 已完成
+
+### S10-9 删掉 Electron 容器 + 接上发布物签名（2026-11-03）
+
+用户原话：「现在有两个容器 Electron 与 Tauri，删掉 Electron。然后把整个使用说明与项目介绍更新到 README 上」，
+前置问的是「如何获取代码签名？帮我获取」。
+
+#### ① 删容器：先画依赖拓扑，再按删除键
+
+`git rm` 了 9 个文件（`main.js` / `preload.js` / `bubble-preload.js` / `dashboard-preload.js` /
+`state.js` / `risk.js` / `permission.js` / `server.js` / `verify-electron.js`），
+`package.json` 清空 `devDependencies`（`npm uninstall electron` 后 `found 0 vulnerabilities`，
+`package-lock.json` 里 electron 计数归 0）。现在 `src/` 只剩 9 个文件，全部是渲染层 + 端点约定：
+
+| 必须先迁出/确认的 | 处理 |
+|---|---|
+| `src/server.js` 里的 `DEFAULT_PORT = 23333`（`hooks/install.js` 用它拼 URL） | 迁进 `src/port-file.js` |
+| `src/theme.js`（`scripts/build-preview-bundle.js` 用） | 原位保留，与容器无关 |
+| `scripts/preview-shot.js`（整份基于 Electron 的临时 app） | 移植到 Tauri：起 release exe + CDP `Page.navigate` |
+
+`preview-shot` 是唯一"会被一起带走的功能"：七状态对照图靠它出。移植后实测七个状态全画出（目视确认）。
+`verify-tauri.js` 减掉 1 条（"自启的 Electron 侧与 Rust 侧对齐"失去对象），**75 PASS / 0 FAIL**。
+
+#### ② 签名：端到端跑通（证书 = 自签名，仅本机）
+
+- `scripts/sign-release.js`：被 `bundle.windows.signCommand` 调用，也支持手工 `--verify`
+- 证书来源由环境变量决定（`CLAWD_SIGN_PFX` + `_PASSWORD` / `CLAWD_SIGN_THUMBPRINT`），
+  **一个都没配时响亮跳过**（打印警告、退出 0），**配了却签失败退出非 0**，让打包直接红
+- 时间戳 `/tr http://timestamp.digicert.com /td sha256` 不是可选项：没有它，证书一过期，
+  旧安装包立刻变成无效签名
+- 本机自签名：`CN=clawd-starter (local dev)`，指纹 `20ECA7320CC89439C5C1928AA6B1B3444966C265`，
+  PFX 与密码在**仓库外**的 `~/.clawd-signing/`（`.gitignore` 另加了 `*.pfx` / `*.p12` 防手滑）
+- 实测：安装包与裸 exe 都能签上，`Get-AuthenticodeSignature` 显示
+  `StatusMessage: 已处理证书链，但是在不受信任提供程序信任的根证书中终止`（自签名预期）+
+  `TimeStamperCertificate: CN=DigiCert SHA256 RSA4096 Timestamp Responder`（时间戳生效）
+
+#### ③ 两个硬性事实（都是实测，详细复盘在 DEVLOG 2026-11-03）
+
+1. `signCommand` 的 **cwd 是 `src-tauri/`**，脚本路径必须写 `../scripts/sign-release.js`
+2. **`cargo tauri build` 结束后裸 exe 不带签名**——打包器在签名后又覆写了它（日志说签了、产物是 `NotSigned`）。
+   安装包不受影响。所以 `npm run bundle` 里串了一次补签
+
+#### ④ 顺手修掉一条"永远够不着阈值"的断言
+
+`gaze` 那条原来靠"挪 3px 光标"造变化，而阈值是 `0.02 × 260 = 5.2px` → 必然红。
+改 8px（≈0.031）后稳定通过。一道会看心情变红的闸门会训练人忽略红色。
+
+#### ⑤ README 重写
+
+按"使用者先看、开发者后看"重排：这是什么 → 三分钟跑起来 → **代码签名**（三条路的价格、
+可用地区、SmartScreen 的真实行为）→ 接 agent → 怎么用 → 端点协议 → 主题 → 回归 → 结构 → 内存实话 →
+限制 → 踩坑。旧 README 里 `npm install` / `npm start`（指向已删的 Electron）那一套整段作废。
 
 ### S10-5 容器换成 Rust：Tauri 迁移（2026-11-02）
 
