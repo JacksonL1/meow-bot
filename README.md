@@ -1,482 +1,631 @@
 # clawd-starter
 
-从零重搭 Clawd 桌宠的 **S1–S9** 骨架：一个能自己出现在桌面上、能被真实 agent 事件驱动、**还能替你回答权限确认**、能一眼看到所有会话在干什么、形象还能换主题的透明窗口。
+桌面上的一只布偶猫。它不替你干活，只负责让你**看见** Claude Code / CodeBuddy / WorkBuddy 在干什么——
+谁在跑、跑到哪一步、有没有卡在某条命令上等你点「允许」。
 
-目标不是"做一个好看的桌宠"，而是**把核心数据链路跑通**——之后每一阶段都是往这条链路上加东西，而不是推倒重来。
+容器是 Rust（Tauri 2 + 系统 WebView2），渲染层是原生 JS + SVG。**没有框架、没有构建步骤、没有运行时依赖**：
+`package.json` 的 `dependencies` 与 `devDependencies` 都是空的，node 只用来跑脚本（装 hook、回归、签名）。
+
+| | |
+|---|---|
+| 容器 | Tauri 2.12.5 · Rust 宿主 ≈ 4000 行 · 系统 WebView2 |
+| 渲染 | 原生 JS / SVG，28 通道二阶弹簧逐帧算，无框架无打包 |
+| 运行时依赖 | **0** 个 npm 包 |
+| 安装包 | `clawd-starter_0.1.0_x64-setup.exe` · **1.59 MiB** · NSIS · currentUser（不弹 UAC） |
+| 平台 | Windows 10 / 11 实测；macOS / Linux 代码留了分支但**没跑过** |
+| 代码签名 | `scripts/sign-release.js` ← `bundle.windows.signCommand`，接 PFX 或证书库指纹 |
+| 规模 | `src` 3476 行 + `src-tauri/src` 3972 行 + `hooks` 644 行 + `scripts` 2160 行 |
+
+## 目录
+
+- [这是什么](#这是什么)
+- [三分钟跑起来](#三分钟跑起来)
+- [代码签名](#代码签名)
+- [接上你的 agent](#接上你的-agent)
+- [怎么用](#怎么用)
+- [本地端点（HTTP 协议）](#本地端点http-协议)
+- [主题](#主题)
+- [开发与回归](#开发与回归)
+- [项目结构](#项目结构)
+- [内存这件事](#内存这件事)
+- [已知限制](#已知限制)
+- [踩坑记录](#踩坑记录)
+
+## 这是什么
+
+四条数据流，各管一件事：
 
 ```text
-事件流：agent 事件 → hook（短命进程，async）→ 本地 HTTP → 状态机 → IPC → 动画
-裁决流：agent 要执行工具 → HTTP hook（阻塞）→ 气泡等你点 → 同一个 socket 回 200/204
-看板流：右键桌宠 → 独立窗口 → 1s 轮询快照 → 列表（cwd 只有 basename）
-主题流：启动 → 读 themes/<id>/ → 校验 → IPC → 渲染层换帧数据（白名单在这里才生效）
+事件流   agent 事件 → hook（短命进程，async）→ 本地 HTTP → 状态机 → IPC → 弹簧动画
+裁决流   agent 要执行工具 → HTTP hook（阻塞）→ 气泡等你点 → 同一个 socket 回 200 / 204
+看板流   双击桌宠 → 独立窗口 → 1s 轮询快照 → 一条会话一行
+主题流   启动 → 读 themes/<id>/ → 校验 → IPC → 渲染层换帧数据（白名单在这层之前就生效）
 ```
 
-## 跑起来
+它要解决的四个具体问题：
+
+1. **"它到底在跑，还是在等我？"**
+   桌宠的姿态就是答案：敲键盘是在干活，歪头张嘴是在等你，炸毛是报错。不用切窗口。
+2. **同时开五个会话，分不清谁是谁。**
+   一个会话一只猫，横排（最多 4 只，重叠），有任务就从你的 prompt 里抽一个词写在头巾上。
+3. **权限确认埋在终端滚动的历史里。**
+   桌宠把它拎到屏幕最上层：命令原文 + 数据流向 + 命令风险评级，点一下就把决定回写给 agent。
+4. **桌宠常驻很占资源。**
+   宿主是原生 Rust 进程，不是又一个 Chromium——但这句话有个必须讲清楚的前提，见[内存这件事](#内存这件事)。
+
+形象不是贴图：七种状态是七种**姿势**，靠骨骼弹簧过渡，不是同一张图换帧。
+截图见 [`docs/ragdoll-states.png`](docs/ragdoll-states.png)（`npm run preview:states` 重新生成）。
+
+## 三分钟跑起来
+
+**前置**
+
+- Rust stable（`rustup`）+ MSVC build tools
+- WebView2 Runtime（Win11 自带；Win10 一般也有，没有的话安装器会联网拉）
+- 只有**打包签名**需要 Windows SDK（自带 `signtool.exe`）
+- Node ≥ 18，仅用于脚本
+
+**构建与运行**
 
 ```bash
-npm install
-npm start
+npm run build     # cargo build --release
+npm run start     # cargo run --release —— 窗口出现在右下角
+npm run bundle    # cargo tauri build → NSIS 安装包 + 调用签名脚本
 ```
 
-窗口会出现在屏幕右下角。**拖动它换个位置，双击它开关会话看板，右键打开菜单（会话看板 / 退出）**。端点（端口 + token）写在 userData 里，不在项目目录：
+产物：`src-tauri/target/release/bundle/nsis/clawd-starter_0.1.0_x64-setup.exe`
 
-```bash
-# 看端点：Windows 下是 %APPDATA%\clawd-starter\clawd-starter.port
-node -e "console.log(require('./src/port-file').readPortFile())"
-```
+装到 `%LOCALAPPDATA%\clawd-starter`，卸载走「应用和功能」。
+`scripts/verify-bundle.js --install` 会真装一遍、真跑一遍、真卸一遍，并断言注册表
+Uninstall 子键集合回到安装前。
 
-手动打一发（**必须带 token，少一个头就是 401，这是故意的**）：
+**全部脚本**
 
-```bash
-curl -X POST http://127.0.0.1:<port>/state \
-  -H 'content-type: application/json' \
-  -H 'x-clawd-token: <token>' \
-  -d '{"session_id":"s1","event":"PreToolUse"}'
-```
+| 命令 | 作用 |
+|---|---|
+| `npm start` / `npm run build` | 跑 / 编 release |
+| `npm run bundle` | Tauri 打包 + 补签裸 exe（原因见[代码签名](#代码签名)） |
+| `npm run feed` | 喂一轮假事件：thinking → working → error → attention → idle |
+| `npm run feed -- Stop` / `--hold working 10` | 单事件 / 保持某状态 10 秒 |
+| `npm run verify:tauri` | UI 闸门：起真窗口、连 CDP，逐条断言（**唯一一道 UI 闸门**） |
+| `npm run verify:diag` | 状态回放：临时实例 + 10 步真实事件序列，逐步对期望 |
+| `npm run verify:bundle` / `:install` | 打包产物：配置与产物 / 再加真装真卸 |
+| `npm run verify:all` | 上面三道串起来 |
+| `npm run diag:events` | 读**正在跑的那份**，告诉你"它为什么是 idle" |
+| `npm run preview:states` | 七状态对照图 → `docs/ragdoll-states.png` |
+| `npm run build:preview` | 改完 `themes/` 后更新 `preview.html` 的数据包 |
+| `npm run icons` | 重画图标（猫脸 + 托盘图标） |
+| `npm run install:hooks` / `uninstall:hooks` / `preview:hooks` | 装 / 卸 / 预览 hook（默认 Claude Code） |
+| `npm run install:hooks:codebuddy` / `:workbuddy` | 同上，换目标 agent |
 
-## 安全边界（2026-10-26 加固，2026-10-27 扩到权限端点）
+## 代码签名
 
-本地 HTTP 端口是「本机任何进程都能连」的，所以接口不是有端口就能用：
+Windows 上「用户双击安装包」这一步，签名决定了三件事：
+**发布者可验证**（属性里能看到你的名字）、**不被 SmartScreen 判为未知发布者**、
+**证书过期后旧安装包仍然有效**（靠时间戳）。
 
-| 关卡 | 拦什么 | 失败返回 |
+### 签名到底签了什么
+
+Authenticode 是三层结构，缺一层就有一类问题：
+
+| 层 | 内容 | 缺了会怎样 |
 |---|---|---|
-| Host 必须是 `127.0.0.1:<本进程端口>` | DNS rebinding | 403 |
-| `Origin` 存在且非 `null` | 网页发起的跨源请求 | 403 |
+| 签名摘要 | 用私钥对 PE 的 Authenticode 哈希做 RSA 签名（**只覆盖文件内容 + 证书表**，不覆盖签名字段本身） | 没有签名，Windows 报「未知发布者」 |
+| 证书链 | 叶子证书 → 中间 CA → 根 CA | 链不完整时，别的机器验不过 |
+| 时间戳 | CA 的 RFC3161 服务证明"这个签名在某一时刻已存在" | 证书一到期，**旧安装包立刻变成无效签名** |
+
+所以 `scripts/sign-release.js` 里 `/tr http://timestamp.digicert.com /td sha256` 不是可选项。
+`verify` 输出里如果有 `Timestamp` 列，说明这一层在。
+
+### 三条路，按你的用途选
+
+| 方案 | 价格 | 谁都能用吗 | 立刻不弹 SmartScreen 吗 |
+|---|---|---|---|
+| **自签名** | 免费 | 是 | 否。别人机器上仍会拦，只适合自己用 / 内网 / 测试 |
+| **OV 证书**（DigiCert / Sectigo / GlobalSign 等） | 约 $150–300 / 年 | 需要企业资质（国内 CA 同理） | 否。要靠下载量累积信誉 |
+| **Azure 制品签名**（原 Trusted Signing） | 约 $9.99 / 月（5,000 次） | 组织：美/加/欧盟/英；个人：仅美/加 | 否。但发布者身份一致的话，后续版本会继承信誉 |
+| **EV 证书** | $400+ / 年 | 需要企业资质 | **2024 年起不再"自带信誉"**，与 OV 同待遇 |
+
+三条容易踩的预期：
+
+- **"买了 EV 就没人拦了"** 已经不成立。微软文档明确写了 2024 年后 EV 与 OV 的 SmartScreen 行为一致。
+- **签名 ≠ 信誉**。签名让「发布者」可验证；信誉是按签名身份累积的下载/安装量，两者是两套系统。
+- **2023 年起 CA/B 论坛要求私钥不能以文件形式躺磁盘上**，商业 OV/EV 基本都改成 USB 硬件令牌或云 HSM 了。
+  也就是说你买到的往往不是 `.pfx`，而是"签名盒子"或"云签名 API"——
+  这时本项目的 `/f <pfx>` 这条路走不通，要用 `/sha1 <指纹>`（令牌已插、证书在库里），
+  或者接云签名的 DLIB 参数（本项目脚本还没接，见下）。
+
+### 用哪张证书，由环境变量决定
+
+私钥**永远不进仓库**（`.gitignore` 里 `*.pfx` / `*.p12` 已挡）。
+
+| 变量 | 什么时候用 |
+|---|---|
+| `CLAWD_SIGN_PFX` | 有 PFX 文件（自签名、或从令牌导出的一次性副本） |
+| `CLAWD_SIGN_PFX_PASSWORD` | 上面那个 PFX 的密码 |
+| `CLAWD_SIGN_THUMBPRINT` | 证书已经装进当前用户/本机证书库（硬件令牌走这条） |
+
+一个都不配时，签名脚本**响亮地跳过**：打印一行大写警告，退出码 0，产物不签名。
+这样没有证书的人照样能打包；但**配了证书却签失败就退出非 0，让打包直接红**——
+绝不允许"以为签了其实没签"这种中间态。
+
+### 现在这台机器上已经有的（自签名，仅本机可用）
+
+```text
+证书         CN=clawd-starter (local dev)   有效期 3 年
+指纹         20ECA7320CC89439C5C1928AA6B1B3444966C265   （CurrentUser\My）
+PFX          C:\Users\<你>\.clawd-signing\clawd-starter-selfsign.pfx
+密码         C:\Users\<你>\.clawd-signing\pfx-password.txt
+元数据       C:\Users\<你>\.clawd-signing\signing.local.json
+```
+
+重新生成一张（PowerShell，全程不碰 `SecureString`——那个 API 会被安全护栏拦下）：
+
+```powershell
+$cert = New-SelfSignedCertificate `
+  -Type CodeSigningCert `
+  -Subject "CN=clawd-starter (local dev)" `
+  -KeyUsage DigitalSignature `
+  -FriendlyName "clawd-starter self-signed" `
+  -CertStoreLocation Cert:\CurrentUser\My `
+  -NotAfter (Get-Date).AddYears(3)
+$cert.Thumbprint
+
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.clawd-signing" | Out-Null
+# 用 certutil 导出 PFX，密码单独存文件：ConvertTo-SecureString 会触发安全护栏
+certutil -user -exportPFX -p "<自己编一个密码>" $cert.Thumbprint `
+  "$env:USERPROFILE\.clawd-signing\clawd-starter-selfsign.pfx"
+```
+
+构建时带上：
+
+```bash
+# bash
+export CLAWD_SIGN_PFX="$USERPROFILE/.clawd-signing/clawd-starter-selfsign.pfx"
+export CLAWD_SIGN_PFX_PASSWORD="$(cat "$USERPROFILE/.clawd-signing/pfx-password.txt")"
+npm run bundle
+```
+
+```powershell
+# PowerShell
+$env:CLAWD_SIGN_PFX = "$env:USERPROFILE\.clawd-signing\clawd-starter-selfsign.pfx"
+$env:CLAWD_SIGN_PFX_PASSWORD = Get-Content "$env:USERPROFILE\.clawd-signing\pfx-password.txt" -Raw
+npm run bundle
+```
+
+### 验证签名
+
+```bash
+node scripts/sign-release.js --verify src-tauri/target/release/bundle/nsis/clawd-starter_0.1.0_x64-setup.exe
+```
+
+```powershell
+Get-AuthenticodeSignature .\clawd-starter_0.1.0_x64-setup.exe |
+  Format-List Status, StatusMessage, SignerCertificate, TimeStamperCertificate
+```
+
+自签名会得到：
+
+```text
+Status               : UnknownError
+StatusMessage        : 已处理证书链，但是在不受信任提供程序信任的根证书中终止。
+SignerCertificate    : CN=clawd-starter (local dev)
+TimeStamperCertificate: CN=DigiCert SHA256 RSA4096 Timestamp Responder 2025 ...
+```
+
+**这不是失败**：签名在、链完整、时间戳生效，只是根证书不在受信列表里。
+要让自己这台机器不再报警（**只对这台机器生效，别人那里照旧报——信任本来就不能分发**）：
+
+```powershell
+Export-Certificate -Cert Cert:\CurrentUser\My\20ECA7320CC89439C5C1928AA6B1B3444966C265 `
+  -FilePath .\clawd-starter-selfsign.cer                       # 只导公钥
+Import-Certificate -FilePath .\clawd-starter-selfsign.cer `
+  -CertStoreLocation Cert:\CurrentUser\Root                    # 装进"受信任的根证书颁发机构"
+```
+
+装完再 `Get-AuthenticodeSignature`，`Status` 就是 `Valid`。
+
+### 打包时的两个硬性事实
+
+这两条都是实测出来的，不是推测：
+
+1. **`signCommand` 的工作目录是 `src-tauri/`，不是仓库根。**
+   所以要写 `"args": ["../scripts/sign-release.js", "%1"]`。
+   写 `"scripts/sign-release.js"` 会得到
+   `Error: Cannot find module '...\src-tauri\scripts\sign-release.js'`。
+2. **`cargo tauri build` 结束后，裸 exe 是不带签名的。**
+   日志里明明有 `[sign] signed: clawd-starter.exe`，但打包结束那一刻
+   `target\release\clawd-starter.exe` 的 mtime 落在构建末尾、大小回到了未签名时的 4682752 字节
+   （签名后是 4690224，多出的是证书表）。打包器在签名之后又覆写了一次这个文件。
+   **安装包不受影响**（`makensis` 生成后才签，签完没人再碰它）。
+   因为这条，`npm run bundle` 里串了一次补签：
+
+   ```json
+   "bundle": "cargo tauri build && node scripts/sign-release.js src-tauri/target/release/clawd-starter.exe"
+   ```
+
+   如果你只分发安装包，可以不管；要单独发裸 exe，必须补这一刀。
+
+另外两个小坑：
+
+- `signtool` 报 `The file is being used by another process`：上一轮回归留下的 `clawd-starter.exe` 还开着。
+  `taskkill /F /IM clawd-starter.exe` 之后重签。
+- 签名脚本的日志一律 ASCII：它的 stdout 会被 `makensis` 的管道接走，多字节代码页下中文会变成乱码
+  `[sign] 宸茬鍚嶏細nst45DE.tmp`。签名本身没问题，只是没法读。
+
+### 想用云签名（Azure 制品签名）要改哪里
+
+`sign-release.js` 现在只接 `/f`（PFX）和 `/sha1`（证书库指纹）两种。接云签名需要：
+下载服务的 DLIB 包（让它认识云端证书），把 sign 调用改成
+`/dlib <metadata.json> /dmdf <metadata.json>`，再把账号/证书配置文件名传进来——大约十行。
+**这一步没做，也没验过**，写在这里是为了不让人以为"填个环境变量就能用"。
+
+## 接上你的 agent
+
+hook 是把 agent 事件送进桌宠的唯一通道，由 `hooks/install.js` 写进 agent 的全局配置。
+它是**整个项目里唯一会改用户配置的地方**：
+
+1. 先备份 `settings.json.clawd-backup-<时间戳>`
+2. 原子写（同目录临时文件 + rename，不留半截 JSON）
+3. 只动带 `clawd-hook.js` 标记的条目，别人的一个字节都不碰
+4. 幂等：重复执行不产生重复 entry
+
+```bash
+npm run preview:hooks                   # --dry-run，只看会写什么
+npm run install:hooks                   # 装进 ~/.claude/settings.json
+npm run install:hooks:codebuddy         # CodeBuddy
+npm run install:hooks:workbuddy         # WorkBuddy
+npm run uninstall:hooks                 # 摘干净（别人的 hook 不动）
+node hooks/install.js --agent claude --file <path>   # 指向别的 settings 文件
+```
+
+**三家 agent 的契约不一样，照抄会装出"看起来装好了、其实永远不触发"的配置：**
+
+| | Claude Code | CodeBuddy | WorkBuddy |
+|---|---|---|---|
+| 观察型事件 | 8 个（含 `PostToolUseFailure`） | 8 个（含 `PreCompact`，无 `PostToolUseFailure`） | 同 CodeBuddy |
+| `matcher` 取值 | `"*"` | `""` | `""` |
+| 权限请求 | `type: "http"` → `POST /permission` | 会真的 POST | **永不调用外部端点**（原生沙箱自己处理），所以不给它装 |
+
+两条分界线要记住：**观察型 hook 一律 `async: true`，裁决型 hook 必须阻塞**。
+Windows 上 `node` 冷启动实测 ~200ms，观察型不加 `async` 就是每次工具调用都慢 200ms；
+而权限那条加了 `async` 等于立刻返回空响应，永远问不到用户。
+
+**端口这件事**：服务优先用 23333（与主仓库一致），端口和 token 一起写进
+`%APPDATA%\clawd-starter\clawd-starter.port`；hook URL 是**安装时**写死进配置的。
+所以端口变了必须重跑 `npm run install:hooks`，否则请求还打向旧端口。
+
+## 怎么用
+
+**窗口本身**
+
+- 透明、无边框、置顶、不进任务栏、**不可缩放**，默认停在右下角（工作区右下角各留 40px）
+- 拖猫本体移动窗口；**非像素区域点击穿透**，鼠标落在猫身上才会接管
+- 双击猫开/关**会话看板**；右键猫出菜单（会话看板 / 退出）
+- 托盘图标：左键无效（`show_menu_on_left_click(false)`），右键菜单 = 会话看板 / **开机自启**（勾选项）/ 退出
+- 单实例：再启动一个只会把已有那只唤到前台（命名互斥量 + 事件，见 `single.rs`）
+
+**状态与动画**
+
+| 状态 | 它在干什么 |
+|---|---|
+| `idle` | 端坐，眼睛跟着光标 |
+| `thinking` | 蹲低歪头——你刚发了一条 prompt，模型在想 |
+| `working` | 桌前敲键盘，代码一行行长出来。**这时关掉眼球追踪**：眼睛该在屏幕上 |
+| `attention` | 拔高张嘴——一轮任务跑完了，等你回来看 |
+| `notification` | 歪头挥爪「喵~」——**卡在权限确认上等你点**，这个状态最长能挂 10 分钟 |
+| `error` | 炸毛泛红 |
+| `sleeping` | 侧躺垫爪。闲置 60s 睡着，鼠标经过**慢慢**睁眼（弹簧 ≈0.5s，不是"啪"一下） |
+
+**多会话分身**（`MAX_CATS = 4`）
+
+- 一个会话一只猫，横排叠在一起，按「最吵的排前面」排序（error > attention > …）
+- 点某只把它顶到最前（`z-index` + `.focus`），**判定带位移阈值**——拖窗口时不会顺手改焦点
+- 会话闲置超过 5 分钟（`FADE_AFTER_MS`）就淡出退场："接不到任务了，慢慢消食"
+- 头巾（`#rig-bandana`）默认藏起来，只有这条会话真的抽出了关键词才戴上，字数多时自动缩字号
+
+**权限气泡**
+
+| 你做什么 | agent 收到 | 结果 |
+|---|---|---|
+| 点「允许」 | `200 {"decision":{"behavior":"allow"}}` | 放行 |
+| 点「拒绝」 | `200 {"decision":{"behavior":"deny","message":…}}` | 拒绝，并告诉它原因 |
+| 不点 / Esc / 关气泡 / 退出 / 超时 | **`204` 空** | **不做决定**，回落终端原生提示 |
+
+气泡上除了命令原文，还有**风险评级**（低 / 中 / 高 / 极高）和最多 4 条理由。
+它认的是"命令词 + 参数"，不是拿正则糊整串——所以 `cat ~/.ssh/id_rsa` 会被判成
+`CREDENTIAL_TOUCH`（读私钥），而不是"发起了 ssh 连接"。判定类别（代码里的标识）：
+
+```text
+删根 / 删系统目录   RM_ROOT · RM_ROOT_FILE · RM_RECURSIVE · RM_FILE
+凭据与密钥          CREDENTIAL_TOUCH · CREDENTIAL_WRITE · SECRET_IN_COMMAND
+git 破坏性操作      FORCE_PUSH_MAIN · FORCE_PUSH · GIT_HARD_RESET · GIT_CLEAN · GIT_WRITE
+执行远端内容        PIPE_REMOTE_EXEC · OUTBOUND_NETWORK
+系统级破坏          DISK_WIPE · FORK_BOMB · CHMOD_WORLD_ROOT · SERVICE_KILL · SUDO
+数据库 / 覆盖写     DESTRUCTIVE_SQL · OVERWRITE_REDIRECT
+出圈与体量          ESCAPES_CWD · BIG_PAYLOAD（>1200 字符，多半是 here-doc 或拼接脚本）
+```
+
+**评级只是提示，不是安全边界**：`critical` 也不会自动 deny（deny 会让工具静默失败，
+你还以为批准过）。真要拦，闸门在 agent 自己的权限系统里。
+
+**会话看板**
+
+- 一条会话一行：这一轮在问什么（标题）、状态徽标、目录名、会话 id、最后用到的工具、闲了多久
+- 正在演的那条用左侧色条标出；按"最吵的排前面"排序
+- 底部可以切主题；「复制路径」单独取**完整**路径（见下方 SEC-09）
+- **演示模式**只隐藏目录名和标题（防投屏漏客户名），状态与时间照旧
+- 1s 轮询，不是推送——`idleMs` 本来就随时间变，轮询一个本地 IPC 的代价近似为零
+
+## 本地端点（HTTP 协议）
+
+| 方法 / 路径 | 谁调 | 返回 |
+|---|---|---|
+| `POST /state` | 观察型 hook | `200 {"ok":true,"visual":"working"}`——回包顺带告诉 hook 当前该显示什么 |
+| `GET /state` | 看板、`diag:events` | 快照 JSON（含 `recent` 事件账本） |
+| `GET /health` | 探活 | `200 {"ok":true,"lock":"event"}` |
+| `POST /permission` | Claude Code 的 HTTP hook | `200 {decision}` 或 `204` |
+
+**端口不是权限**。本机任何进程都能连 127.0.0.1，所以每一关都要有理由：
+
+| 关卡 | 拦什么 | 失败 |
+|---|---|---|
+| `Host` 必须是 `127.0.0.1:<本进程端口>` | DNS rebinding | 403 |
+| `Origin` 存在且非 `null` 即拒 | 网页发起的跨源请求 | 403 |
 | `x-clawd-token` | 同机其他进程 | 401 |
 | `content-type: application/json` | 不触发预检的 CORS 简单请求 | 415 |
 
-**`/permission` 是个例外：它不校 token。** 调用方是 Claude Code 自己，它读不到我们的端点文件，
-这条路径上塞 token 只会让权限气泡永远不出现。所以它只过 Host / Origin / Content-Type 三道——
-挡的正是**浏览器发起的跨源请求**，那才是真正可利用的路径。这是 HTTP hook 架构的固有属性，不是疏漏。
+**`/permission` 是例外：它不校 token**——调用方是 agent，它读不到我们的端点文件，
+这条路上塞 token 只会让气泡永远不出现。它只过 Host / Origin / Content-Type 三关，
+挡的正是"浏览器发起的跨源请求"，那才是真正可利用的路径。这是 HTTP hook 架构的固有属性，不是疏漏。
 
-渲染层另有两道：SVG 字符串走 `DOMParser` + 标签白名单；气泡里的命令用 `textContent` 写入，
-agent 给的字符串永远不会被当 HTML 解析。看板同理——目录名、会话 id 全部 `textContent`。
-
-**S7 之后主题也是不可信输入**，所以白名单收紧了：放行 `clipPath`/`mask`/`filter` + 9 个逐个列举的
-`fe` 图元，拒绝 `feImage`（外部取图）、`feTurbulence`/`feDisplacementMap`（CPU 炸弹）、`style` 标签、
-`foreignObject`、`animate`/`set`。**所有 `url()` 只准指向 `#本地id`**——放行滤镜之后这条是唯一的出口管控。
-完整理由见 `docs/ledger/SECURITY.md`「S7 白名单定案」。
-
-**cwd 是分层处理的（SEC-09）**：存储层留完整路径（「复制路径」要用），快照层只出最后一段目录名。
-快照会进渲染进程、进看板、上屏幕，完整路径不会。唯一的例外是用户显式点「复制路径」——
-主进程单条释放给剪贴板，`dashboard-preload.js` 里根本没有「取完整 cwd」这种接口。
-
-依赖侧：`electron ~45.0.0`，`npm audit` 为 0 漏洞（原来 41.10.7 有 8 条，含 1 条 high）。
-完整清单与验证记录见 `docs/ledger/SECURITY.md`。
-
-## 调试与回归命令
+手动打一发（**少一个头就是 401，这是故意的**）：
 
 ```bash
-node scripts/fake-feed.js                     # 完整剧本： thinking → working → error → attention → idle
-node scripts/fake-feed.js Stop                # 单个事件
-node scripts/fake-feed.js --hold working 10   # 保持某个状态 10 秒
-
-npm run verify:electron                       # 157 项回归（当前 157 PASS / 0 FAIL）
-
-npm run start:debug                           # 带 DevTools 启动（桌宠无边框、不进任务栏，平时打不开）
-                                              #   然后在 Console 里敲 petDebug.events() 看 agent 推来的每个事件
-
-npm run preview:states                        # 七状态对照图 → docs/ragdoll-states.png
-npm run build:preview                         # 改完 themes/ 后更新 preview.html 的数据包
+PORT=23333
+TOKEN=$(node -e "console.log(require('./src/port-file').readPortFile().token)")
+curl -i -X POST http://127.0.0.1:$PORT/state \
+  -H 'content-type: application/json' \
+  -H "x-clawd-token: $TOKEN" \
+  -d '{"session_id":"s1","event":"PreToolUse"}'
 ```
 
-主题也能从命令行指定，优先级是 `CLAWD_THEME` 环境变量 → `--theme=` → 上次在看板里选的 → `ragdoll`：
-
-```bash
-```
-
-`verify:electron` 同时开两个调试端口：`--inspect=9229` 看主进程（窗口属性、IPC 接线），
-`--remote-debugging-port=9222` 看渲染进程（DOM、帧轮播、瞳孔位移、气泡内容、看板列表）。
-**升级 Electron 后先跑它再提交。**
-
-它会给自己开一个临时 `--user-data-dir` 和一个临时端点文件，所以**你开着桌宠也能跑回归**，
-两者互不干扰。跑完按进程树 `taskkill /T /F` 清理——只杀主进程的话 GPU 子进程会逃逸，
-下次启动就报 `Unable to move the cache: 拒绝访问`。
-
-权限那一段（6 项）会把三种结局都走一遍：点拒绝 → 200 `behavior:deny`、点允许 → 200 `behavior:allow`、
-没人点 → **204 不做决定**；再加三条攻击面（带 Origin → 403、`text/plain` → 415、数组 body → 400）。
-最后两项是退出收尾：挂起中的请求必须拿到 204，而不是悬空到客户端超时。
-
-## 它现在具备什么
-
-- 透明 / 无边框 / 置顶 / 不进任务栏的窗口，可拖动
-- 非像素区域**点击穿透**，鼠标不会穿过宠物本体
-- `POST /state` 接收器，固定端口 23333 + 端点文件发现（端口与 token 一起写 userData）
-- 接口四道锁 + 渲染层 SVG 白名单（见下方「安全边界」）
-- 状态机：事件 → 状态 → 多会话优先级仲裁 → oneshot 播完自动退回 → 闲置 60s 睡着 → 鼠标停在它身上把它叫醒（带过渡）。
-  **`notification` 是唯一的长状态**：它表达的是"agent 正卡在那儿等你点允许"，所以它的时长是**上限 10 分钟**而不是播一下就走，
-  且必须还有会话真的处在这个状态才继续霸屏——否则会出现"权限早通过了、猫还在喊"
-- **主题系统（S7）**：形象不再是代码，而是 `themes/<id>/theme.json` + 一堆 SVG。内置 `ragdoll` 一个主题（早期还有个 crab，已删——暂时不需要更多主题）。自己加主题：复制 `themes/_template`
-- **形象是布偶猫**：奶油白长毛 + 深棕重点色 + 蓝宝石竖瞳。身子是**蹲坐的梨形**（手绘 path，不是椭圆——正椭圆加上那个大头读起来就是一颗球）。**七个状态是七种不同姿势**，
-  不是同一张图加个贴纸：idle 端坐、thinking 蹲低歪头、attention 拔高张嘴、working 桌前敲键盘、
-  error 炸毛泛红、notification 歪头挥爪「喵~」叫（它在喊你去点允许）、sleeping 侧躺垫爪。
-  截图见 `docs/ragdoll-states.png`
-- **两条渲染路径**，主题用 `rigType` 自己选：
-  - **骨骼弹簧**（`ragdoll`，默认）：`renderer.js` 直接拼一只猫 + 28 个二阶弹簧阻尼通道，
-    60fps 每帧重算；状态切换是过冲与滞后跟随，不是换图。working 里还有键盘和编辑器窗口，
-    代码行一行一行长出来
-  - **帧序列**（没写 `rigType` 的主题，第三方主题默认走这条）：按 `fps` 轮播 `frames`，双图层交叉淡入
-  为什么主题里写不了 CSS 动画：白名单拒了 `<style>` 和 SMIL。而多帧轮播是**离散**的——
-  6~8fps 一定频闪，看起来就是"卡顿式切换"。**帧数多 ≠ 流畅**
-- **眼球追踪**：主进程读全局光标 → 归一化成 gaze → 渲染层插值移动瞳孔。
-  受主题的 `eyeTracking` 管：敲键盘时（working）关掉——眼睛钉在屏幕上，不追光标
-- **双图层交叉淡入**：新状态先在隐藏层画好再淡入，切换瞬间不会闪白
-- **真 hook 接入**：`hooks/` 下两个文件，把 agent 的 8 个事件送进来；观察型 hook 全部 `async`。
-  安装器支持 `--agent claude|codebuddy|workbuddy`，三家的事件名 / matcher 取值 / async 支持各不相同
-- **权限气泡（S5）**：桌宠替你在屏幕上问一句「这条命令放不放行」，点一下就把决定回写给 agent；
-  不点 / 关掉 / 退出 / 超时一律返回 **204 不做决定**，自动回落到终端原生提示
-- **会话看板（S6）**：双击桌宠或右键菜单打开，一条会话一行——**这一轮在问什么**（标题）、
-  状态徽标、目录名、会话 id、**最后用到的工具**、闲了多久；正在演的那条用左侧色条标出；
-  按「最吵的排前面」排序（error 优先）。
-  目录**只显示最后一段**，完整路径只能点「复制路径」单独取（见下方 SEC-09 说明）。
-  标题的两个来源：agent 给的会话名（WorkBuddy 的 `/rename`），没有的话取
-  **`UserPromptSubmit` 的第一行非空文字**——推导在 hook 侧做，**prompt 原文不进这条链路**；
-  第一行要是像密钥（`sk-` / `ghp_` / `AKIA` / 32 位以上无空格串）就**整个标题都不要**。
-  演示模式连标题一起藏：那是用户自己说的话，比目录名更容易带出客户名
-- **鼠标叫醒（S9）**：睡着的猫，鼠标一经过就慢慢睁眼醒来——不是「啪」一下切状态，
-  躯干/头/耳/尾靠弹簧过冲，眼睛靠一条 `eyeOpen` 弹簧（≈0.5s）+ 三层交叉淡入，头顶 zZz 跟着一起散
-- 调试入口：DevTools 里 `petDebug.setState('working')` / `petDebug.gaze({x:1,y:-1})` / `petDebug.state()` / `petDebug.eyeOpen()`
-
-## 故意的简化（去原项目对照时会遇到的差异）
-
-| 这里 | 原项目 | 为什么先简化 |
-|---|---|---|
-| 主题只支持 SVG | 支持 GIF/APNG/WebP + 资产缓存 | 图片解码器是另一个工程，先把"主题能加载、能校验"跑通 |
-| 事件名以 Claude Code 为基准 | 30+ agent 各自的适配器 | 安装器已能装三家（`--agent`），但事件映射表还没按 agent 分叉 |
-| `Map` 内存里存会话 | 加上持久化、恢复租约、历史记录 | 掉电恢复是产品需求，不是学习需求 |
-| 看板 1s 轮询 | 事件驱动的推送 + 增量 diff | `idleMs` 天然随时间变，轮询省掉一整套"何时该推"的判断 |
-| `/permission` 不校 token | 同样不校——这是 HTTP hook 架构决定的 | 本地 hook 是「请求即响应、同一个 socket」，决定天然绑在请求上，不需要 nonce。**只有远程审批（决定来自公网、可重放）才必须加** |
-| 气泡只支持鼠标点 + Esc | 支持键盘决定、远程审批（Telegram 等） | 先把"决定能正确回写"跑通，输入方式属于体验层 |
-| 权限请求只存在内存，不落盘 | 有决策历史 | 落盘就多存一份命令原文，等真需要排查再加 |
-| 每次 250ms 统一 tick | 事件驱动的定时器 + 相位推断 | 一个心跳函数比十个定时器好懂一百倍 |
-
-## 踩坑记录
-
-**`TypeError: Cannot read properties of undefined (reading 'whenReady')`**
-
-如果环境里存在 `ELECTRON_RUN_AS_NODE=1`（某些 IDE、CI、或者被别的工具设过），
-`electron .` 会退化成纯 Node 进程运行，`require('electron')` 返回的是一个**路径字符串**而不是 API 对象。
-排查：`env | grep ELECTRON`。绕过：
-
-```bash
-env -u ELECTRON_RUN_AS_NODE npm start        # bash
-# PowerShell:  $env:ELECTRON_RUN_AS_NODE=""; npm start
-```
-
-**窗口全黑 / 有灰色方块**
-
-`transparent: true` 必须配 `backgroundColor: '#00000000'` 和 `hasShadow: false`，三个缺一个就会露底色。
-
-**点不到、也拖不动**
-
-`setIgnoreMouseEvents(true, { forward: true })` 之后窗口默认不接收点击，只转发 mousemove。
-必须在检测到鼠标压在宠物上时显式调 `setIgnoreMouseEvents(false)`。
-
-**hook 让每次工具调用都变慢 200ms**
-
-`install.js` 里如果不写 `async: true`，Claude Code 会等 hook 进程退出才继续。
-而 Windows 上 `node` 冷启动实测就要 ~200ms —— hook 自己的代码只占 ~35ms，剩下全是进程启动。
-`timeout` 管不到这块成本，它管的是「跑太久了砍掉」，不是「要不要等」。
-
-```json
-{ "type": "command", "command": "node \"…/clawd-hook.js\" PreToolUse", "async": true, "timeout": 5 }
-```
-
-分界线记住：**观察型 hook 异步，裁决型 hook 阻塞**。S5 的 `PermissionRequest` 走的是 HTTP hook
-（HTTP 响应就是决定），那条路径上更不能加 `async`——加了就等于立刻返回空响应，永远问不到用户。
-
-**别用 `spawnSync` 量 hook 耗时**
-
-用 `spawnSync` 在循环里连发测 hook，会稳定得到 ~950ms 这种数字，看着像性能问题。
-真实开销是 240–280ms —— 多出来的是父进程阻塞 + 子进程连发造成的测量假象。
-要量就用 shell 记时（`date +%s%3N` 前后夹），或者只在业务代码里打点。
-
-**仓库根目录冒出 `NVIDIA Corporation/umdlogs`**
-
-不是你的代码写的。显卡驱动按**进程 CWD** 写着色器日志，而 `electron .` 的 CWD 就是项目根目录。
-已在 `.gitignore` 里忽略，不用管它。
-
-**`npm audit fix --force` 建议的版本不是最小修复**
-
-它报「`electron` 受影响 `<=42.11.15`，fix 45.0.0 (major)」，看起来只能跳三个大版本。
-但那是 npm 的「跳到最新版」策略。逐条读公告范围会发现最低修复是 `42.11.16`——41.x 没有 backport
-（41.10.7 是最后一版且仍受影响），所以必须跨 major，但只需要跨到 42。
-
-判断方法：`npm audit --json`，看 `via[].range`，取所有范围的最大下界；不要直接信 `fixAvailable`。
-
-**`npm install electron@x` 之后启动报错 / 卡在 "Downloading Electron binary..."**
-
-`node_modules/electron` 的二进制是 postinstall 另下的，包本身装好了不代表二进制到位。
-国内网络经常在这一步超时，换个镜像重下即可（这一步只下载，不改 `package.json`）：
-
-```bash
-ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ node node_modules/electron/install.js
-```
-
-**写 CDP 脚本时 `require` 在主进程里 undefined**
-
-Node inspector 的 `Runtime.evaluate` 跑在全局作用域，而 `require` 是模块作用域的。
-调 `Runtime.evaluate` 时带 `includeCommandLineAPI: true`，它才会注入一个 console 风格的 `require`。
-不带的话所有 `require('electron')...` 都会抛 `Uncaught`，看起来像 Electron API 没了。
-
-**连上 inspector 后 `Runtime.evaluate` 永远不回显**
-
-必须先发一次 `Runtime.enable`。不发也能建立连接、也能 `send`，但消息发出去没有任何响应，
-`await` 就一直挂着——表现是"脚本卡住"或者"所有断言都超时"，很容易误判成应用挂了。
-
-**第一个权限请求必定丢失（气泡空白，点了没反应，2 分钟后回落）**
-
-气泡窗口是懒创建的。如果页面还没执行完渲染脚本就 `webContents.send`，这条 IPC 会被**静默丢弃**——
-不报错、不排队、不重试。修法是握手：渲染层注册完监听后回一个 `bubble:ready`，主进程收到才投递，
-在此之前用 `bubblePendingEntry` 暂存。
-
-这类 bug 的隐蔽性在于它表现为「慢」而不是「错」。没有断言就会当成网络偶发，能一直活到生产。
-
-**只有一只眼睛跟着鼠标转**
-
-`querySelector` 只返回**第一个**匹配。渲染层追踪眼球是这么写的：
-
-```js
-const pupils = el.querySelector("svg.on .pupils");
-pupils.setAttribute("transform", `translate(${dx} ${dy})`);
-```
-
-如果画眼睛时图省事，给左右眼各包一个 `<g class="pupils">`，那只有左眼会动，右眼永远钉在原地。
-两只眼的瞳孔必须收进**同一个**组里，且组内坐标用绝对值（渲染层会整个覆盖这个组的 `transform`）。
-
-这类 bug 的恶心之处在于它不报错、不警告，画面上看起来"只是有点怪"。回归里有两条永久断言：
-「每帧最多一个 `.pupils` 组」和「瞳孔层里两只眼都在（≥2 个瞳孔）」。
-
-**跑回归时提示"渲染进程 15s 内没起来"**
-
-八成不是代码坏了，是**你自己开着桌宠**。单实例锁 + 固定端口 23333 会让测试进程直接退出。
-
-修法不是关掉桌宠，而是让测试自隔离：`requestSingleInstanceLock()` 是按 `--user-data-dir` 分实例的，
-所以只要 spawn 时换一个临时 userData 目录（顺带把端点文件也指到临时目录），测试就是另一个应用：
-
-```js
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-verify-"));
-process.env.CLAWD_PORT_FILE = path.join(TMP, "clawd-starter.port");
-spawn(electron, [".", "--user-data-dir=" + path.join(TMP, "userdata"), ...]);
-```
-
-**顺带一条教训**：别用 `taskkill /IM electron.exe` 清场。这个项目自己的进程也叫 electron，
-一杀就把用户正在用的桌宠杀了。要按 PID 杀，且先用 `Get-CimInstance Win32_Process` 看命令行确认。
-
-**`Unable to move the cache: 拒绝访问`**
-
-`child.kill()` 只杀主进程，GPU / utility 子进程逃逸后继续占着缓存目录。下次启动就撞这个错。
-按进程树杀：`taskkill /PID <pid> /T /F`（`/T` 才是关键）。
-
-**权限气泡只能用一次，之后的请求按钮全是灰的**
-
-点完按钮立刻置灰是正确的防连点，但下一条 `render()` 必须把它恢复。少这一行，第二个及以后的
-权限请求全都点不动，只能等超时。所以 `render()` 开头无条件 `disabled = false`，
-回归里也专门断言了「第二次请求时按钮已恢复可用」。
-
-**改了 `themes/` 但预览页没变**
-
-`preview.html` 是浏览器直接打开的静态页，`file://` 下 `fetch` 读不到本地文件，所以它吃的是
-`preview-bundle.js`（由 `themes/` 打出来的包）。改完主题必须 `npm run build:preview`。
-
-桌宠运行时**不走这个包**（它走 IPC 直接读文件），所以包过期只影响预览，不影响实际形象——
-这也意味着"预览没变但桌宠变了"是可能发生的，别拿预览页当唯一真相。
-
-**没有指定主题时，默认主题变成了"名字最小的那个"**
-
-`resolveTheme` 只负责"返回第一个能加载的候选人"。如果候选人列表里没有内置默认，
-它会退化成按 `readdir` 排序取第一个——加一个 `aaa` 主题就把默认形象换掉了。
-所以 `pickThemeCandidates()` 末尾必须显式 `push(DEFAULT_THEME_ID)`。
-
-这类 bug 的特征是：**单个组件都对，组合起来不对**。单测 `resolveTheme` 永远发现不了它。
-
-**断言不要去改被测对象**
-
-剪贴板那条原来是这么写的：先 `writeText('PROBE-OK')` 探一下能不能读写，通了再 `readText()` 断言内容。
-结果探针直接**覆盖掉了前一步刚写进去的路径**，断言读到的永远是 `PROBE-OK`。
-
-正确顺序是：先读真值 → 不相等才做能力探测（并且把原值写回去）。
-顺带纠正一个错误结论：上一轮我以为"这个环境访问不到剪贴板"，其实是这个探针把证据抹掉了。
-**测试代码和业务代码一样会骗人。**
-
-## S4 已完成：接真 hook
-
-三个阶段都跑通了：
-
-1. `hooks/clawd-hook.js` —— 读 stdin（2s 硬超时 / 1MB 上限）→ 只挑 4 个字段 → POST（1.5s 超时）
-   → 永远 `exit(0)`。没日志、没异常、没重试。
-2. `hooks/install.js` —— marker 增量合并 8 个观察型事件 + 1 条权限 HTTP hook，只动带自己标记的条目，
-   备份 + 临时文件 `rename` 原子写。`--uninstall` / `--dry-run` / `--file` 都有。
-3. 「桌宠没开」两种场景都静默：端点文件不存在 → 立即退 0；文件残留但进程已死 → `ECONNREFUSED` → 241ms 退 0。
-
-```bash
-npm run preview:hooks     # 看会写进 settings.json 什么，不落盘
-npm run install:hooks     # 真正装进去（会先备份）
-npm run uninstall:hooks   # 摘干净，别人的 hook 不动
-```
-
-联调实测 17 项断言全过：七类事件映射、oneshot 回落（error 2600ms / attention 2400ms；
-notification 是 10 分钟**上限**不是播放时长，见下方「它现在具备什么」）、
-多会话仲裁（A 在 working 时 B 报错 → 显示 error，B 播完回到 A 的 working）。
-细节和数据在 `docs/ledger/PROGRESS.md`。
-
-**还没验的一段**：本机没有 `claude` CLI，真实的 Claude Code 会话没跑过。装上 hook 后第一次真会话，
-重点看三件事 —— 宿主认不认 `async`、`matcher: "*"` 会不会把非工具事件也触发、stdin 里
-`hook_event_name` 是不是一直都在（不是的话要靠 argv 兜底，代码里已经兜了）。
-
-## S5 已完成：权限气泡
-
-这一关原本是这个项目最危险的环节，开工前发现**五条预判里有四条建立在错误假设上**：
-以为 `PermissionRequest` 走 command hook（有短命进程、有 stdin），实际上它是 `type: "http"` 的
-HTTP hook——Claude Code 直接 POST 我们的端点，**HTTP 响应就是决定，没有中间进程**。
-
-因此原方案里的一堆东西直接作废：一次性 nonce 不需要（决定天然绑在请求上）、token 校不了
-（Claude Code 读不到端点文件）、默认 deny 是错的（deny 会让工具静默失败，用户还以为批准过）。
-
-落地后的三条态：
-
-| 用户动作 | 响应 | 结果 |
-|---|---|---|
-| 点「允许」 | 200 `decision:{behavior:"allow"}` | 放行 |
-| 点「拒绝」 | 200 `decision:{behavior:"deny", message:"…"}` | 拒绝，并告诉 agent 原因 |
-| 不点 / Esc / 关气泡 / 退出 / 超时 | **204 空** | 不做决定，回落 Claude Code 原生提示 |
-
-四个文件：`src/permission.js`（裁决台，所有结局收敛到唯一出口 `settle()`）、
-`src/bubble.html` + `bubble-renderer.js` + `bubble-preload.js`（气泡本体）。
-`hooks/install.js` 里新加的这条 HTTP hook **故意不写 `async`**——它必须阻塞等决定，
-和 S4 那 8 个观察型 hook 语义正好相反。
-
-回归 55/55，其中权限 6 项 + 退出收尾 2 项。**还没验的一段**：本机没有 `claude` CLI，
-真实会话依然没跑过。第一次装上要重点看三件事——宿主认不认 `type:"http"`、
-`timeout: 600` 的单位是秒还是毫秒、宿主对 204 的处理是否真的回落到原生提示。
-
-**装之前先注意端口**：服务固定用 23333，和主仓库 `clawd-on-desk` 一样，而 hook URL 是安装时
-写死进 `settings.json` 的。所以两个项目**不能同时跑**——后启动的会退到随机端口，而 URL 仍指向
-23333，权限请求会打到先启动的那个。端口变了必须重跑 `npm run install:hooks`。
-
-## S6 已完成：多会话看板
-
-状态机里从 S2 起就有一张多会话仲裁表，但用户只看到桌宠演「最吵的那一条」。S6 把它摊开成一张表。
-
-**这一关真正的难点不是 UI，是 SEC-09。** S2 当时的做法是「cwd 只留 basename」——听着安全，
-其实是**砍功能**：看板要做「复制路径」「跳转终端」就必须有完整路径。S6 把它拆成两层：
+**cwd 是分层处理的（SEC-09）**
 
 | 层 | 存什么 | 谁看得见 |
 |---|---|---|
-| 存储层（`state.js` 的 `sessions` Map） | 完整 cwd，清洗控制字符、限长 1024 | 只在主进程内存里 |
-| 快照层（`snapshot()` → IPC → 渲染进程 → 屏幕） | 只有最后一段目录名，限长 200 | 看板 DOM、投屏、截图 |
+| 存储层（`state.rs` 的会话表） | 完整 cwd，清洗控制字符、限长 1024 | 只在宿主进程内存里 |
+| 快照层（`snapshot()` → IPC → 屏幕） | 只有最后一段目录名，限长 200 | 看板 DOM、投屏、截图 |
 
-完整路径唯一的出口是用户显式点某一行的「复制路径」——主进程**单条**释放给剪贴板。
-`dashboard-preload.js` **故意没有**「取完整 cwd」的接口，回归里用伪造 id `'../../etc/passwd'` 验证过拿不到。
+完整路径唯一的出口是用户显式点「复制路径」——宿主单条释放给剪贴板。
+渲染层**根本没有**"取完整 cwd"的接口。
 
-另外两个设计取舍：
-
-- **双击开关，不是「只开」**。桌宠没有任务栏入口，看板又是带边框的正常窗口，一旦被关掉就再也找不回来。
-  双击判定只认落在 `#pet` 上的——单击必须留给拖拽，否则拖一下就弹窗。
-- **1s 轮询，不是推送**。`idleMs` 本来就随时间变，没人发事件也得刷新；推的话还要维护一套「什么时候该推」，
-  而轮询一个本地 IPC 的代价近似为零。
-- **两个入口都开看板**：双击桌宠，或右键菜单里的「会话看板」。右键本来是**直接退出**——
-  桌宠没有标题栏也不进任务栏，"怎么关掉它"唯一能试的动作就是右键，而它没确认就退了。
-  所以右键改成原生菜单（看板 / 退出），双击走同一个 toggle。
-  （双击曾经是"写信"，那个功能 2026-10-30 整套删了，见 DEVLOG。）
-
-**演示模式**只隐藏目录名，状态和时间照旧——它防的是投屏/直播把客户项目名漏出去，不是把看板变成废纸。
-它是渲染层偏好，存在 `localStorage`，不回主进程；真要彻底隐藏，应该在宿主侧就不采集，那是另一件事。
-
-回归 64/64，其中看板 7 项。**没验的一段**：剪贴板内容。`copyPath` 返回 true/false 是准的
-（伪造 id 拿到 false 就是证据），但本环境 `clipboard.readText()` 恒为空，连「自己写个探针再读回」
-都拿不到——手工双击点一次才能确认粘出来的是完整路径。
-
-## S7 已完成：主题系统
-
-形象从代码里搬了出来。原来 19 帧 SVG 拼在 `src/visuals.js` 里，现在是一个目录：
+## 主题
 
 ```text
 themes/ragdoll/
 ├── theme.json          状态 → 帧文件、fps、要不要跟眼球
-└── assets/*.svg        19 个文件，一帧一个
+└── assets/*.svg        一帧一个文件
 ```
 
-**`src/visuals.js` 被删掉了**，不是"改成从文件读"——那个文件不存在了。加载链是：
-主进程读 `themes/` → 校验 → IPC → 渲染层换帧数据。主题是**拉**回来的（`getTheme`），
-不是推的，因为 S5 的第一个权限气泡就是"推早了被静默丢弃"。
+- 内置只有 `ragdoll`（骨骼弹簧版）。早期的 `crab` 已删——暂时不需要第二个
+- 想自己做：复制 `themes/_template`（下划线开头，不会出现在主题列表里），
+  契约见 `themes/README.md`
+- 加载链是**拉**的（渲染层请求 `getTheme`），不是推的——推早了会被静默丢弃，
+  这是 S5 第一个权限气泡踩出来的坑
+- 主题文件是**不可信输入**：SVG 走 `DOMParser` + 标签白名单，`<style>` / `foreignObject` /
+  `animate` / `feImage` / `feTurbulence` 全拒，`url()` 只准指向 `#本地id`
+- 主题坏掉时给**内置兜底画面**（灰色「?」）：桌宠是置顶无边框窗口，空白等于让用户
+  "看得见进程、找不到窗口、不知道怎么退出"
+- 主题优先级：`CLAWD_THEME` 环境变量 → `--theme=<id>` → 上次在看板里选的 → `ragdoll`
 
-内置主题现在只有一个：`ragdoll`（默认，骨骼弹簧版）。早期的第二个内置主题 `crab`（原版螃蟹，帧序列）已于 2026-10-28 删除——暂时不需要更多主题。
-第二个主题的意义是**证明这套东西能换形象**，而不只是能换几个参数。双击看板底部就能切。
-`themes/_template/` 是脚手架，下划线开头所以不会出现在主题列表里。
+改完 `themes/` 记得 `npm run build:preview`——`preview.html` 是静态页，`file://` 下读不到本地文件，
+吃的是 `themes/` 打出来的数据包。桌面那只**不走这个包**（它直接读文件），
+所以"预览没变但桌宠变了"是可能发生的。
 
-### 真正的难点不是加载，是决定"什么能进 DOM"
+## 开发与回归
 
-主题文件是不可信输入。动手前先在 `SECURITY.md` 里定了白名单，然后才写加载器——顺序反过来的话，
-等第一个主题加载不出来时才去放宽白名单，那时候放宽的动机已经变成"让它能跑起来"，而不是"这样安全"。
+三道闸门 + 一道回放，判据不同源：
 
-| 处置 | 内容 | 为什么 |
-|---|---|---|
-| 放行 | `clipPath` `mask` `filter` | 没有它们只能画硬边，做不出柔和阴影 |
-| 逐个放行 | 9 个 `fe` 图元（模糊/投影/调色/叠加） | **不用 `fe*` 通配**，多一个都要人过一遍 |
-| 拒 | `feImage` | 唯一用途就是从 `href` 拉外部图片 |
-| 拒 | `feTurbulence` `feDisplacementMap` | CPU 炸弹：每帧重算 2D 湍流场 |
-| 拒 | `style` 标签 | 能写 `@import`、能覆盖整页。代价是主题不能用 CSS 动画 |
-| 拒 | `foreignObject` `animate` `set` | HTML 注入；SMIL 能在运行时改 `href` 绕过静态校验 |
+| 闸门 | 命令 | 现在的数 | 它回答什么 |
+|---|---|---|---|
+| UI | `npm run verify:tauri` | **75 PASS / 0 FAIL** | 二进制跑起来之后，行为对不对 |
+| 单测 | `cd src-tauri && cargo test` | **23 passed** | 状态机 / 风险评级 / 主题校验的纯逻辑 |
+| 打包 | `npm run verify:bundle` | **10 PASS**（`--install` 再 +15） | 用户拿到手的那一包，装得上、卸得干净 |
+| 回放 | `npm run verify:diag` | **10 步全中** | 真实事件序列走一遍，状态有没有掉 |
+| 审计 | `cargo audit` | **0 漏洞 / 2 条警告** | 1402 条公告 × 425 个依赖 |
 
-**加了这三个标签之后，`url()` 目标校验从"锦上添花"变成唯一的出口管控**——它们的值天生就是 `url()`。
-所以那条「url 只准指向 # 本地 id」的正则现在删不得，也放松不得。另外补了一条 `stdDeviation ≤ 40`：
-Chrome 对超大模糊半径是同步算的，一个 `9999` 就是一次卡死。
+关于这些数字，有两句话必须写在这里：
 
-### 两个让"主题坏了"不变灾难的设计
+- **`verify:tauri` 会给自己开一个临时端点文件（`CLAWD_PORT_FILE` 指到 tmp），所以开着桌宠也能跑。**
+  但它有一条"陈旧二进制"守卫：release exe 比源码旧就直接拒跑并提示 `cargo build --release`——
+  拿旧二进制跑测试得到的绿是假的。
+- **`verify:diag` 的位置最特殊**：它起一份临时实例，把现场观察到的一轮事件照原样喂回去
+  （SessionStart → UserPromptSubmit → 补发 SessionStart → 工具 → PreCompact → 压缩后 SessionStart
+  → UserPromptSubmit → Stop → SessionEnd），每一步都对**服务端快照**和**渲染层画面**两个读数。
+  它钉死的是一个用户报过的问题：thinking 不许掉、压缩后不许回 idle。
 
-- **全坏时给内置兜底画面**（灰色「?」）。桌宠是 `skipTaskbar` + 透明无边框的窗口，
-  加载失败导致空白的话，用户看到的是一个**看得见进程、找不到窗口、不知道点哪里退出**的东西——比报错难处理得多。
-- **失败是整个主题拒绝，不是部分加载**。半个主题的表现是"看着有点怪"，作者根本不会发现。
+### 状态掉了怎么查
 
-回归 157 PASS / 0 FAIL，其中主题与白名单 24 项、渲染与动画 13 项、状态时长 11 项、表情变体 4 项、唤醒与睁眼过渡 12 项、会话标题与工具名 11 项。`npm run preview:states` 出对照图，
-`npm run build:preview` 更新预览页的数据包。
+**没有任何报错**——hook POST 成功、服务回 200、页面安静。只看画面永远看不出来，要读账本：
 
-## S9 已完成：鼠标经过，把它叫醒（带过渡）
+```bash
+npm run diag:events
+```
 
-用户的原话：「鼠标经过布偶猫的时候，如果处于睡觉状态，就慢慢让她变为 idle 状态，**能有过渡吗**」。
-最后半句才是重点——只把状态改成 `idle` 会得到一只"啪"一下弹起来的猫。
+`GET /state` 的 `recent` 里每条都有 `how`，它就是答案：
+
+| `how` | 含义 |
+|---|---|
+| `mapped` | 事件认得，状态真的改了 |
+| `same` | 认得，但目标状态与当前一致（不算 bug） |
+| `ignored` | **事件名不认得**，什么都没改 ← 掉 idle 的头号嫌疑 |
+| `preserved` | `SessionStart` 撞上已有会话，原状态被保住 |
+| `session-end` | 会话被删（没有会话时仲裁结果就是 idle，这是对的） |
+| `woke` | 鼠标把它弄醒了 |
+
+### 调试入口
+
+```bash
+WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333 npm start
+```
+
+连上 CDP 后页面里有 `petDebug`：
+
+| 方法 | 看什么 |
+|---|---|
+| `setState('working')` | 立刻把画面切到某个状态 |
+| `gaze({x:1,y:-1}, true)` / `unpinGaze()` | 把眼睛钉在某个方向 / 放开 |
+| `state()` / `states()` / `timings()` | 当前状态、主题声明了哪些状态、每个状态播多久 |
+| `springs()` / `eyeOpen()` | 28 个弹簧通道的当前值 / 睁眼程度 0–1（证明"有过渡"只能靠它） |
+| `cast()` / `solo()` | 台上有几只猫、各自演什么、头巾上写的什么词、聚焦谁 |
+| `desk()` / `variant()` / `builds()` | working 桌面的进度 / 当前播第几套资产 / 重建过几次 |
+
+`scripts/cdp.js` 是三个回归脚本共用的那一段——**同一套判据必须用同一段代码丢进页面**，
+否则两边的绿没有可比性。
+
+## 项目结构
 
 ```text
-mousemove 命中 #pet，且当前确实是 sleeping（距上次 ≥500ms）
-        │  IPC "pet:hover"（无载荷）
-        ▼
-   main.js → store.wake()     ← 只改 sleeping，working/thinking 一概不碰
-        │  stateSince 一起重置（否则下一个 tick 立刻判定"又闲够了"）
-        ▼
-   tick() → visual 变了 → broadcast → renderer setState("idle")
-        │
-        ▼
-   画面：躯干/头/耳/尾 28 个弹簧通道过冲跟上
-        眼睛与头顶 zZz 共用一条 eyeOpen 弹簧（0=闭 1=睁，≈0.5s）交叉淡入
+clawd-starter/
+├── src/                       渲染层（原生 JS + SVG，无框架、无构建步骤）
+│   ├── index.html             桌宠主窗口（分身 / 气泡锚点 / 拖拽层）
+│   ├── renderer.js            弹簧骨架 + 七种姿势 + 分身 + 头巾 + SVG 白名单
+│   ├── bubble.html / .js      权限气泡（命令原文 + 风险评级 + 允许/拒绝）
+│   ├── dashboard.html / .js   会话看板（行节点复用，避免每秒重建）
+│   ├── theme.js               主题解析与加载（预览构建也用它）
+│   ├── tauri-bridge.js        把 window.clawd 装回渲染层（Electron → Tauri 的桥）
+│   └── port-file.js           端点文件读写 + DEFAULT_PORT
+├── src-tauri/
+│   ├── tauri.conf.json        窗口/打包/签名配置（signCommand 在这里）
+│   └── src/
+│       ├── main.rs            窗口、菜单、托盘、IPC 命令、定时器
+│       ├── state.rs           状态机 + 多会话仲裁 + 事件账本
+│       ├── server.rs          本地 HTTP（四道锁）
+│       ├── permission.rs      权限裁决台（settle() 是唯一出口）
+│       ├── risk.rs            命令风险评级（纯函数，无副作用）
+│       ├── theme.rs           主题发现与校验
+│       ├── sys.rs             光标 / 剪贴板 / 锁屏 / 开机自启（Win32 直调）
+│       └── single.rs          单实例锁 + 唤醒已有实例
+├── hooks/
+│   ├── clawd-hook.js          读 stdin → POST → 立刻退出（永不非 0）
+│   └── install.js             装进三家 agent 的 settings.json
+├── themes/                    ragdoll + _template
+├── scripts/                   回归 / 诊断 / 预览 / 图标 / 签名
+├── docs/
+│   ├── ragdoll-states.png     七状态对照图
+│   └── ledger/                台账：DEVLOG / SECURITY / PROGRESS / FILE_MAP / GLOSSARY
+└── package.json               0 依赖，只有脚本
 ```
 
-### 为什么不能只在渲染层改
+## 内存这件事
 
-`sleeping` 是状态机按「idle 持续多久」推出来的。渲染层擅自把画面切成 idle，
-下一个 250ms 的推送就把它顶回去——那是**闪一下又睡**。同一类账在 S8 已经记过一次
-（不要用改宠物状态来给用户提示），这里是反方向的同一件事：
-**渲染层只能请求，改状态的权力永远在主进程。**
+用户最初的目标是"常驻内存降到 15MB 以内"。**这个目标没有达到，也不该假装达到。**
+同一个 release 构建测了两次，两次互有高低，所以两组都列出来：
 
-### "慢慢"是两条曲线，不是一条
+| 测量 | 进程数 | RSS | 私有内存 |
+|---|---|---|---|
+| 第一次 · Tauri 合计 | 7 | 379.6 MB | 211.8 MB |
+| └ Rust 宿主 | 1 | **33.9 MB** | **10.4 MB** |
+| └ WebView2 子进程 | 6 | 345.7 MB | 201.4 MB |
+| 第一次 · Electron 45 合计（对照，已删） | 4 | 350.8 MB | 203.1 MB |
 
-- **本来就慢的**：躯干、头、耳、尾那 28 个二阶弹簧通道。`setTarget()` 之后自然有过冲和滞后，
-  这段一行过渡代码都不用写。
-- **本来是布尔的**：眼睛。`eyeMode` 是字符串（`open` / `sleep` / `happy`），原来按它直接切
-  opacity `0`/`1`——整只猫里唯一会"啪"一下的就是这里，而脸又恰好是最先被看到的地方。
-  现在加了一条 `eyeOpen` 弹簧（临界阻尼 k=110 c=21），睁眼层 / 弯月闭眼层 / 笑眼层各按权重淡入，
-  头顶的 zZz 读同一个值淡出（两处各算一遍会出现「眼睛睁开了、Z 还挂着」）。
-- **眨眼仍然硬切**：150ms 的事，走弹簧会变成"慢慢眨眼"，看起来像卡住。
-  **该慢的慢、该快的快是两件事**，别为了统一把两者都塞进弹簧。
+能说的只有一句：**整机基本持平，谁也省不出量级**。两次测量之间差 ±30MB，比"两种容器的差距"还大。
+
+真实收益不在"合计数"，在**宿主进程**：Rust 侧 10.4MB 私有内存，而 Electron 侧光主进程就 100MB+。
+WebView2 那 6 个子进程是系统共享的渲染引擎——**换容器换不掉它**，只能换掉"多养一份 Chromium"。
+所以这个项目现在的说法是：**宿主是 10MB 级的原生进程**，不是"整只猫 15MB"。
+
+## 已知限制
+
+- **只打了 Windows 的 NSIS 安装包**。`sys.rs` 里 macOS/Linux 有分支，但一次都没跑过
+- **离线装不上**：Tauri 默认 `downloadBootstrapper`，机器上没有 WebView2 时安装器要联网。
+  要离线包得切 `webviewInstallMode` 并把 `MicrosoftEdgeWebView2RuntimeInstaller` 一起塞进安装包（没做）
+- **未签名/自签名安装包会被 SmartScreen 拦**：显示「Windows 已保护你的电脑」，
+  要点「更多信息 → 仍要运行」。这是签名问题不是 bug，见[代码签名](#代码签名)
+- **看板的「模型 / 上下文用量」没有做**：hook 的 payload 里没有这两个字段，
+  硬编一个数字出来比不显示更糟
+- **主题只支持 SVG**，不支持 GIF/APNG/WebP；也不能用 CSS 动画（白名单拒了 `<style>` 和 SMIL）
+- **一个实例、优先固定端口 23333**，与主仓库 `clawd-on-desk` 不能同时跑
+- **权限请求只在内存里**，不落盘：重启就没了，也没有决策历史
+- **气泡只支持鼠标 + Esc**，没有键盘决定、没有远程审批
+- **云签名没接**：只支持 PFX 与证书库指纹
+
+## 踩坑记录
+
+**hook 让每次工具调用都变慢 200ms**
+
+`install.js` 里如果不写 `async: true`，agent 会等 hook 进程退出才继续。
+Windows 上 `node` 冷启动实测 ~200ms，hook 自己的代码只占 ~35ms。`timeout` 管不到这块成本——
+它管的是"跑太久了砍掉"，不是"要不要等"。分界线：**观察型异步，裁决型阻塞**。
+
+**别用 `spawnSync` 量 hook 耗时**
+
+在循环里连发会稳定得到 ~950ms 这种数字，看着像性能问题。真实开销 240–280ms，
+多出来的是父进程阻塞 + 子进程连发的测量假象。要量就用 shell 记时前后夹。
+
+**第一个权限请求必定丢失（气泡空白，点了没反应）**
+
+气泡窗口是懒创建的。页面还没执行完渲染脚本就 `send`，这条 IPC 会被**静默丢弃**——
+不报错、不排队、不重试。修法是握手：渲染层注册完监听回一个 `bubble:ready`，宿主收到才投递。
+这类 bug 的隐蔽性在于它表现为「慢」而不是「错」，没有断言就会当成网络偶发。
+
+**权限气泡只能用一次，之后按钮全是灰的**
+
+点完立刻置灰是正确的防连点，但下一条 `render()` 必须恢复。少这一行，第二个及以后的请求全都点不动。
+
+**只有一只眼睛跟着鼠标转**
+
+`querySelector` 只返回**第一个**匹配。两只眼的瞳孔必须收进**同一个** `.pupils` 组，且组内坐标用绝对值。
+这类 bug 不报错、不警告，看起来"只是有点怪"。回归里有两条永久断言：每帧最多一个 `.pupils` 组、
+瞳孔层里两只眼都在。
+
+**没指定主题时，默认主题变成了"名字最小的那个"**
+
+`resolveTheme` 只负责返回"第一个能加载的候选人"。候选人列表里没内置默认时，
+它会退化成按 `readdir` 排序取第一个——加一个 `aaa` 主题就把默认形象换掉了。
+所以 `pickThemeCandidates()` 末尾必须显式 push `DEFAULT_THEME_ID`。
+特征是：**单个组件都对，组合起来不对**，单测 `resolveTheme` 永远发现不了。
+
+**断言不要去改被测对象**
+
+剪贴板那条原来是"先写 `PROBE-OK` 探一下，再读回断言"。探针直接覆盖了上一步刚写进去的路径，
+断言读到的永远是 `PROBE-OK`。正确顺序是：先读真值 → 不相等才做能力探测（并且把原值写回去）。
+**测试代码和业务代码一样会骗人。**
+
+**连上 CDP 后 `Runtime.evaluate` 永远不回显**
+
+必须先发一次 `Runtime.enable`。不发也能连、也能 send，但消息发出去没有任何响应，`await` 就一直挂着——
+表现是"脚本卡住"或"所有断言都超时"。另外 `Runtime.evaluate` 跑在全局作用域，
+要 `includeCommandLineAPI: true` 才有 `require`。
+
+**回归偶发失败：gaze 那一条**
+
+gaze 线程有变化检测（位移 < 0.02 不 emit），光标静止时 0 条是**正确行为**，
+而断言写的是"这一轮至少推过一次"——成败取决于测试期间有没有人碰鼠标。
+修法：先用 PowerShell 把光标挪 3px 再挪回，等 400ms 重读。
+
+**改了 `themes/` 但预览页没变**
+
+见[主题](#主题)：预览页吃的是 `npm run build:preview` 打出来的数据包，桌面那只直接读文件。
+
+**跑回归时提示"渲染进程 15s 内没起来"**
+
+八成不是代码坏了，是**你自己开着桌宠**：单实例锁 + 固定端口会让测试进程直接退出。
+现在的脚本会给自己开临时端点文件和临时窗口，理论上不该再撞；真撞了先看 `verify-tauri.js`
+打印的进程输出，别急着改代码。
+
+> Electron 时代的坑（`ELECTRON_RUN_AS_NODE`、GPU 缓存目录被占用、临时 `--user-data-dir`）
+> 已经随容器一起删了。要考古见 `docs/ledger/DEVLOG.md`。
 
 ## 对照阅读
 
-- `docs/ledger/PROGRESS.md` —— 每个阶段做了什么、实测数据、哪些没验
-- `src/state.js` —— 只看 `resolveDominantSessionState` 和 `updateVisualState` 附近，外加 SEC-09 的 `sanitizeCwd` / `publicCwd` / `fullCwd` 三个函数
-- `src/theme.js` —— 325 行，重点看 `readAsset()` 为什么"正则 + 真实路径"双保险，以及 `resolveTheme()` 为什么必须有兜底
-- `src/renderer.js` —— 白名单那段（`ALLOWED_TAGS` + `clampStdDeviation`）是 S7 的安全核心
-- `src/permission.js` —— 134 行，重点看 `settle()` 为什么必须是唯一出口
-- `src/dashboard-renderer.js` —— 156 行，看「行节点复用 + insertBefore 调序」怎么避免每秒重建
-- `hooks/clawd-hook.js` —— 看它如何"读了就 POST，然后立刻退出"
-- `hooks/install.js` —— 看观察型（async）和裁决型（阻塞）hook 的区别怎么落进 JSON，以及三家 agent 的差异表
-- `themes/README.md` —— 想自己做一个主题时看这个（三条硬契约 + 资产规则）
+- `docs/ledger/PROGRESS.md` —— 每个阶段做了什么、实测数据、**哪些没验**
+- `docs/ledger/SECURITY.md` —— 四道锁、SVG 白名单、SEC-09 分层、依赖审计的原始记录
+- `docs/ledger/DEVLOG.md` —— 决策现场：为什么删 Electron、为什么删"写信"、问题 1 的根因
+- `src-tauri/src/state.rs` —— 只看 `resolve_dominant_session_state` 与 `update_visual_state` 附近
+- `src-tauri/src/permission.rs` —— 重点看 `settle()` 为什么必须是唯一出口
+- `src-tauri/src/risk.rs` —— 文件头的两条硬规则，改之前先读
+- `src/renderer.js` —— 白名单那段（`ALLOWED_TAGS` + `clampStdDeviation`）是渲染层的安全核心
+- `hooks/install.js` —— 观察型（async）与裁决型（阻塞）的差别怎么落进 JSON，以及三家的差异表
+- `themes/README.md` —— 想自己做主题时看这个（三条硬契约 + 资产规则）
