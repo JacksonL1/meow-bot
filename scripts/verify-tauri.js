@@ -3,20 +3,16 @@
 // ============================================================
 // Tauri 版回归脚本（S10-5）
 //
-// 和 verify-electron.js 的关系：**判据同源，宿主不同**。
-//   - 能用同一套判据的（主题、分身、头巾、风险评级、裁决回包），照抄同一份断言文案；
-//   - 宿主专属的（Electron 的 BrowserWindow 属性、Rust 的窗口样式），各测各的。
+// 这是本项目唯一一道 UI 闸门（2026-11-03 起：Electron 容器已删，见 DEVLOG）。
 //
-// 为什么不能直接复用 verify-electron.js：
-//   那个脚本靠 `--inspect=9229` 连主进程 Node inspector，断言
-//   `BrowserWindow.getAllWindows().length` / `ipcMain.listenerCount(...)`。
-//   Tauri 的主进程是 Rust，没有 JS 主进程，这些断言既没有意义也没有入口。
-//   硬套只会得到一堆"跳过"，而跳过是不算数的绿。
+// 历史备注：它曾经和 verify-electron.js 判据同源、宿主不同——凡是能用同一套
+// 判据的（主题、分身、头巾、风险评级、裁决回包），两边照抄同一份断言文案；
+// 宿主专属的各测各的。那份对照的价值已经兑现完：迁移期间它证明了
+// "渲染层一行没改"，删掉 Electron 之后这些断言就是唯一的守护。
 //
 // 连的是谁：WebView2 的 CDP。
-//   Electron 用 --remote-debugging-port=9222，Tauri 这边用
 //   WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=<port>，
-//   WebView2 认这个变量，吐出同样的 /json/list。所以 scripts/cdp.js 是共用的。
+//   WebView2 认这个变量，吐出标准的 /json/list。所以 scripts/cdp.js 是共用的。
 //
 // 用法：
 //   node scripts/verify-tauri.js            # 用 target/debug
@@ -37,7 +33,7 @@ const CDP_PORT = 9333;
 const BUBBLE_TIMEOUT_MS = 6000;
 
 // ---------- 测试隔离 ----------
-// 和 verify-electron.js 同一套理由，一行都不用改：
+// 端点文件测试隔离的理由（原先与 Electron 版同一套，一行都不用改）：
 //   1. 端点文件必须隔离，否则会覆盖用户正在用的那份（端口 + token 全变，hook 立刻失效）
 //   2. 端口 23333 被占时服务会回退随机端口，这里照样能从临时文件读到真实端口
 const TMP_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-verify-tauri-"));
@@ -157,11 +153,19 @@ async function waitTarget(match, timeoutMs = 8000) {
 //
 // 唯一目的是给 gaze 线程一个"看得见的输入变化"——它按设计只在光标动了才 emit，
 // 所以"没推送"在光标静止时是正确行为，测不出链路好坏。
+//
+// **挪几像素是有下限的**：宿主把像素偏差归一化时除以 260，再和阈值 0.02 比
+// （`main.rs` 的 gaze 线程），也就是"至少 5.2px"才可能触发。原来这里挪 3px
+// （≈0.0115），永远够不着阈值——于是这条断言在没人碰鼠标时必然红，
+// 而"红"和"链路断了"看起来一模一样。现在挪 8px（≈0.031）。
+//
 // 为什么用 PowerShell 而不是 Node：Node 没有调 user32 的入口，而这里要动的
 // 就是**操作系统**的光标，不是我们自己进程里的状态。（这和"用 PowerShell 的
 // 注册表 provider 绕过被拦的 reg.exe"不是一回事：那是同一动作换个壳，
 // 这里是没有第二个壳可选。）非 Windows 直接跳过，断言会如实报 0。
-function nudgeCursor(px = 3) {
+const NUDGE_PX = 8; // 8 / 260 ≈ 0.031，必须大于 main.rs 里的 0.02
+
+function nudgeCursor(px = NUDGE_PX) {
   if (process.platform !== "win32") return false;
   const ps = [
     "Add-Type -AssemblyName System.Windows.Forms;",
@@ -232,7 +236,7 @@ async function main() {
       CLAWD_PERMISSION_TIMEOUT_MS: String(BUBBLE_TIMEOUT_MS),
       CLAWD_PORT_FILE: PORT_FILE,
       // WebView2 认这个变量：注入 Chromium 命令行开关。
-      // 这是 Tauri 版能被 CDP 驱动的前提，也是整套 Electron 回归能平移过来的原因。
+      // 这是 Tauri 版能被 CDP 驱动的前提，也是当年整套 Electron 回归能平移过来的原因。
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${CDP_PORT}`,
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -306,16 +310,10 @@ async function main() {
     // 每窗口白名单（main.rs 的 only()）。下面三条把这两件事一起钉住。
     ok("withGlobalTauri 已关：window.__TAURI__ 不存在", (await R.eval("typeof window.__TAURI__")) === "undefined");
 
-    // 开机自启的**能力对齐**检查（硬约束 35：两套容器逐条对齐）。
-    // Electron 侧用 `app.setLoginItemSettings`，Tauri 侧用自己写的 `sys::autostart_set`
-    // 写 HKCU 的 Run 键——两条路的落点是同一个注册表项，所以这里静态确认
-    // 两边**都在**，任一侧被删掉就会红。
-    const mainJsSrc = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
+    // 开机自启的能力落点（S10-7①）。2026-11-03 之前这里是"两套容器逐条对齐"
+    // 的静态检查（硬约束 35）；Electron 容器删掉之后，剩下的这一侧就是唯一实现，
+    // 检查退化成"注册表那两个函数还在"——防止哪天被顺手删掉而托盘勾选悄悄失灵。
     const sysRsSrc = fs.readFileSync(path.join(ROOT, "src-tauri", "src", "sys.rs"), "utf8");
-    ok(
-      "开机自启：Electron 侧有 setLoginItemSettings",
-      mainJsSrc.includes("setLoginItemSettings") && mainJsSrc.includes('label: "开机自启"')
-    );
     ok(
       "开机自启：Tauri 侧有 autostart_set / autostart_enabled",
       sysRsSrc.includes("pub fn autostart_set") && sysRsSrc.includes("pub fn autostart_enabled")
@@ -501,8 +499,8 @@ async function main() {
     // 光标没动时这一条本来是 0——gaze 线程有变化检测（偏差 < 0.02 不发），
     // 那是**正确行为**，不是"链路不通"。所以判据不能是"跑完这一轮有没有推过"：
     // 那样它的成败取决于测试期间有没有人碰鼠标，红了也说不清是谁的错。
-    // 做法：自己把 OS 光标挪 3px 再挪回去，造出"变化"，然后才断言。
-    // 一次都不推才是真坏了。
+    // 做法：自己把 OS 光标挪一下再挪回（8px，必须超过归一化阈值 5.2px），
+    // 造出"变化"，然后才断言。一次都不推才是真坏了。
     let gazeNow = gazeN;
     if (gazeNow < 1) {
       nudgeCursor();
@@ -546,7 +544,7 @@ async function main() {
       await B.eval("document.getElementById('btnDeny').click(), 1");
       const r1 = await p1;
       ok("点拒绝 → 200 且回包是 deny", r1.code === 200 && r1.body.includes('"behavior":"deny"'), r1.body.slice(0, 60));
-      ok("拒绝话术与 Electron 版一致", r1.body.includes("用户在桌宠气泡里拒绝了这个操作"));
+      ok("拒绝话术是固定文案（不跟着命令内容变）", r1.body.includes("用户在桌宠气泡里拒绝了这个操作"));
     }
 
     // 第二条：允许

@@ -2,13 +2,12 @@
   "name": "clawd-starter",
   "version": "0.1.0",
   "private": true,
-  "description": "S1-S7 skeleton: transparent desktop pet driven by agent hooks (claude / codebuddy / workbuddy) with a theme system",
-  "main": "src/main.js",
+  "description": "桌面布偶猫：把 Claude Code / CodeBuddy / WorkBuddy 的会话状态变成看得见的一只猫（Rust + Tauri 容器）",
   "scripts": {
-    "start": "electron .",
-    "start:debug": "electron . --devtools",
+    "start": "cargo run --release --manifest-path src-tauri/Cargo.toml",
+    "build": "cargo build --release --manifest-path src-tauri/Cargo.toml",
+    "bundle": "cargo tauri build && node scripts/sign-release.js src-tauri/target/release/clawd-starter.exe",
     "feed": "node scripts/fake-feed.js",
-    "verify:electron": "node scripts/verify-electron.js",
     "preview:states": "node scripts/preview-shot.js",
     "build:preview": "node scripts/build-preview-bundle.js",
     "install:hooks": "node hooks/install.js",
@@ -18,17 +17,12 @@
     "uninstall:hooks:workbuddy": "node hooks/install.js --agent workbuddy --uninstall",
     "install:hooks:codebuddy": "node hooks/install.js --agent codebuddy",
     "uninstall:hooks:codebuddy": "node hooks/install.js --agent codebuddy --uninstall",
-    "start:tauri": "cargo run --release --manifest-path src-tauri/Cargo.toml",
-    "build:tauri": "cargo build --release --manifest-path src-tauri/Cargo.toml",
     "verify:tauri": "node scripts/verify-tauri.js --release",
-    "bundle:tauri": "cargo tauri build",
     "verify:bundle": "node scripts/verify-bundle.js",
     "verify:bundle:install": "node scripts/verify-bundle.js --install",
     "verify:diag": "node scripts/diag-events.js --replay",
     "diag:events": "node scripts/diag-events.js",
-    "verify:all": "node scripts/verify-electron.js && node scripts/verify-tauri.js --release && node scripts/diag-events.js --replay"
-  },
-  "devDependencies": {
-    "electron": "~45.0.0"
+    "verify:all": "node scripts/verify-tauri.js --release && node scripts/diag-events.js --replay && node scripts/verify-bundle.js",
+    "icons": "node scripts/make-icons.js"
   }
 }

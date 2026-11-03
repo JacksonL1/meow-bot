@@ -3,7 +3,7 @@
 // 极简 CDP 客户端
 //
 // 只做一件事：发 Runtime.evaluate 拿返回值。
-// 两个回归脚本（verify-electron.js / verify-tauri.js）共用它——
+// 各回归脚本（verify-tauri.js 等）共用它——
 // **共用是有意的**：两边跑的是同一套判据，如果连"怎么把表达式丢进页面"
 // 都不一样，那两边的绿色就没有可比性了。
 //

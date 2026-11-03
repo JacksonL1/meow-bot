@@ -33,8 +33,7 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { readPortFile } = require("../src/port-file");
-const { DEFAULT_PORT } = require("../src/server");
+const { readPortFile, DEFAULT_PORT } = require("../src/port-file");
 
 // command hook 的标记：只认命令里含这段的条目
 const MARKER = "clawd-hook.js";

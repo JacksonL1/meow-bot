@@ -18,7 +18,7 @@ const el = {
   demo: document.getElementById("demo"),
 };
 
-// 状态 → 中文名 + 徽标配色类。名字必须和 theme.json / state.js 对得上。
+// 状态 → 中文名 + 徽标配色类。名字必须和 theme.json / state.rs 对得上。
 const STATE_META = {
   idle: { label: "发呆", cls: "b-idle" },
   thinking: { label: "思考", cls: "b-thinking" },

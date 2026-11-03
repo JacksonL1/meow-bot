@@ -18,8 +18,9 @@
 // ssh 前后都是单词边界），把 `rm -rf ./build` 判成删根目录。两类误报的根因
 // 是同一个：**没分清"命令"和"命令里的一个词"**。
 //
-// 与 src/risk.js 的关系：这是它的等价重写（Electron 版仍在，两边靠同一批
-// 用例断言对齐——见文件末尾的 #[cfg(test)]，用例与 verify 脚本逐条同源）。
+// 历史：这是 src/risk.js 的等价重写，当年两份实现靠同一批用例对齐互检。
+// 2026-11-03 Electron 容器删除后，**这里是唯一实现**——文件末尾的
+// #[cfg(test)] 用例（历史上与 verify 脚本逐条同源）就是它的守护。
 // ============================================================
 use serde::Serialize;
 use std::sync::OnceLock;
@@ -698,8 +699,8 @@ mod tests {
         assess_risk("Bash", cmd, "").level
     }
 
-    // 这 16 条与 scripts/verify-electron.js 的 riskCases 逐条同源。
-    // 两边各跑一遍，是为了确保 Rust 重写没有悄悄把判据挪动一格。
+    // 这 16 条历史上与已删除的 scripts/verify-electron.js 的 riskCases 逐条同源
+    // （两边各跑一遍，确保 Rust 重写没有悄悄把判据挪动一格）。现在是唯一一份。
     #[test]
     fn levels_match_the_js_cases() {
         let cases = [
@@ -732,8 +733,8 @@ mod tests {
 
     #[test]
     fn read_only_and_write_tools() {
-        assert_eq!(assess_risk("Read", "src/main.js", "").level, Level::Low);
-        assert_eq!(assess_risk("Write", "src/main.js", "").level, Level::Medium);
+        assert_eq!(assess_risk("Read", "src/任意文件.js", "").level, Level::Low);
+        assert_eq!(assess_risk("Write", "src/任意文件.js", "").level, Level::Medium);
     }
 
     #[test]

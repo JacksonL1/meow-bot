@@ -6,19 +6,32 @@
 // preview.html 是浅底 + 七状态同屏，一张图就能判断形象是否正常。
 //
 // 用法：
-//   node scripts/preview-shot.js                 # 写到 docs/ragdoll-states.png
+//   node scripts/preview-shot.js                 # 写到 docs/<theme>-states.png
 //   node scripts/preview-shot.js <输出路径>
+//   node scripts/preview-shot.js --theme=_template
 //
-// 依赖零第三方库：Node 内置 WebSocket + Electron 的 CDP。
+// 依赖零第三方库：Node 内置 WebSocket + 宿主 WebView2 的 CDP。
+//
+// ---- 2026-11-03：宿主从 Electron 换成 Tauri ----
+// 原来这里起一个临时 Electron app 装一个 BrowserWindow 来跑 preview.html。
+// Electron 容器删掉之后换成 Tauri 的 release 二进制：它启动后本来就有一个窗口
+// 在跑 index.html，我们连上 CDP 之后用 `Page.navigate` 把这个窗口**导航到**
+// preview.html。渲染内核还是同一个 Chromium（WebView2），所以下面那些
+// "等 SVG 画出来 / 撑开视口 / 强制重绘再截"的判据一条都不用改。
+//
+// 唯一的前提：**必须先 `npm run build`**（README 里也写了）。截图脚本不去
+// 编译 Rust —— 那会让"改完立刻看"变成"改完等两分钟"。
 
 const { spawn } = require("node:child_process");
 const http = require("node:http");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { pathToFileURL } = require("node:url");
 
 const ROOT = path.resolve(__dirname, "..");
 const PORT = 9333;
+const EXE = path.join(ROOT, "src-tauri", "target", "release", "clawd-starter.exe");
 
 // S7：可以指定主题。不给就是 ragdoll（默认主题），输出名也跟着主题走，
 // 这样加一个主题就多一张对照图，不会互相覆盖。
@@ -105,27 +118,6 @@ class Cdp {
   }
 }
 
-// 临时 app 目录：只为把 preview.html 装进一个 BrowserWindow
-function makeTempApp() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-preview-"));
-  fs.writeFileSync(
-    path.join(dir, "package.json"),
-    JSON.stringify({ name: "clawd-preview", version: "1.0.0", main: "main.js" })
-  );
-  fs.writeFileSync(
-    path.join(dir, "main.js"),
-    `const { app, BrowserWindow } = require("electron");
-const { pathToFileURL } = require("url");
-app.whenReady().then(() => {
-  const w = new BrowserWindow({ width: 1020, height: 640, show: false, backgroundColor: "#faf9f5" });
-  // 用 loadURL 而不是 loadFile，只为了能带 ?theme= 参数
-  w.loadURL(pathToFileURL(process.env.CLAWD_PREVIEW_FILE).href + "?theme=" + encodeURIComponent(process.env.CLAWD_PREVIEW_THEME));
-});
-`
-  );
-  return dir;
-}
-
 (async () => {
   // 先把 themes/ 打成 preview-bundle.js。放在这里而不是让用户记得手动跑：
   // 截图脚本存在的意义就是"改完立刻看"，多一步手动操作就等于长期用过期数据。
@@ -135,18 +127,19 @@ app.whenReady().then(() => {
     throw new Error(`没有主题 ${THEME}（现有：${bundled.ids.join(", ") || "无"}）`);
   }
 
-  const electronBin = require("electron"); // 纯 Node 下返回可执行文件路径
-  const tmpApp = makeTempApp();
-  const env = {
-    ...process.env,
-    CLAWD_PREVIEW_FILE: path.join(ROOT, "preview.html"),
-    CLAWD_PREVIEW_THEME: THEME,
-  };
-  delete env.ELECTRON_RUN_AS_NODE;
+  if (!fs.existsSync(EXE)) {
+    throw new Error(`找不到 ${EXE}\n先跑 npm run build（截图脚本不去编译 Rust）`);
+  }
 
-  const child = spawn(electronBin, [`--remote-debugging-port=${PORT}`, tmpApp], {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-preview-"));
+  const portFile = path.join(tmp, "clawd-starter.port");
+  const child = spawn(EXE, [], {
     cwd: ROOT,
-    env,
+    env: {
+      ...process.env,
+      CLAWD_PORT_FILE: portFile, // 不碰用户正在用的那份端点文件
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${PORT}`,
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let out = "";
@@ -155,35 +148,43 @@ app.whenReady().then(() => {
 
   try {
     let target = null;
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 80; i++) {
       const list = await getJson(PORT, "/json/list");
-      const hit = Array.isArray(list)
-        ? list.find((t) => t.type === "page" && String(t.url).includes("preview.html"))
-        : null;
+      const hit = Array.isArray(list) ? list.find((t) => t.type === "page") : null;
       if (hit) {
         target = hit;
         break;
       }
       await sleep(300);
     }
-    if (!target) throw new Error("15s 内没拿到 preview.html 的调试目标\n" + out.slice(-1200));
+    if (!target) throw new Error("拿不到宿主的调试目标\n" + out.slice(-1200));
 
     const C = await Cdp.connect(target.webSocketDebuggerUrl);
     await C.send("Runtime.enable");
     await C.send("Page.enable");
 
+    // 把宿主窗口导航到 preview.html。用 loadURL 而不是 loadFile 的老理由仍然成立：
+    // 只有 URL 才能带 ?theme= 参数。
+    const url =
+      pathToFileURL(path.join(ROOT, "preview.html")).href + "?theme=" + encodeURIComponent(THEME);
+    const nav = await C.send("Page.navigate", { url });
+    if (nav?.error) throw new Error("导航失败：" + JSON.stringify(nav.error));
+
     // 等 SVG 真正画出来（preview.html 是脚本生成 DOM，readyState 不够）
-    for (let i = 0; i < 50; i++) {
+    let svgs = 0;
+    for (let i = 0; i < 60; i++) {
       const r = await C.send("Runtime.evaluate", {
         expression: "document.querySelectorAll('svg').length",
         returnByValue: true,
       });
-      if ((r?.result?.result?.value || 0) > 0) break;
+      svgs = r?.result?.result?.value || 0;
+      if (svgs > 0) break;
       await sleep(200);
     }
+    if (svgs === 0) throw new Error("preview.html 里一个 svg 都没画出来");
     await sleep(700); // 让 CSS 过渡/字体落定
 
-    // 隐藏窗口不会自己产生新帧，而 Page.captureScreenshot 要等一帧才返回。
+    // 窗口不会自己产生新帧，而 Page.captureScreenshot 要等一帧才返回。
     // 以前页面里每个状态都有逐帧轮播的定时器，一直在制造帧，所以这个前提从没暴露；
     // 改成"1 帧/状态 + 部件动画"之后页面完全静止，截图就会一直等到超时。
     // 所以截图前先手动制造一次重绘，失败再重试。
@@ -227,9 +228,8 @@ app.whenReady().then(() => {
     console.log(`[preview-shot] 已写出 ${OUT}`);
     C.close();
   } finally {
-    // Windows 上 electron 会派生出 GPU / utility 等子进程，
-    // child.kill() 只杀主进程，子进程会逃逸成僵尸并继续占着缓存目录
-    // （下次启动报 "Unable to move the cache: 拒绝访问"）。
+    // Windows 上 WebView2 会派生 GPU / renderer 等子进程，
+    // child.kill() 只杀主进程，子进程会逃逸成僵尸并继续占着缓存目录。
     // 所以这里按进程树杀。
     try {
       if (process.platform === "win32") {
@@ -239,7 +239,7 @@ app.whenReady().then(() => {
       }
     } catch {}
     try {
-      fs.rmSync(tmpApp, { recursive: true, force: true });
+      fs.rmSync(tmp, { recursive: true, force: true });
     } catch {}
   }
   process.exit(0);

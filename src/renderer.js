@@ -1271,8 +1271,10 @@ const OVERLAP_RATIO = 0.32; // 后一只压进前一只身体里的比例
 const FADE_AFTER_MS = 5 * 60 * 1000; // 这么久没动静 = "接不到任务了"，退场
 const FADE_MS = 1600; // "慢慢消失"——用 300ms 那档会像被删掉，不像自己走开
 
-// 和 state.js 的 PRIORITY 同一套序（error 最吵）。这里重复一份而不是 import，
-// 因为渲染层是纯浏览器脚本，不进 Node 模块图。
+// 分身模式的优先级（error 最吵）。2026-11-03 起**这是唯一一份**：
+// 原来"和 state.js 的 PRIORITY 重复一份、两边对齐同一批用例"是双实现的互检，
+// Electron 容器删掉之后，JS 侧这份只服务渲染层自己的聚焦排序，
+// 状态仲裁的权威实现移到了 src-tauri/src/state.rs（那里有同样的表和同样的测试）。
 const CAST_PRIORITY = { error: 8, notification: 7, attention: 5, working: 3, thinking: 2, idle: 1, sleeping: 0 };
 
 /** @type {Map<string, {el:HTMLElement, rig:any, keyword:string|null}>} */
@@ -1482,7 +1484,7 @@ function applyGaze() {
 // 这类"状态莫名弹回去"的问题，光看最终画面永远查不出来——
 // 必须知道**谁在什么时候推了什么**。
 const stateLog = [];
-// 主进程推来的最近 agent 事件（见 state.js 的 recentEvents）
+// 宿主推来的最近 agent 事件（见 src-tauri/src/state.rs 的 recentEvents）
 let lastEvents = [];
 let buildCount = 0;
 // 「鼠标把它弄醒」这条上行链路一共发了几次（S9）。
@@ -1738,7 +1740,7 @@ window.petDebug = {
       slots: def && Array.isArray(def.variants) ? def.variants.length + 1 : 1,
     };
   },
-  // 当前主题声明的状态时长。**主题没写就是 null**（内置默认在 state.js 里，
+  // 当前主题声明的状态时长。**主题没写就是 null**（内置默认在 src-tauri/src/state.rs 里，
   // 两份默认迟早会分叉，所以这里如实返回 null，不替它编一个）。
   timings: () => (currentTheme && currentTheme.timings) || null,
   theme: () => ({

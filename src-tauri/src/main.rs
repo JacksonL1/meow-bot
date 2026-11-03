@@ -1,6 +1,7 @@
 // 桌面宠物：Rust 侧只做「窗口容器 + 状态机 + HTTP」，画面全部交给 WebView2 里的前端。
 //
-// 与 Electron 版的对应关系（迁移时逐条对着改，不要凭印象）：
+// 与 Electron 版的对应关系（迁移期的对照表，留作历史注脚——Electron 容器
+// 已于 2026-11-03 删除，src/main.js / preload.js 等原件只能从 git 历史里找）：
 //   main.js 的 BrowserWindow          → 这里三个窗口（main / bubble / dashboard）
 //   ipcMain.on(…)/handle(…)           → #[tauri::command]（前端 invoke）
 //   webContents.send(…)               → app.emit(…)
@@ -736,8 +737,8 @@ fn main() {
     // setup，就会 bind 23333 失败 → 退回随机端口 → 覆盖端点文件，
     // 于是 hook 把事件送进第二份，而用户看的是第一份那只猫：画面永远不动。
     //
-    // Electron 版就是这一段（main.js:28 的 requestSingleInstanceLock），
-    // 迁移时漏了，现在补上。
+    // （历史上 Electron 版靠 main.js 的 requestSingleInstanceLock 干这件事，
+    // 迁移时漏了，现在补上。）
     let Some(_instance) = single::acquire() else {
         eprintln!("[single] 已经有一份在跑，这份只负责叫醒它");
         single::wake_first();
@@ -785,7 +786,7 @@ fn main() {
 
             // ---- 单实例的另一半：等第二份进程来捅 ----
             // 锁在 main() 开头已经抢过了，这里只开那个命名事件。
-            // 为什么要有这一下：Electron 的 second-instance 会 focus 窗口，
+            // 为什么要有这一下：Electron 的 second-instance 语义会 focus 窗口，
             // 但桌宠窗口是 skip_taskbar + focused(false) 的，抢焦点等于打断用户；
             // 让它醒一下是同一个意思又不动别人的鼠标。
             {
@@ -800,8 +801,8 @@ fn main() {
             //
             // 为什么非得有这么一条：apply() 内部已经调过 tick()，tick() 会顺手
             // 把 last_visual 更新掉。等 250ms 心跳再 tick()，它比的是"新值 vs 新值"，
-            // 返回 false——这次变化就永远不会被推出去。Electron 版靠 state.js 的
-            // onChange 回调，这里必须补上等价物，否则就是"POST 全成功、画面不动"。
+            // 返回 false——这次变化就永远不会被推出去。这条回调就是当年 Electron 版
+            // onChange 的等价物（迁移时的教训，留下防止哪天"顺手优化"掉它）。
             let state_handle = handle.clone();
             let on_change: server::OnChange = Arc::new(move |snap: &state::Snapshot| {
                 let _ = state_handle.emit("state", snap);

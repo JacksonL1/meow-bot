@@ -23,6 +23,10 @@
     "shortDescription": "常驻桌面的布偶猫：把 agent 会话变成看得见的状态",
     "longDescription": "把 Claude Code / CodeBuddy / WorkBuddy 的会话状态变成桌面上的一只布偶猫。多会话分身、权限气泡带命令风险评级、锁屏自动隐藏。",
     "windows": {
+      "signCommand": {
+        "cmd": "node",
+        "args": ["../scripts/sign-release.js", "%1"]
+      },
       "nsis": {
         "installMode": "currentUser",
         "languages": ["SimpChinese", "English"],

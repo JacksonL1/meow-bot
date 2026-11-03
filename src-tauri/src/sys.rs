@@ -1,5 +1,5 @@
 // ============================================================
-// Windows 系统集成（Electron 版由 Electron API 提供的五件事）
+// Windows 系统集成（这五件事当年由 Electron API 提供，2026-11-03 起是唯一实现）
 //
 //   screen.getCursorScreenPoint()   → cursor_pos()      拖动 + gaze 都要
 //   screen.getPrimaryDisplay().workArea → work_area()   贴边定位

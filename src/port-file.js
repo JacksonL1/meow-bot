@@ -21,6 +21,12 @@ const path = require("node:path");
 const APP_DIR = "clawd-starter";
 const FILE_NAME = "clawd-starter.port";
 
+// 默认端口。放在这里而不是 server.js：2026-11-03 删掉 Electron 容器后
+// server.js 整份没了，但这个数字还有人要——`hooks/install.js` 装 hook 时
+// 要把端点 URL 写进 agent 的配置，用的是它。
+// 与主仓库一致，不要改：改了之后**已装好的 hook 会全部指向旧端口**。
+const DEFAULT_PORT = 23333;
+
 function userDataDir() {
   if (process.platform === "win32") {
     const appData = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
@@ -60,4 +66,4 @@ function readPortFile(file = portFilePath()) {
   return data;
 }
 
-module.exports = { userDataDir, portFilePath, writePortFile, readPortFile };
+module.exports = { userDataDir, portFilePath, writePortFile, readPortFile, DEFAULT_PORT };

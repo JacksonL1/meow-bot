@@ -11,3 +11,9 @@ src-tauri/gen/
 
 # 显卡驱动按进程 CWD 写的着色器日志：启动 Electron 时会落在仓库根目录
 NVIDIA Corporation/
+
+# 签名私钥绝不入库。默认位置在仓库外的 ~/.clawd-signing/，
+# 这两条是防手滑把它导到项目里来（*.pfx / *.p12 一律不进 git）
+*.pfx
+*.p12
+signing.local.json

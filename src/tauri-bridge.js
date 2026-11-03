@@ -113,13 +113,13 @@
 
   // ------------------------------------------------------------
   // 主窗口
-  // 动作清单与 src/preload.js 的 12 条一一对应，顺序也照抄，
+  // 动作清单 12 条（原先与 Electron 的 preload.js 一一对应，容器删掉后这份就是唯一实现），
   // 方便两边 diff 时一眼看出漏了谁。
   // ------------------------------------------------------------
   window.clawd = {
     onState: (cb) => on("state", cb),
     // 和 onState 分开的两条线：state 只在 visual 变化时推，
-    // 分身要的是每条会话自己的状态（见 main.js 的 castTimer）。
+    // 分身要的是每条会话自己的状态（见 src-tauri/src/main.rs 的 cast 线程）。
     onCast: (cb) => on("cast", cb),
     onGaze: (cb) => on("gaze", cb),
     dragStart: () => send("drag_start"),
@@ -165,6 +165,6 @@
 
   // 诊断用：回归脚本要靠它判断"现在到底是哪个宿主在跑"。
   // Electron 下 window.__TAURI__ 不存在，这个键也就不会出现，
-  // 所以 verify-electron.js 的老断言不会被它影响。
+  // 所以回归脚本的老断言不会被它影响。
   window.__CLAWD_HOST__ = "tauri";
 })();

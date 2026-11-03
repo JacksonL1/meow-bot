@@ -193,7 +193,7 @@ fn handle(
         // 它比的是"新值 vs 新值"，返回 false —— 这次变化就**永远不会被推出去**。
         // 表现是：hook 一路 POST 成功，/state 回包里的 visual 也对，
         // 但画面停在旧状态，直到下一次状态变化才追上来。
-        // （Electron 版没这个问题，因为 state.js 的 apply() 末尾直接走 onChange 回调。）
+        // （当年 Electron 版没这个问题，因为 JS 版 apply() 末尾直接走 onChange 回调。）
         //
         // 顺序：先回包再推。回包先走，hook 不会因为渲染层慢而被拖住。
         respond_json(req, 200, &body.to_string());
