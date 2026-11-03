@@ -13,7 +13,7 @@ S1–S10 全部完成。**2026-11-02 补上 S10-5：容器从 Electron 换成 Ru
 
 | 闸门 | 脚本 | 结果 | 断言数 |
 |---|---|---|---|
-| Electron 45 | `npm run verify:electron` | **194 PASS / 0 FAIL** | 194 |
+| Electron 45 | `npm run verify:electron` | **193–194 PASS / 0 FAIL** | 194 |
 | Tauri 2.12.5 + WebView2 | `npm run verify:tauri` | **76 PASS / 0 FAIL** | 76 |
 | Rust 单测 | `cd src-tauri && cargo test` | **23 passed / 0 failed** | 23 |
 | 打包（NSIS 安装包） | `npm run verify:bundle:install` | **25 PASS / 0 FAIL** | 25 |
@@ -25,6 +25,13 @@ S1–S10 全部完成。**2026-11-02 补上 S10-5：容器从 Electron 换成 Ru
 PreCompact → 压缩后的 SessionStart → UserPromptSubmit → Stop → SessionEnd），
 每一步都拿「期望值」对照**服务端快照**和**渲染层画面**两个读数。
 它钉死的就是用户报的问题 1：thinking 不许掉、压缩后不许回 idle。
+
+Electron 那一行的 **193–194** 不是笔误：`剪贴板拿到的是完整路径` 这条要先读回
+主进程写进剪贴板的值，而 Windows 上只要有别的进程（剪贴板管理器、另一个
+Electron）正握着剪贴板，`readText()` 就返回空串。重试 6 次仍不一致时会做一次
+"能不能读写"的探针，探针也失败就**打印** `[warn] 本环境读不到剪贴板内容，跳过校验`
+然后少跑一条——跳过是响的，不是静默的。总条数因此在一个区间里浮动，
+看闸门时认的是 **FAIL=0**，不是 PASS 的绝对值。
 
 Tauri 那份少，是**因为少测了宿主专属的东西**（Electron 那 191 条里有 12 条打的是
 主进程 Node inspector 的 `BrowserWindow` 属性，Rust 侧没有对应物），
@@ -392,7 +399,7 @@ Electron **191** / Tauri **74** / `cargo test` **22** / 打包 **25**，外加�
   测试崩溃会留一条真条目，下次登录自己弹一只猫。
 
 闸门：`cargo test` 23（autostart 两条合成一条，单例状态不能并行测）；
-Electron 194（+3）；Tauri 76（+2：两套容器的自启能力互为镜像的静态对齐断言）。
+Electron 193–194（+3）；Tauri 76（+2：两套容器的自启能力互为镜像的静态对齐断言）。
 
 #### ② 问题 1 定案：两个症状一个根因，S10-6③ 已经修对了
 
