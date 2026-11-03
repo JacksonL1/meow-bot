@@ -18,6 +18,7 @@ S1–S10 全部完成。**2026-11-02 补上 S10-5：容器从 Electron 换成 Ru
 | Rust 单测 | `cd src-tauri && cargo test` | **23 passed / 0 failed** | 23 |
 | 打包（NSIS 安装包） | `npm run verify:bundle:install` | **25 PASS / 0 FAIL** | 25 |
 | 状态回放（真实事件序列） | `npm run verify:diag` | **10 步全中期望** | 10 |
+| Rust 依赖审计 | `cargo audit`（见 SECURITY「依赖审计」） | **0 漏洞 / 2 条警告**（都不在 Windows 构建图里） | 1402 条公告 / 425 个依赖 |
 
 `verify:diag` 的位置特殊：它**起一份临时 Tauri 实例，把现场观察到的一轮事件
 照原样喂回去**（SessionStart → UserPromptSubmit → 补发 SessionStart → 工具 →
@@ -366,7 +367,7 @@ Electron **191** / Tauri **74** / `cargo test` **22** / 打包 **25**，外加�
 | 「thinking 显示成 idle」的根因 | 未定，诊断口已就位，等现场数据 |
 | WorkBuddy 上的 hook 安装 | 沙箱写不了 `~/.workbuddy/settings.json`，要用户自己跑一条命令 |
 | 托盘图标 | ~~脚本手画的占位物~~ → S10-7③ 超采样重绘，16px 起可辨认 |
-| `cargo audit` | **本机没装，从没跑过**——写在这里，免得下次以为跑过了 |
+| `cargo audit` | ~~本机没装，从没跑过~~ → S10-7④ 跑过：0 漏洞 / 2 条警告（都不在 Windows 构建图里） |
 | 安装包签名 / 离线安装 | 见 ④：`downloadBootstrapper` + 无签名，都是明确的选择 |
 
 ### S10-7 把还开着的所有事项做完（2026-11-02，S10-6 同日的最后一轮）
@@ -431,6 +432,19 @@ idle」，追下去发现是**脚本在页面还没挂上 `petDebug` 时就去�
 - ICO 从 5 个尺寸扩到 **7 个**（16/20/24/32/48/64/256）；
   重编 release 后资源管理器、托盘、NSIS 安装包三处同源。
   小尺寸放大检查过（最近邻 8× 拼图），16px 起耳朵和眼睛都还在。
+
+#### ④ 依赖审计：`cargo audit` 第一次跑
+
+这条在待办里挂了很久（"本机没装，从没跑过"）。补上了，结论 **0 漏洞 / 2 条警告**：
+
+- 工具 `cargo-audit 0.22.2`（官方预编译包，本机源码编译 40 分钟没完）；
+  公告库浅克隆 `RustSec/advisory-db` 1402 条。
+- 2 条警告是 `proc-macro-error 1.0.4`（unmaintained）与 `glib 0.18.5`（unsound），
+  依赖链都挂在 `tray-icon` 的 **Linux** 分支（`libappindicator`/GTK）上。
+  `cargo tree --target x86_64-pc-windows-msvc -i` 对两者都是 `nothing to print`——
+  **发出去的 Windows 二进制里没有这块代码**。将来做 Linux 构建要先处理它们。
+- 方法论记进 SECURITY：审计报告按 crate 名报、不看 target，
+  读报告的最后一步永远是 `cargo tree --target <要发的那个 target> -i <crate>`。
 
 ### S9 鼠标经过，把睡着的猫叫醒（2026-10-28，紧接 S8 之后，同一天）
 
@@ -970,6 +984,8 @@ spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"]);
 
 | 日期 | 类型 | 内容 |
 |---|---|---|
+| 2026-11-03 | 安全 | **`cargo audit` 第一次跑：0 漏洞 / 2 条警告**（S10-7④，详见 SECURITY.md「依赖审计」）。425 个依赖、1402 条公告；两条警告 `proc-macro-error 1.0.4`（unmaintained）与 `glib 0.18.5`（unsound）经 `cargo tree --target x86_64-pc-windows-msvc -i` 确认**都不在 Windows 构建图里**（来自 `tray-icon` 的 Linux/GTK 分支），发出去的二进制不含这块代码；将来做 Linux 构建要先处理。工具用官方预编译的 `cargo-audit 0.22.2`（zip sha256 `0a73165…710ab`），因为本机源码编译 40 分钟没完；公告库让工具自己 fetch 会 failed to consume the pack（libgit2），换 `git clone --depth 1` 五秒完成 |
+| 2026-11-03 | 修复 | **verify-tauri 的 gaze 断言不再依赖"有人碰鼠标"**（`7c1b35a`）。gaze 线程有变化检测（位移 < 0.02 不 emit，省 IPC 省电），光标静止时 0 条推送**是正确行为**，可断言写的是"这一轮至少推过一次"——于是它的成败取决于测试期间有没有人动鼠标。复跑时红了一条，看着像回归。修法不是放宽判据（`>=1` 已最松），是**让测试自己造条件**：光标没动就挪 3px 再挪回去（PowerShell 调 `System.Windows.Forms.Cursor`，Node 没有 user32 入口），等 400ms 再读，稳定 `累计 5 次`。**一条断言如果需要外部世界配合，它测的就不是代码，是运气** |
 | 2026-11-02 | 新增 | **托盘图标超采样重绘**（S10-7③，`d2e277d`）。`make-icons.js` 原来是「每个像素问一次点在不在形状里」，256px 上看不出问题，但托盘真正用的是 16~24px：猫脸半径只剩 6 个像素、耳朵退化成两块直角三角、眼睛摊成一层雾——**远看像颗花椰菜**。改 **4× 超采样 + 覆盖率降采样**：RGB 取**覆盖样本**的平均、alpha = 覆盖率（按全部样本平均会把透明像素的 (0,0,0) 混进边缘，半透明轮廓发灰发脏）；**≤24px 走简化几何**（眼睛放大 1.6 倍、去鼻子和内耳、耳朵加厚外移）——抗锯齿解决"锯齿"，解决不了"特征小于一个像素"（16px 时眼睛半径只有 0.94px）。ICO 从 5 个尺寸扩到 7 个（16/20/24/32/48/64/256），最近邻 8× 拼图检查过 16px 起耳朵和眼睛都还在 |
 | 2026-11-02 | 修复 | **「thinking 掉 idle / 压缩上下文后掉 idle」定案：同一个 bug 的两次出现**（`53353d4`）。根因是 WorkBuddy 在 `UserPromptSubmit` 之后约 0.1s **每轮补发** `SessionStart`（压缩完还会再发一条 `source=compact`），它们都落在**一条已经存在的会话**上，按普通映射处理就是把 thinking/working 清回 idle；S10-6③ 的「SessionStart 只给新会话定初值、已有会话记 `preserved`」已经是根因修复，本轮缺的只是**证据**——新建 `scripts/diag-events.js`，起临时 Tauri 实例把现场观察到的整轮事件序列**照原样回放**，每步同时读服务端快照与渲染层画面、对照显式期望值，10 步全中（含压缩那条路径），挂成第 5 道闸门 `npm run verify:diag` 进 `verify:all`。**过程中先抓到的是自己的 bug**：诊断脚本第一版报「UserPromptSubmit 也掉 idle」，其实是**页面还没挂上 `petDebug` 就去读**，观测窗口自己没就绪（硬约束 40）；顺手堵掉 `verify-tauri.js` 默认用几小时前编的 `target/debug` 二进制、跑出 8 条假 FAIL 的坑（陈旧二进制守卫，硬约束 39） |
 | 2026-11-02 | 新增 | **开机自启两边同日补齐**（`7c3f879`）。来历先记一笔：S10-5 的台账把「自启 / 单实例」写在**同一行**且标了 `[x]`，于是它被当成已交付——**是台账自己的错，不是代码的**。Tauri 侧 `sys.rs` 直写 `HKCU\...\Run`（值名 `clawd-starter`，值是**带引号**的 exe 完整路径），托盘 `CheckMenuItem` 的勾**从注册表读回来**而不是本地变量，写成功才动勾；Electron 侧 `setLoginItemSettings` 改完立刻 `getLoginItemSettings()` 读回，写入未生效（组策略 / dev）时 stderr 告警、不假装成功。**默认关**：测试只默认验「关」（幂等、不留痕迹），「开」的往返要 `CLAWD_AUTOSTART_TEST=1` 显式点名——自启是进程外全局状态，测试崩溃会留一条真条目，下次登录自己弹一只猫。回归 Electron 194 / Tauri 76 / cargo 23 |

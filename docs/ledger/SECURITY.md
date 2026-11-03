@@ -910,6 +910,46 @@ rig 构造的时候写的是 `this.sp = { bodyY: …, gazeX: … }`，一共 **2
 
 ---
 
+## 依赖审计（S10-7④）：`cargo audit` 第一次跑，**0 漏洞 / 2 条警告**
+
+前面所有章节审的都是**我们写的代码**。这一节审的是**别人写的代码**——
+425 个 crate 依赖，其中任何一个出公告都可能让整个模型失效。
+这条一直挂在待办里（"本机没装，从没跑过"），S10-7 补上。
+
+- 工具：`cargo-audit 0.22.2`（官方 release 的 `x86_64-pc-windows-msvc` 预编译包，
+  zip sha256 `0a7316540862c13d954f648917ceacca593747baed6eec180fafa590be2710ab`）。
+  为什么不用 `cargo install`：本机源码编译跑到 40 分钟没完。
+- 公告库：`RustSec/advisory-db` 浅克隆 **1402 条**公告。
+  （第一次让工具自己 fetch 失败：libgit2 报 `Failed to consume the pack sent by the remote`，
+  换 `git clone --depth 1` 五秒完成——这是网络问题，不是库坏了。）
+- 结果：**`0 vulnerabilities`，退出码 0**；2 条 `warning` 级（不是漏洞，默认不拦）：
+
+| Crate | 版本 | 类型 | 公告 | 依赖链（`--target all`） |
+|---|---|---|---|---|
+| `proc-macro-error` | 1.0.4 | unmaintained | RUSTSEC-2024-0370 | `glib-macros` → `glib` → `atk`/`gtk` |
+| `glib` | 0.18.5 | unsound（`VariantStrIter` 的 `Iterator`/`DoubleEndedIterator` 实现） | RUSTSEC-2024-0429 | `atk` → `gtk` → `libappindicator`/`muda`/`tao` |
+
+**两条都不在 Windows 的构建图里**，这不是推测：
+
+```
+cargo tree --target x86_64-pc-windows-msvc -i glib@0.18.5
+  → warning: nothing to print.
+cargo tree --target x86_64-pc-windows-msvc -i proc-macro-error@1.0.4
+  → warning: nothing to print.
+```
+
+它们来自 `tray-icon` 的 **Linux** 分支（`libappindicator`/GTK）。Windows 上托盘走
+`Shell_NotifyIcon`，根本不编译 GTK。所以：**发出去的 Windows 二进制不含这两块代码**；
+如果将来出 Linux 构建，这两条要先处理（升级 `gtk`/`glib` 到已修版本，或换成
+上游已迁移的 `tray-icon`）——记在这里，免得那天当成新发现。
+
+**顺带一条方法论**：`Cargo.lock` 里"有公告"和"构建里真有这块代码"是两件事。
+审计报告按 crate 名报，不看 target；所以读报告的最后一步永远是
+`cargo tree --target <你要发的那个 target> -i <crate>`。不做这一步，
+要么虚惊一场、要么把真问题当成"反正 Linux 才用"放过去。
+
+---
+
 ## 附：值得保留的好设计
 
 审计不是只挑毛病，以下三点是这个骨架最容易在后续开发中被破坏、必须守住的东西：

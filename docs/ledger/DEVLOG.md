@@ -4,6 +4,33 @@
 
 ---
 
+## 2026-11-03 · 审计报告按 crate 名报，不看 target
+
+`cargo audit` 第一次跑，425 个依赖、1402 条公告，结果 0 漏洞 / 2 条警告：
+`proc-macro-error 1.0.4`（unmaintained）和 `glib 0.18.5`（unsound）。
+差点顺手记成"两个已知风险，等上游"。
+
+其实只要多打一条命令：
+
+```
+cargo tree --target x86_64-pc-windows-msvc -i glib@0.18.5
+  → warning: nothing to print.
+```
+
+**它们根本不在 Windows 的构建图里**——来自 `tray-icon` 的 Linux 分支
+（`libappindicator`/GTK），Windows 上托盘走 `Shell_NotifyIcon`，GTK 一行都不编译。
+所以发出去的二进制不含这块代码，这不算"已知风险"，算"另一个平台的待办"。
+
+`Cargo.lock` 是**所有 target 的并集**，而审计工具按 crate 名报，不带 target 信息。
+所以读报告的最后一步永远是 `cargo tree --target <你要发的那个 target> -i <crate>`。
+不做这一步的两种后果都很难看：虚惊一场（把不相关平台的公告当风险背一年），
+或者把真问题当成"反正 Linux 才用"放过去。
+
+两个工具坑顺手记下：① 让 `cargo-audit` 自己 fetch 公告库会报
+`Failed to consume the pack sent by the remote`（libgit2），换 `git clone --depth 1`
+五秒完成；② 旧版 `cargo-audit 0.21.2` 读不懂公告库里的 **CVSS 4.0**
+（`unsupported CVSS version: 4.0`），要 0.22+——**工具比数据旧，报的错会指向数据**。
+
 ## 2026-11-03 · 一条会"看心情"红的断言：gaze 推过没有
 
 复跑闸门时 `PASS 75 / FAIL 1`，红的偏偏是「gaze 至少推过一次」。
