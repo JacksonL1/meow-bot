@@ -153,6 +153,30 @@ async function waitTarget(match, timeoutMs = 8000) {
   return null;
 }
 
+// 把系统光标挪一下再挪回去。
+//
+// 唯一目的是给 gaze 线程一个"看得见的输入变化"——它按设计只在光标动了才 emit，
+// 所以"没推送"在光标静止时是正确行为，测不出链路好坏。
+// 为什么用 PowerShell 而不是 Node：Node 没有调 user32 的入口，而这里要动的
+// 就是**操作系统**的光标，不是我们自己进程里的状态。（这和"用 PowerShell 的
+// 注册表 provider 绕过被拦的 reg.exe"不是一回事：那是同一动作换个壳，
+// 这里是没有第二个壳可选。）非 Windows 直接跳过，断言会如实报 0。
+function nudgeCursor(px = 3) {
+  if (process.platform !== "win32") return false;
+  const ps = [
+    "Add-Type -AssemblyName System.Windows.Forms;",
+    "$p=[System.Windows.Forms.Cursor]::Position;",
+    `[System.Windows.Forms.Cursor]::Position=New-Object System.Drawing.Point(($p.X+${px}),($p.Y+${px}));`,
+    "Start-Sleep -Milliseconds 120;",
+    "[System.Windows.Forms.Cursor]::Position=New-Object System.Drawing.Point($p.X,$p.Y)",
+  ].join(" ");
+  const r = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", ps], {
+    stdio: "ignore",
+    timeout: 8000,
+  });
+  return r.status === 0;
+}
+
 async function main() {
   console.log("Tauri 迁移回归\n" + "=".repeat(56));
 
@@ -474,7 +498,18 @@ async function main() {
     // 该断言的是"至少成功推过一次"——它同时证明 GetCursorPos 拿到了坐标、
     // 线程在跑、emit 到了、桥接上了。一次都没收到才是真的坏了。
     const gazeN = Number(await R.eval("window.petDebug.gazePushes()"));
-    ok("gaze 至少推过一次（GetCursorPos → 线程 → emit → 桥 全链路通）", gazeN >= 1, `累计 ${gazeN} 次`);
+    // 光标没动时这一条本来是 0——gaze 线程有变化检测（偏差 < 0.02 不发），
+    // 那是**正确行为**，不是"链路不通"。所以判据不能是"跑完这一轮有没有推过"：
+    // 那样它的成败取决于测试期间有没有人碰鼠标，红了也说不清是谁的错。
+    // 做法：自己把 OS 光标挪 3px 再挪回去，造出"变化"，然后才断言。
+    // 一次都不推才是真坏了。
+    let gazeNow = gazeN;
+    if (gazeNow < 1) {
+      nudgeCursor();
+      await sleep(400);
+      gazeNow = Number(await R.eval("window.petDebug.gazePushes()"));
+    }
+    ok("gaze 至少推过一次（GetCursorPos → 线程 → emit → 桥 全链路通）", gazeNow >= 1, `累计 ${gazeNow} 次`);
 
     await R.eval("window.petDebug.gaze({x:1,y:1}, true)");
     await sleep(500);
