@@ -13,7 +13,7 @@
 | 端点文件 | `%APPDATA%\clawd-starter\clawd-starter.port`，内容 `{port, token}`，权限 0600 |
 | 依赖服务 | 无。不连任何外部服务，只在本机开一个 HTTP 端口接收事件 |
 | 版本控制 | git，远端 `github.com/JacksonL1/meow-bot`，分支 `main`，与 origin 同步。S7 之后的每一次改动都已入库，最新一批是 S10-5：`081921f 容器换成 Rust：迁到 Tauri`（代码）+ `616cd41 台账：S10-5 Tauri 迁移`。**这一格不再写提交总数**：写下一个数字的那个提交本身会让数字 +1，改一次错一次——上一版写着「5 次提交、S7 尚未提交」，从 S7 烂到 S10-5 整整一个月没人对过账。要看数就 `git log --oneline \| wc -l`。**台账里凡是带计数的字段都有这个毛病**（体积那年改了七次，六次是在改数法），要么连口径和实测时间一起写，要么不写 |
-| 体积 | **37 个源文件，12756 行**（`src/` 17 个 = 14 js 4555 + 3 html 621、`src-tauri/` 11 个 = 7 rs 3318 + `build.rs` 3 + 2 json 34、`hooks/` 2 个 645、`scripts/` 7 个 3580；`Cargo.lock` 4445 行是生成物不计），另有 `themes/` 下 22 个 SVG 资产。**2026-11-02 10:30 实测**。这条被改了七次，七次里六次不是代码变了、是**数法**变了（漏 html、漏 `src-tauri`、把 JSON 不算源文件、生成物混进来）。写体积时必须**连文件数、口径、实测时间一起写**，只写总数没法被复查 |
+| 体积 | **41 个源文件，14328 行**（`src/` 17 个 = 14 js 4604 + 3 html 621、`src-tauri/` 12 个 = 8 rs 3970 + `build.rs` 3 + `tauri.conf.json` 33 + `capabilities/default.json` 13、`hooks/` 2 个 645、`scripts/` 10 个 4439；`Cargo.lock` 4445 行是生成物不计），另有 `themes/` 下 22 个 SVG 资产。**2026-11-02 16:52 实测**（上一次是同日 10:30 的 37 个 / 12756 行，差额主要是 S10-5～S10-7 的 `src-tauri/` 与新增的 `scripts/diag-events.js`、`verify-bundle.js`、`probe-tauri-surface.js`）。这条被改了七次，七次里六次不是代码变了、是**数法**变了（漏 html、漏 `src-tauri`、把 JSON 不算源文件、生成物混进来）。写体积时必须**连文件数、口径、实测时间一起写**，只写总数没法被复查 |
 
 ## 它解决什么问题
 
