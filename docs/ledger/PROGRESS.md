@@ -18,7 +18,7 @@ S1–S10 全部完成。**2026-11-02 补上 S10-5：容器从 Electron 换成 Ru
 | 闸门 | 脚本 | 结果 | 断言数 |
 |---|---|---|---|
 | Tauri 2.12.5 + WebView2 | `npm run verify:tauri` | **106 PASS / 0 FAIL** | 106 |
-| Rust 单测 | `cd src-tauri && cargo test` | **43 passed / 0 failed** | 43 |
+| Rust 单测 | `cd src-tauri && cargo test` | **46 passed / 0 failed** | 46 |
 | 打包（NSIS 安装包） | `npm run verify:bundle:install` | **25 PASS / 0 FAIL** | 25 |
 | 状态回放（真实事件序列） | `npm run verify:diag` | **10 步全中期望** | 10 |
 | Rust 依赖审计 | `cargo audit`（见 SECURITY「依赖审计」） | **0 漏洞 / 2 条警告**（都不在 Windows 构建图里） | 1402 条公告 / 425 个依赖 |
@@ -239,6 +239,33 @@ DSH 的观测被翻成已有的 hook 事件词汇（`SessionStart` / `UserPrompt
 同步永远慢一帧，慢一帧看起来就是「泡泡在飘」。同一窗口里它天然钉在头顶。
 多出来的 220px 是透明的，**只有猫和泡泡的矩形会关掉穿透**，点那片空气等于点桌面；
 猫在屏幕上的位置也没变——窗口往上长，底边不动。
+
+#### 修「没有任何任务却一直 thinking」（2026-11-04，用户报的）
+
+现象：桌面上没有活干，猫一直是 thinking。
+
+根因是一条**自我循环**，四步全在代码里，任何一步看着都合理：
+
+1. `dsh headless` 的投影里**没有** `sessionListMetadata`，于是 `last_prompt_at` 退到**文件 mtime**。
+2. mtime 每写一次盘就前进（进程收尾时还会再前进一次）。
+3. `reconcile` 把"这个值变了"当成"用户又提了一轮" → 发 `UserPromptSubmit` → 会话进 thinking。
+4. 可这类会话不写 `sessionStats`，`phase` 永远判成 Idle；而 Idle 分支有一道
+   `saw_active` 闸（只认 working/thinking 分支设置的标记）→ **永远不放行 Stop**。
+
+于是：一句话把会话关进 thinking，**再没有谁能把它放出来**。触发它的是当天下午
+两条测试命令（401 那条和 STREAM_CLOSED 那条），死掉的 headless 会话留在列表里。
+
+两层修法：
+
+- **源头**（`dsh.rs`）：`Obs` 加 `has_prompt_at`，只有真读到 `lastPromptAt` 才算新一轮；
+  mtime 只用来判断"在不在 30 分钟活跃窗口内"。顺带把"我们自己发的 UserPromptSubmit"
+  也置上 `saw_active`——**自己造出来的状态，自己必须收得回来**。
+- **兜底**（`state.rs`）：`THINKING_MAX_MS` = 10 分钟。thinking 的语义是"等第一个 token"，
+  那是秒级的；挂十分钟只可能是源头死了。working 不需要这条上限（有工具事件兜着），
+  thinking 必须有——它是唯一一个"没有任何后续事件也能存在"的状态。
+
+`cargo test` 43 → **46**（+3：mtime 兜底不算新一轮、thinking 掉回 idle 要发 Stop、
+thinking 不许永远挂着）。重启后同一批会话全部回到 idle，`verify:tauri` 仍 **106 / 0**。
 
 `verify:tauri` 92 → **106**（删掉 5 条头巾断言，新增 19 条：泡泡出现/行数/状态与猫一致/
 标题就是会话标题/命中区含泡泡/泡泡在耳尖之上/间距 0–40px 贴住/点行聚焦/点行展开/
@@ -1217,6 +1244,7 @@ spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"]);
 
 | 日期 | 类型 | 内容 |
 |---|---|---|
+| 2026-11-04 | 修复 | **「没有任何任务却一直 thinking」**（S11，见上方「已完成」）。四步自我循环：headless 的投影没有 `lastPromptAt` → 退到文件 mtime → mtime 每写一次盘就前进 → 被当成"用户又提了一轮"发 `UserPromptSubmit` → 但这类会话不写 `sessionStats`，phase 永远是 Idle，Idle 分支的 `saw_active` 闸永不放行 Stop，于是**一句话把会话关进 thinking、再没人放它出来**。触发者是当天两条测试命令留下的死会话。修两层：源头加 `Obs.has_prompt_at`（只有真 `lastPromptAt` 才算新一轮，mtime 只判活跃窗口）+ 把我们自己发的 UserPromptSubmit 也置 `saw_active`；兜底加 `THINKING_MAX_MS` 10 分钟（thinking 是唯一"没有任何后续事件也能存在"的状态，必须自己会死）。`cargo test` 43 → 46 |
 | 2026-11-04 | 改版 | **头巾 + 胸前 RAG 删掉，换成猫头顶的消息泡泡**（S11 追加，见上方「已完成」）。用户原话：「任务状态直接以消息泡泡的方式弹出，如果有多个就在消息泡泡中列出标题，用户可以点选，查看具体进度。」泡泡常驻、一行一条（`● working 登录页重构`），点一行那只猫顶到最前并展开「任务 / 阶段 / 当前工具 / 已跑多久 / 目录」。**刻意不做百分比**——agent 侧没有这个东西，编出来的进度第三天就会开始骗人。窗口 240×240 → 240×460（多出来的 220px 是透明的，只有猫和泡泡的矩形关穿透；猫在屏幕上的位置不变，窗口往上长）。三个坑：绝对定位伪元素会把可滚动溢出区撑大 7px（四条任务也滚）→ 尖角改成兄弟节点；写死 `bottom` 会让尾巴指着空气（单猫 176px / 分身 88px 头顶差近百像素）→ `placeBubble()` 按当前耳尖实时算；分身退回单猫时 `#cast` 里还有淡出中的幽灵猫，量到它的耳朵 → 按「当前真正在台上的 rig」取。`verify:tauri` 92 → **106**，`cargo test` 42 → **43**（新增 `ageMs`：`idleMs` 每个事件清零，跑了半小时的任务只要刚有动作就会显示「跑了 0 秒」） |
 | 2026-11-04 | 测试 | **DSH 并发双写：独占写句柄，安全拒绝而非交错写**（S11 追加，见上方「已完成」）。用「只接不回的假端点」把 turn 卡住，把并发窗口从几十毫秒撑成无限长：**8 个进程同时抢同一会话 → 恰好 1 个拿到句柄，其余 7 个报 `already owned by an active write handle` 并退出 1，一个字都没写进日志**；日志 10 帧全解开 / 24 行全合法 / `seq` 0 重复 0 倒退；`timeout` 强杀后 C 能正常接管（**无僵尸锁**），悬空 turn 在下次打开时被 repair 成 `turn/end(interrupted)`。顺带补了 `STEP_STALE_MS` 闸：按 `openStep.startTime` 判活，防止被强杀的 web 会话让猫永远显示 working（用户报过「没有任务但桌宠一直在工作」）。`cargo test` 38 → 42 |
 | 2026-11-04 | 新增 | **接上 DeepSeek Harness，先只做「看」**（S11，见上方「已完成」）。放弃 WorkBuddy 接入线。`src-tauri/src/dsh.rs`（约 700 行含注释与 14 条测试）把 DSH 的投影缓存**翻译**成既有 hook 事件词汇灌进 `Store::apply()`，状态机一行没改——另起一套就是把刚消灭的「同一 agent 两幅画面」重造。**数据源踩了三个坑才找对**：同级 `session_projcache.json` 是 0.1.x 遗留（本机停在 8-31，读它不报错、只安静地一只猫不显示）；0.2.x 改成目录 + 一会话一文件 `{version:7, record:{identity,rows}}`；**会话 id 只在文件名里**。刻意不读多帧 zstd 会话日志（要引解压依赖，取舍见硬约束）。新增 `Meta` 事件让「回填标题」能只改元数据不动状态；`openStep` 步骤间会变 null，所以「这一轮结束」要 2 拍去抖。`verify:tauri` 80→**92**、`cargo test` 23→**38**。DSH 断言**用临时 `DSH_HOME` 夹具**而非本机真实缓存——第一版拿真实缓存做断言，本机所有会话都超 30 分钟窗口，于是必然红，而那其实是正确行为 |

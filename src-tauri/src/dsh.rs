@@ -163,6 +163,18 @@ pub struct Obs {
     /// 最后一次用户提问题的时刻（ms）。这是"新一轮"唯一可靠的信号。
     /// 投影里没有这个字段时（headless 会话）用文件 mtime 兜底，见 parse_session。
     pub last_prompt_at: i64,
+    /// `last_prompt_at` 是**真的** `lastPromptAt`，还是拿文件 mtime 兜底的。
+    ///
+    /// 为什么必须区分（2026-11-04 用户报「没有任何任务却一直 thinking」的根因）：
+    /// `dsh headless` 的投影里**没有** `sessionListMetadata`，于是 last_prompt_at
+    /// 只能退到文件 mtime；而 mtime 每写一次就变，进程收尾时还会再变一次。
+    /// reconcile 把"这个值变了"当成"用户又提了一轮"，发一条 UserPromptSubmit
+    /// 把会话推进 thinking——可它的 phase 永远是 Idle（headless 不写 sessionStats），
+    /// 而 Idle 分支有 `saw_active` 这道闸（它从没进过 working/thinking）→ **永远不发 Stop**。
+    /// 结果：一条早就死掉的 headless 会话，让猫一直显示 thinking。
+    ///
+    /// 所以：只有真的读到 `lastPromptAt` 才算"新一轮"；mtime 只用来判断在不在活跃窗口内。
+    pub has_prompt_at: bool,
     /// 投影里到底有没有 sessionStats 行。没有 = 这个会话的状态我们其实看不见，
     /// 只能靠 mtime 说"它最近动过"。诊断时这一位比状态本身更能解释问题。
     pub has_stats: bool,
@@ -258,13 +270,13 @@ pub fn parse_session(id: &str, raw: &str, mtime_ms: i64) -> Option<Obs> {
     // headless 一次性会话在投影里只有 title，没有 sessionListMetadata，
     // 于是没有 lastPromptAt。那种情况下用文件 mtime 兜底：
     // 至少能说"这个会话最近被动过"，而不是让它永远落在活跃窗口外、彻底看不见。
-    let last_prompt_at = match meta
+    let real_prompt_at = meta
         .and_then(|m| m.get("lastPromptAt"))
         .and_then(|x| x.as_i64())
-    {
-        Some(t) if t > 0 => t,
-        _ => mtime_ms,
-    };
+        .filter(|t| *t > 0);
+    // 有真值就用真值，没有才退到 mtime；但**记下这是退的**（见 has_prompt_at）。
+    let has_prompt_at = real_prompt_at.is_some();
+    let last_prompt_at = real_prompt_at.unwrap_or(mtime_ms);
 
     Some(Obs {
         id: id.to_string(),
@@ -289,6 +301,7 @@ pub fn parse_session(id: &str, raw: &str, mtime_ms: i64) -> Option<Obs> {
             .and_then(|b| b.as_bool())
             .unwrap_or(false),
         last_prompt_at,
+        has_prompt_at,
         has_stats: stats.is_some(),
         turns: stats
             .and_then(|x| x.get("turns"))
@@ -528,13 +541,25 @@ impl Probe {
             }
 
             // 新的一轮。lastPromptAt 只在用户真的提交提问时前进，
-            // 这是所有信号里最不容易误判的一个。
-            if o.last_prompt_at > 0 && o.last_prompt_at != t.last_prompt_at {
+            // 这是所有信号里最不容易误判的一个——**只要它是真的**。
+            //
+            // `has_prompt_at == false` 意味着这个值是文件 mtime 兜底的（headless 会话）。
+            // 那种值会在每次写盘时前进，把它当"用户又提了一轮"就发 UserPromptSubmit，
+            // 而这类会话的 phase 永远是 Idle（不写 sessionStats）→ Idle 分支的
+            // `saw_active` 闸永远不放行 → 没人发 Stop → 猫一直到天荒地老地 thinking。
+            // 用户 2026-11-04 报的就是这个。
+            if o.last_prompt_at != t.last_prompt_at {
+                let fresh = o.has_prompt_at && o.last_prompt_at > 0;
                 t.last_prompt_at = o.last_prompt_at;
-                out.push(payload(o, "UserPromptSubmit"));
-                sent = true;
-                t.stopped = false;
-                t.idle_streak = 0;
+                if fresh {
+                    out.push(payload(o, "UserPromptSubmit"));
+                    sent = true;
+                    t.stopped = false;
+                    // 我们自己推出来的"在跑"，必须自己也收得回来。
+                    // 少了这一行，就成了一句话把会话推进 thinking、然后再没有谁能把它拿出来。
+                    t.saw_active = true;
+                    t.idle_streak = 0;
+                }
             }
 
             match ph {
@@ -682,6 +707,7 @@ mod tests {
             // 必须是"刚刚"。reconcile 会把超出 ACTIVE_WINDOW_MS 的 idle 会话滤掉，
             // 写成固定的小数字（比如 1000）等于断言"1970 年那次提问还在活跃"。
             last_prompt_at: t0(),
+            has_prompt_at: true,
             has_stats: true,
             turns: 0,
             preset: None,
@@ -830,6 +856,59 @@ mod tests {
         let mut o = obs("s", false, None, 0);
         o.pending_at = vec![0];
         assert_eq!(o.phase(), Phase::Working);
+    }
+
+    // headless 会话的投影里没有 sessionListMetadata，last_prompt_at 只能退到文件 mtime。
+    // 那个值每写一次盘就前进（进程收尾时还会再前进一次），但它**不是"用户又提了一轮"**。
+    //
+    // 老代码在这里发了 UserPromptSubmit，把会话推进 thinking；而这类会话的 phase
+    // 永远是 Idle（headless 不写 sessionStats），Idle 分支又要求 saw_active 才发 Stop
+    // → 一句话把会话关进 thinking，然后再没有谁能把它放出来。
+    #[test]
+    fn mtime_fallback_never_starts_a_new_round() {
+        let mut p = Probe::new();
+        let mut a = obs("s", false, None, 0);
+        a.has_prompt_at = false; // = 这个时刻是 mtime 兜底的
+        a.has_stats = false; // headless：连 sessionStats 都没有
+        p.push_obs(vec![a.clone()]);
+        let first = p.step();
+        assert!(
+            first.iter().all(|v| v["event"] != "UserPromptSubmit"),
+            "发现一条 mtime 兜底的会话时不该发 UserPromptSubmit：{first:?}"
+        );
+
+        a.last_prompt_at += 5_000; // 文件又写了一次 → mtime 前进
+        p.push_obs(vec![a]);
+        let second = p.step();
+        assert!(
+            second.iter().all(|v| v["event"] != "UserPromptSubmit"),
+            "mtime 前进被当成新提问了：{second:?}"
+        );
+    }
+
+    // 用户 2026-11-04 报的现象：没有任何任务，猫一直显示 thinking。
+    // 触发它的是"进程死在 step 里"：headless 被杀掉之后投影里 openStep 变回 null，
+    // 洞见只有一条——**从 thinking 掉回 idle 也必须发 Stop**，否则状态机里那条会话
+    // 永远停在 thinking（thinking 不发事件就没人叫醒它，只有 working/attention 会自己收）。
+    #[test]
+    fn thinking_that_dies_still_emits_stop() {
+        let mut p = Probe::new();
+        p.push_obs(vec![obs("s", true, None, 0)]); // 等首字 = thinking
+        let first = p.step();
+        assert!(
+            first.iter().any(|v| v["event"] == "UserPromptSubmit"),
+            "从 idle 进 thinking 要发 UserPromptSubmit：{first:?}"
+        );
+        // 进程没了：openStep 变 null，其余不动
+        p.push_obs(vec![obs("s", false, None, 0)]);
+        let mut all = Vec::new();
+        for _ in 0..3 {
+            all.extend(p.step());
+        }
+        assert!(
+            all.iter().any(|v| v["event"] == "Stop"),
+            "thinking 掉回 idle 没发 Stop，状态机会永远停在 thinking：{all:?}"
+        );
     }
 
     #[test]

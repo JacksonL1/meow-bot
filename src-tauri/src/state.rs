@@ -78,6 +78,19 @@ fn builtin_oneshot(v: Visual) -> Option<u64> {
 const SLEEP_AFTER_MS: u64 = 60_000;
 pub const TICK_MS: u64 = 250;
 
+/// thinking 最多能挂多久。
+///
+/// 为什么 thinking 需要一条**上限**，而 working 不需要：
+/// working 有工具在跑，超时会被 PreToolUse/PostToolUse/Stop 兜住；
+/// thinking 的语义是"在等第一个 token"，那是秒级的。可一旦事件源死了
+/// （hook 没发出来、`dsh headless` 被杀、DSH 投影里留了个死的 openStep），
+/// 就没有任何东西会再叫醒这条会话——它会一直 thinking 到用户重启进程。
+/// 用户 2026-11-04 报的「没有任何任务，为什么一直保持 thinking」就是这个。
+///
+/// 10 分钟是刻意给宽了的：推理模型想几分钟很正常，而"卡住"的那种是几十小时。
+/// 真被误判也只是退回 idle（并在气泡里照常显示这条会话），不会丢信息。
+const THINKING_MAX_MS: u64 = 10 * 60 * 1000;
+
 // SEC-04：请求来自网络侧，任何字段都不能直接进内存结构。
 const MAX_SESSION_ID: usize = 64;
 const MAX_SESSIONS: usize = 100;
@@ -510,6 +523,12 @@ impl Store {
                     continue;
                 }
             }
+            // 1.5) thinking 不许无限挂着（理由见 THINKING_MAX_MS）。
+            if s.state == Visual::Thinking && since > THINKING_MAX_MS {
+                s.state = Visual::Idle;
+                s.state_since = now;
+                continue;
+            }
             // 2) 闲得太久 → 睡着。
             //
             // 计时从**进入 idle 多久**算（state_since），不是"多久没收到事件"（last_at）。
@@ -633,6 +652,25 @@ mod tests {
         let s = &st.snapshot().sessions[0];
         assert!(s.age_ms >= 15, "出生时刻被重置了：age={}", s.age_ms);
         assert!(s.idle_ms < 15, "idle 应该被这一条事件清零：idle={}", s.idle_ms);
+    }
+
+    // 用户 2026-11-04 报：没有任何任务，猫一直显示 thinking。
+    // 根因在 DSH 侧（mtime 兜底被当成新提问，见 dsh.rs 的 has_prompt_at），
+    // 但状态机自己也得有一条兜底：**任何**来源把一条会话推进 thinking 之后没人收，
+    // 都不该让它挂到天荒地老。这条测的就是"没人收"的那种。
+    #[test]
+    fn thinking_does_not_last_forever() {
+        let mut st = Store::new(Timings::default());
+        st.apply(&json!({"session_id":"s1","event":"UserPromptSubmit"}));
+        assert_eq!(st.snapshot().sessions[0].state, Visual::Thinking);
+
+        // 把"进入 thinking 的时刻"往前拨，等价于"这一步已经卡了很久"
+        {
+            let s = st.sessions.get_mut("s1").unwrap();
+            s.state_since = Instant::now() - std::time::Duration::from_millis(THINKING_MAX_MS + 5_000);
+        }
+        st.tick();
+        assert_eq!(st.snapshot().sessions[0].state, Visual::Idle, "thinking 不许永远挂着");
     }
 
     #[test]
