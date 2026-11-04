@@ -1556,18 +1556,17 @@ if (window.clawd) {
   renderState("idle");
 }
 
-let lastIgnore = null;
 window.addEventListener("mousemove", (e) => {
   const hit = document.elementFromPoint(e.clientX, e.clientY);
   const onPet = Boolean(hit && hit.closest && hit.closest("#pet"));
 
-  if (window.clawd && typeof window.clawd.setIgnoreMouse === "function") {
-    const ignore = !onPet;
-    if (ignore !== lastIgnore) {
-      lastIgnore = ignore;
-      window.clawd.setIgnoreMouse(ignore);
-    }
-  }
+  // 这里**不再**调 setIgnoreMouse。2026-11-04 的"拖不动、完全没交互"就是它造成的：
+  // Electron 版靠 `setIgnoreMouseEvents(true, {forward:true})` 在 Windows 上用低级钩子
+  // 转发 mousemove，所以"收到 mousemove 就关穿透"能成立；Tauri 的 Windows 实现只设
+  // `WS_EX_TRANSPARENT | WS_EX_LAYERED`，窗口不参与命中测试——页面一条 mousemove
+  // 都收不到，这句永远等不到触发条件，于是整窗永久穿透。
+  // 现在改由宿主每 60ms 读真实光标做判定，页面只负责上报"猫在哪"（见文件末尾的
+  // reportHits），这条监听只服务 gaze / 撸猫 / 唤醒三件事。
 
   // 本地鼠标视线兜底 + 摸头撸猫检测
   const rect = pet.getBoundingClientRect();
@@ -1675,6 +1674,39 @@ window.addEventListener("contextmenu", (e) => {
 
 
 // ============================================================================
+// 命中区上报：告诉宿主"猫在哪"
+//
+// 宿主的看门狗（src-tauri/src/main.rs，60ms）拿这份矩形和真实光标位置比，
+// 决定整窗穿不穿透。分工的理由只有一句话：**只有渲染层知道分身后每只猫在哪，
+// 而只有宿主能在"窗口已经穿透、页面收不到鼠标消息"的情况下还读得到光标**。
+//
+// 每 200ms 比一次签名，只有猫真的动了（新建 / 淡出 / 尺寸变化）才发一条 IPC。
+// 单猫模式下矩形就是 #pet；分身模式下是每只 .cat 的包围盒——**不合并成一个大矩形**，
+// 那样两只猫之间的空隙会变成挡板，点桌面点不动。
+// ============================================================================
+let lastHitSig = "";
+function reportHits() {
+  if (!window.clawd || typeof window.clawd.setHitRects !== "function") return;
+  const rects = [];
+  if (castMode) {
+    for (const rec of cast.values()) {
+      if (!rec || !rec.el) continue;
+      const r = rec.el.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) rects.push([r.left, r.top, r.width, r.height]);
+    }
+  } else if (pet) {
+    const r = pet.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) rects.push([r.left, r.top, r.width, r.height]);
+  }
+  const sig = rects.map((r) => r.map((n) => Math.round(n)).join(",")).join("|");
+  if (sig === lastHitSig) return;
+  lastHitSig = sig;
+  window.clawd.setHitRects(rects);
+}
+setInterval(reportHits, 200);
+reportHits();
+
+// ============================================================================
 // 调试入口
 //
 // 打开 DevTools 直接敲：
@@ -1780,6 +1812,9 @@ window.petDebug = {
   // 台上有几只猫、各自演什么状态、头巾上写的什么词、当前聚焦谁。
   // 靠肉眼验证不了"第 2 只猫是不是真的在演自己的状态"——它和第一只
   // 长得一模一样，只有读它自己的 rig 才知道。
+  // 上报给宿主的命中区签名（"x,y,w,h|…"）。断言"矩形真的发出去了"只能靠它：
+  // 画面画得对 和 宿主知道猫在哪 是两件事，而"点不到"正好发生在后者。
+  hitRects: () => lastHitSig,
   cast: () => ({
     mode: castMode ? "cast" : "solo",
     focused: focusedId,
@@ -1793,8 +1828,7 @@ window.petDebug = {
     })),
   }),
   // 单猫那只的头巾（分身模式下它是 null）
-  solo: () => {
-    if (!ragdollRig) return null;
+  solo: () => {    if (!ragdollRig) return null;
     return {
       state: ragdollRig.state,
       keyword: ragdollRig.els.bandanaText ? ragdollRig.els.bandanaText.textContent : "",

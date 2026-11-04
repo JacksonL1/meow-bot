@@ -113,7 +113,7 @@
 
   // ------------------------------------------------------------
   // 主窗口
-  // 动作清单 12 条（原先与 Electron 的 preload.js 一一对应，容器删掉后这份就是唯一实现），
+  // 动作清单 13 条（原先与 Electron 的 preload.js 一一对应，容器删掉后这份就是唯一实现），
   // 方便两边 diff 时一眼看出漏了谁。
   // ------------------------------------------------------------
   window.clawd = {
@@ -125,6 +125,12 @@
     dragStart: () => send("drag_start"),
     dragEnd: () => send("drag_end"),
     setIgnoreMouse: (ignore) => send("mouse_ignore", { ignore: Boolean(ignore) }),
+    // 命中区上报：告诉宿主"猫在哪"（CSS px 矩形列表），由宿主的 60ms 看门狗
+    // 决定整窗穿不穿透。**不能靠页面自己收 mousemove 再关穿透**——
+    // Windows 上 WS_EX_TRANSPARENT 一旦设上，WebView2 一条 mousemove 都收不到，
+    // 等它回话就是死锁（2026-11-04 的手感事故，见 main.rs 的 hit_rects 注释）。
+    setHitRects: (rects) => send("hit_rects", { rects: rects || [] }),
+    hitState: () => call("hit_state"),
     // 鼠标停上去只是"请求"醒来，真正改状态的是主进程的状态机。
     wake: () => send("pet_hover"),
     quit: () => send("app_quit"),

@@ -51,6 +51,14 @@ const EXE = path.join(
 
 let pass = 0;
 let fail = 0;
+// 跳过项：**要响**。环境做不到的事（读不到剪贴板、调不动系统光标）既不冒充 PASS，
+// 也不判 FAIL —— 但必须在结尾列出来，否则闸门就成了"反正它绿"的装饰。
+// 判据同 Electron 时代那条剪贴板：[warn] + 计数 + 结尾列项。
+const skipped = [];
+function skip(name, why) {
+  skipped.push(name + " — " + why);
+  console.log(`SKIP  ${name}  ${why}`);
+}
 const failures = [];
 
 function ok(name, cond, detail) {
@@ -281,9 +289,9 @@ async function main() {
     ok("页面加载完成", (await R.eval("document.readyState")) === "complete");
     ok("宿主标记为 tauri（桥真的装了，不是空转）", (await R.eval("window.__CLAWD_HOST__")) === "tauri");
     ok(
-      "window.clawd 12 个动作齐全",
+      "window.clawd 14 个动作齐全",
       (await R.eval(
-        "['onState','onCast','onGaze','dragStart','dragEnd','setIgnoreMouse','wake','quit','petMenu','toggleDashboard','getTheme','onTheme'].every(k=>typeof (window.clawd||{})[k]==='function')"
+        "['onState','onCast','onGaze','dragStart','dragEnd','setIgnoreMouse','setHitRects','hitState','wake','quit','petMenu','toggleDashboard','getTheme','onTheme'].every(k=>typeof (window.clawd||{})[k]==='function')"
       )) === true
     );
     ok(
@@ -501,13 +509,77 @@ async function main() {
     // 那样它的成败取决于测试期间有没有人碰鼠标，红了也说不清是谁的错。
     // 做法：自己把 OS 光标挪一下再挪回（8px，必须超过归一化阈值 5.2px），
     // 造出"变化"，然后才断言。一次都不推才是真坏了。
+    // 拆成两条，因为它们是两件不同的事：
+    //   ① 线程活着（宿主每拍 +1，与光标动没动无关）—— 这一条永远可判
+    //   ② 真的往页面推过 —— 需要光标**动**，而"动得了动不了"取决于环境
+    const hsA = await R.eval("window.clawd.hitState()");
+    await sleep(400);
+    const hsB = await R.eval("window.clawd.hitState()");
+    const ticksA = Number((hsA && hsA.gazeTicks) || 0);
+    const ticksB = Number((hsB && hsB.gazeTicks) || 0);
+    ok("gaze 线程在跑（宿主侧节拍计数在涨）", ticksB > ticksA, `${ticksA} → ${ticksB}`);
+
     let gazeNow = gazeN;
     if (gazeNow < 1) {
-      nudgeCursor();
+      // 造一次"光标动了"的变化：被动等别人碰鼠标，这条断言就成了看运气。
+      const nudged = nudgeCursor();
       await sleep(400);
       gazeNow = Number(await R.eval("window.petDebug.gazePushes()"));
+      if (gazeNow < 1 && !nudged) {
+        // 连挪光标都做不到（受限环境会拒绝执行那条 WinForms 脚本）：这条**不判失败**，
+        // 但必须喊出来。判据本身没被证伪，只是这个环境下测不了。
+        skip("gaze 至少推过一次（GetCursorPos → 线程 → emit → 桥）", "本环境调不动系统光标");
+      } else {
+        ok("gaze 至少推过一次（GetCursorPos → 线程 → emit → 桥 全链路通）", gazeNow >= 1, `累计 ${gazeNow} 次`);
+      }
+    } else {
+      ok("gaze 至少推过一次（GetCursorPos → 线程 → emit → 桥 全链路通）", true, `累计 ${gazeNow} 次`);
     }
-    ok("gaze 至少推过一次（GetCursorPos → 线程 → emit → 桥 全链路通）", gazeNow >= 1, `累计 ${gazeNow} 次`);
+
+    // ---------- 7.5 命中区与整窗穿透（2026-11-04 修复的"拖不动"） ----------
+    //
+    // 这一组钉的是一个**回归天生看不见**的 bug：Windows 上窗口一旦被设成
+    // `WS_EX_TRANSPARENT`（Tauri 的 set_ignore_cursor_events(true) 就只干这个），
+    // WebView2 收不到 mousemove，于是"收到 mousemove 就关掉穿透"永远等不到触发条件，
+    // 整窗永久穿透 → 拖不动、点不了、双击和右键菜单全哑。
+    // CDP 的 Input.dispatchMouseEvent 直接注入渲染进程、绕过 OS 命中测试，
+    // 所以合成事件照常工作——闸门可以全绿而真机全废。
+    //
+    // 能自动验的是**判据那一半**：渲染层有没有把猫的矩形交给宿主、宿主的看门狗
+    // 会不会据此翻转 ignore。真机上那一下拖拽仍要人工试，所以断言文案里不写
+    // "能拖了"——它只证明判据连着。
+    const hitSig = String((await R.eval("window.petDebug.hitRects()")) || "");
+    ok("渲染层把命中区交给了宿主（签名非空）", hitSig.length > 0, hitSig);
+
+    const hs0 = await R.eval("window.clawd.hitState()");
+    ok(
+      "hitState 三个字段都有货（ignore / inside / rects）",
+      hs0 && typeof hs0.ignore === "boolean" && typeof hs0.inside === "boolean" && Number(hs0.rects) >= 1,
+      JSON.stringify(hs0)
+    );
+
+    // 注入一个覆盖整个屏幕的矩形 → 光标必然"在猫身上" → 看门狗必须关掉穿透。
+    await R.eval("window.clawd.setHitRects([[-100000,-100000,200000,200000]])");
+    await sleep(400);
+    const hs1 = await R.eval("window.clawd.hitState()");
+    ok("命中判定：矩形盖住光标时关掉整窗穿透", hs1 && hs1.ignore === false, JSON.stringify(hs1));
+
+    // 再注入一个远在天边的矩形 → 必须恢复穿透（否则四角会挡住桌面）。
+    await R.eval("window.clawd.setHitRects([[100000,100000,10,10]])");
+    await sleep(300);
+    const hs2 = await R.eval("window.clawd.hitState()");
+    ok("命中判定：离开矩形后恢复整窗穿透", hs2 && hs2.ignore === true, JSON.stringify(hs2));
+
+    // 还原成真实的猫矩形（签名是 "x,y,w,h|x,y,w,h"）
+    const realRects = hitSig
+      .split("|")
+      .filter(Boolean)
+      .map((g) => g.split(",").map(Number))
+      .filter((r) => r.length === 4 && r.every((n) => Number.isFinite(n)));
+    if (realRects.length) {
+      await R.eval("window.clawd.setHitRects(" + JSON.stringify(realRects) + ")");
+      await sleep(300);
+    }
 
     await R.eval("window.petDebug.gaze({x:1,y:1}, true)");
     await sleep(500);
@@ -681,8 +753,9 @@ async function main() {
   }
 
   console.log("\n" + "=".repeat(56));
-  console.log(`结果：PASS ${pass}  FAIL ${fail}`);
+  console.log(`结果：PASS ${pass}  FAIL ${fail}${skipped.length ? "  SKIP " + skipped.length : ""}`);
   if (fail) console.log("失败项：\n  - " + failures.join("\n  - "));
+  if (skipped.length) console.log("跳过项（环境不具备，不是通过）：\n  - " + skipped.join("\n  - "));
   process.exit(fail ? 1 : 0);
 }
 

@@ -20,7 +20,7 @@ mod theme;
 
 use permission::{Center, Notify, PendingView};
 use state::{Snapshot, Store, Timings};
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::menu::{CheckMenuItem, CheckMenuItemBuilder, ContextMenu, MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
@@ -45,6 +45,19 @@ struct AppState {
     hidden_by_lock: AtomicBool,
     gaze_x: AtomicI32,
     gaze_y: AtomicI32,
+    /// 猫的命中区（CSS px，相对窗口客户区）。由渲染层上报——只有它知道
+    /// 分身后每只猫在哪、淡出到哪一步。
+    hit: Mutex<Vec<[f64; 4]>>,
+    /// 当前窗口是不是"整块穿透"。看门狗与 `mouse_ignore` 命令都写它，
+    /// 是为了不重复调 Win32（每次调用都要走一遍 SetWindowLong）。
+    ignore: AtomicBool,
+    /// gaze 线程活着的证据：每拍 +1，与光标动没动无关。
+    /// 为什么需要它：`gazePushes`（页面上那个）只在光标**真的动了**才涨，
+    /// 光标不动时 0 是正确行为——所以它证明不了"线程还在跑"。
+    /// 用户报"眼睛不追鼠标"时，这两个数一起看：ticks 不涨 = 线程死了；
+    /// ticks 涨而 pushes 不涨 = 线程活着但没发出（窗口不可见 / 变化太小）。
+    gaze_ticks: AtomicU64,
+    gaze_pushes: AtomicU64,
 }
 
 fn clamp(v: f64, lo: f64, hi: f64) -> f64 {
@@ -353,12 +366,86 @@ fn drag_end(window: WebviewWindow, st: tauri::State<'_, AppState>) -> Result<(),
 }
 
 #[tauri::command]
-fn mouse_ignore(window: WebviewWindow, app: AppHandle, ignore: bool) -> Result<(), String> {
+fn mouse_ignore(window: WebviewWindow, app: AppHandle, st: tauri::State<'_, AppState>, ignore: bool) -> Result<(), String> {
     only(&window, W_MAIN)?;
+    st.ignore.store(ignore, Ordering::SeqCst);
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.set_ignore_cursor_events(ignore);
     }
     Ok(())
+}
+
+// ------------------------------------------------------------
+// 命中区：谁决定"这一下点的是猫，还是点穿到桌面"
+//
+// 为什么这件事必须由宿主来做（2026-11-04 修的一个真 bug）：
+//
+// 迁移时照抄了 Electron 那套「启动先把整窗设成穿透，渲染层收到 mousemove
+// 命中 #pet 再关掉穿透」。这在 Electron 上成立，因为它在 Windows 上用一个
+// 低级鼠标钩子把 mousemove **转发**给窗口（`forward: true`）。
+//
+// Tauri 没有这个能力。`tao` 的 Windows 实现只做一件事：
+//     style_ex |= WS_EX_TRANSPARENT | WS_EX_LAYERED
+// （`tao-0.37.2/src/platform_impl/windows/window_state.rs`）
+// WS_EX_TRANSPARENT 的意思是"我不参与命中测试"——鼠标消息直接交给下层窗口，
+// WebView2 一个 mousemove 都收不到。于是那句"收到 mousemove 就关掉穿透"
+// **永远等不到触发条件**：整窗永久穿透，拖不动、点不了、双击和右键菜单全哑。
+//
+// 回归没抓到，因为 CDP 的 `Input.dispatchMouseEvent` 直接注入渲染进程，
+// 绕过 OS 的命中测试——合成事件照常触发 DOM 监听，75 条全绿。
+//
+// 现在的分工：
+//   渲染层  上报「猫在哪」（矩形列表，CSS px）——只有它知道分身后每只猫的位置
+//   宿主    每 60ms 读一次真实光标，落在矩形里就关掉穿透，离开就开回来
+// 这样不依赖 WebView2 能收到鼠标消息，也就不受 WS_EX_TRANSPARENT 影响。
+// ------------------------------------------------------------
+
+/// 命中矩形的外扩容差（CSS px）。手指点边比几何边界松一点更顺手。
+const HIT_PAD: f64 = 6.0;
+
+fn hit_test(rects: &[[f64; 4]], x: f64, y: f64) -> bool {
+    rects.iter().any(|r| {
+        x >= r[0] - HIT_PAD && x <= r[0] + r[2] + HIT_PAD && y >= r[1] - HIT_PAD && y <= r[1] + r[3] + HIT_PAD
+    })
+}
+
+#[tauri::command]
+fn hit_rects(window: WebviewWindow, st: tauri::State<'_, AppState>, rects: Vec<[f64; 4]>) -> Result<(), String> {
+    only(&window, W_MAIN)?;
+    // 最多 4 只猫（渲染层 MAX_CATS），给到 8 已经翻倍有余；再多的直接丢，
+    // 免得某天有人把整个 DOM 的 rect 全塞进来。
+    let next: Vec<[f64; 4]> = rects
+        .into_iter()
+        .take(8)
+        .map(|r| [r[0], r[1], r[2].max(0.0), r[3].max(0.0)])
+        .collect();
+    *st.hit.lock().unwrap() = next;
+    Ok(())
+}
+
+/// 只读诊断：用户报"点不到"时，这一条能一次说清是"没命中"还是"没人关穿透"。
+#[tauri::command]
+fn hit_state(window: WebviewWindow, app: AppHandle, st: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
+    only(&window, W_MAIN)?;
+    let rects = st.hit.lock().unwrap().clone();
+    let (cx, cy) = sys::cursor_pos();
+    let (pos, scale) = match app.get_webview_window("main").and_then(|w| w.outer_position().ok()) {
+        Some(p) => (p, app.get_webview_window("main").and_then(|w| w.scale_factor().ok()).unwrap_or(1.0)),
+        None => ((0, 0).into(), 1.0),
+    };
+    let x = (cx - pos.x) as f64 / scale;
+    let y = (cy - pos.y) as f64 / scale;
+    Ok(serde_json::json!({
+        "ignore": st.ignore.load(Ordering::SeqCst),
+        "inside": hit_test(&rects, x, y),
+        "rects": rects.len(),
+        "cursor": [cx, cy],
+        "window": [pos.x, pos.y],
+        "scale": scale,
+        "local": [x, y],
+        "gazeTicks": st.gaze_ticks.load(Ordering::SeqCst),
+        "gazePushes": st.gaze_pushes.load(Ordering::SeqCst),
+    }))
 }
 
 /// 把猫从睡着里叫醒一次。三条来源共用：鼠标压在宠物上（`pet:hover`）、
@@ -570,6 +657,51 @@ fn spawn_timers(app: AppHandle) {
         });
     }
 
+    // ---- 命中看门狗 60ms：整窗穿不穿透，由「真实光标在不在猫身上」决定 ----
+    //
+    // 这是 2026-11-04 那个"拖不动、完全没交互"的修复点。为什么必须由宿主轮询、
+    // 不能等页面告诉我"鼠标进来了"——见上面 hit_rects 那段注释（WS_EX_TRANSPARENT
+    // 一旦设上，WebView2 连 mousemove 都收不到，等它回话就是死锁）。
+    //
+    // 60ms 是"手感"与"空闲开销"的折中：比它慢，鼠标已经在猫身上了窗口还没接管；
+    // 比它快，GetCursorPos + Mutex 的唤醒频率白涨。GetCursorPos 本身不进内核等待，
+    // 代价可以忽略——gaze 线程已经在用同样的节拍读它。
+    {
+        let app = app.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            let Some(win) = app.get_webview_window("main") else { continue };
+            if !win.is_visible().unwrap_or(false) {
+                continue;
+            }
+            let st = app.state::<AppState>();
+            let Ok(pos) = win.outer_position() else { continue };
+            let scale = win.scale_factor().unwrap_or(1.0);
+            let (cx, cy) = sys::cursor_pos();
+            let inside = {
+                let rects = st.hit.lock().unwrap();
+                // 渲染层还没上报（启动后的头几十毫秒，或者页面挂了）：当成整窗可交互。
+                // 宁可暂时挡一下桌面，也不要让用户面对一只点不动的猫。
+                if rects.is_empty() {
+                    true
+                } else {
+                    let x = (cx - pos.x) as f64 / scale;
+                    let y = (cy - pos.y) as f64 / scale;
+                    hit_test(&rects, x, y)
+                }
+            };
+            // 拖动中一律不穿透。这一条不是保险，是必需的：拖窗口时窗口在追光标，
+            // 60ms 的判定会慢半拍，某一拍算出的 local 可能落在矩形外——一旦那一拍
+            // 把窗口设成穿透，页面就收不到 pointerup，`drag_end` 永远不会来，
+            // `dragging` 卡在 true，之后鼠标怎么动窗口都跟着走。
+            let inside = inside || st.dragging.load(Ordering::SeqCst);
+            let want = !inside;
+            if st.ignore.swap(want, Ordering::SeqCst) != want {
+                let _ = win.set_ignore_cursor_events(want);
+            }
+        });
+    }
+
     // ---- gaze：主进程读全局光标，归一化后推给渲染层 ----
     // 窗口只有 240×240，光标绝大多数时间在窗口外面，renderer 根本收不到 mousemove。
     {
@@ -586,6 +718,7 @@ fn spawn_timers(app: AppHandle) {
             let ny = clamp((cy - (pos.y + size.height as i32 / 2)) as f64 / 260.0, -1.0, 1.0);
             // 变化太小就不发，省 IPC 也省电
             let st = app.state::<AppState>();
+            st.gaze_ticks.fetch_add(1, Ordering::SeqCst);
             let ox = st.gaze_x.load(Ordering::SeqCst) as f64 / 1000.0;
             let oy = st.gaze_y.load(Ordering::SeqCst) as f64 / 1000.0;
             if (nx - ox).abs() < 0.02 && (ny - oy).abs() < 0.02 {
@@ -593,6 +726,7 @@ fn spawn_timers(app: AppHandle) {
             }
             st.gaze_x.store((nx * 1000.0) as i32, Ordering::SeqCst);
             st.gaze_y.store((ny * 1000.0) as i32, Ordering::SeqCst);
+            st.gaze_pushes.fetch_add(1, Ordering::SeqCst);
             let _ = app.emit("gaze", serde_json::json!({ "x": nx, "y": ny }));
         });
     }
@@ -782,6 +916,10 @@ fn main() {
                 hidden_by_lock: AtomicBool::new(false),
                 gaze_x: AtomicI32::new(0),
                 gaze_y: AtomicI32::new(0),
+                hit: Mutex::new(Vec::new()),
+                ignore: AtomicBool::new(true),
+                gaze_ticks: AtomicU64::new(0),
+                gaze_pushes: AtomicU64::new(0),
             });
 
             // ---- 单实例的另一半：等第二份进程来捅 ----
@@ -811,7 +949,11 @@ fn main() {
 
             // ---- 窗口 ----
             let win = build_main_window(&handle)?;
-            let _ = win.set_ignore_cursor_events(true); // 先全体穿透，命中宠物才关
+            // 先整窗穿透（四角不该挡住桌面），但**不靠页面通知来解除**——
+            // 由 spawn_timers 里的 60ms 命中看门狗按"光标在不在猫身上"纠正。
+            // 参见 hit_rects 的注释：Windows 上设了 WS_EX_TRANSPARENT 之后，
+            // 页面收不到 mousemove，"页面说可以了"这条路是死的。
+            let _ = win.set_ignore_cursor_events(true);
             let _ = win.show();
 
             let _ = build_tray(&handle);
@@ -834,6 +976,8 @@ fn main() {
             drag_start,
             drag_end,
             mouse_ignore,
+            hit_rects,
+            hit_state,
             pet_hover,
             app_quit,
             pet_menu,
