@@ -28,7 +28,21 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 const WIN_W: f64 = 240.0;
-const WIN_H: f64 = 240.0;
+/// 窗口比猫高：多出来的那 220px 是**消息泡泡**的画布（S11，2026-11-04）。
+///
+/// 为什么不是单独开一个泡泡窗口（权限气泡就是那么做的）：
+/// 泡泡要跟着猫走、跟着猫长大缩小、还要能被拖动时一起移动——两个窗口做这件事
+/// 得同步位置，而同步永远会慢一帧，慢一帧看起来就是"泡泡在飘"。
+/// 放同一个窗口里，它天然是钉在猫头顶的。
+///
+/// 数值不是拍的：猫头在 pet 盒里离顶 32px，pet 离窗口底还有 32px 留白，
+/// 所以耳尖大约在窗口底往上 192px（见 index.html 里 #bubble-wrap 的 bottom: 200）。
+/// 上面留出的那 260px 要装得下"4 条任务 + 展开一条详情"，不然泡泡会开始滚动。
+///
+/// 代价是窗口变大，但**用户看不出来**：窗口是透明的，而且只有猫和泡泡的矩形
+/// 会关掉穿透（见 HIT_PAD / hit_test），多出来的区域点上去直接落到底下的桌面。
+/// 猫在屏幕上的位置也没变——窗口是往上长的，底边不动（见 build_main_window）。
+const WIN_H: f64 = 460.0;
 const BUBBLE_W: f64 = 360.0;
 const DEFAULT_THEME_ID: &str = "ragdoll";
 const CAST_PUSH_MS: u64 = 1000;
@@ -664,7 +678,7 @@ fn spawn_timers(app: AppHandle) {
 
     // ---- 分身名单 1s ----
     // 为什么不能顺手塞进 state：state 只在 visual 变化时推，而每条会话自己的
-    // 状态、头巾上的词、闲了多久，都会在没有 visual 变化时照常变。
+    // 状态、泡泡里那行标题、闲了多久，都会在没有 visual 变化时照常变。
     {
         let app = app.clone();
         std::thread::spawn(move || loop {

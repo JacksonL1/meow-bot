@@ -59,7 +59,7 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 | 风险评级 | 命令词 + 参数两级判定，输出 低/中/高/极高 + 最多 4 条理由（纯函数，可单测） | `src-tauri/src/risk.rs` |
 | 权限气泡 | 卡片 UI、两个按钮、Esc 不表态、量高度回传 | `src/bubble.html` + `bubble-renderer.js` |
 | 会话看板 | 独立窗口、双击开关、1s 轮询快照、按「最吵的排前面」排序、演示模式、复制路径 | `src/dashboard.html` + `dashboard-renderer.js` |
-| 渲染 | **两条路径**：① 骨骼弹簧（`rigType: ragdoll-spring-v2`，JS 直接拼 SVG + 二阶弹簧阻尼通道，60fps）；② 帧序列（双图层交叉淡入、帧轮播、瞳孔位移插值）。两条都共用 `svgNode()` 白名单出口；分身 / 头巾也在这层 | `src/renderer.js` |
+| 渲染 | **两条路径**：① 骨骼弹簧（`rigType: ragdoll-spring-v2`，JS 直接拼 SVG + 二阶弹簧阻尼通道，60fps）；② 帧序列（双图层交叉淡入、帧轮播、瞳孔位移插值）。两条都共用 `svgNode()` 白名单出口；分身 / **消息泡泡**也在这层 | `src/renderer.js` |
 | 主题 | 扫目录、校验 schema 与资产、校验 `motion` 规则、缺状态补齐、全坏兜底（Rust）；换主题 = 换帧数据 + 重画 | `src-tauri/src/theme.rs` + `themes/<id>/theme.json` |
 | 进程间桥 | 在 `window` 上装出与旧 `preload.js` 形状相同的 `clawd` / `bubble` / `dashboard`，只暴露动作 | `src/tauri-bridge.js` |
 | 端点约定 | 端点文件路径规则（纯 Node 也能算）+ `DEFAULT_PORT`，hook 与回归都用它 | `src/port-file.js` |
@@ -156,3 +156,4 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 41. **"靠页面收到输入再解除输入屏蔽"的设计一律是死锁**。2026-11-04 的"整窗永久穿透"：启动设 `set_ignore_cursor_events(true)`，指望页面收到 `mousemove` 命中猫后再关掉它。Electron 能做到，因为它在 Windows 上装了低级鼠标钩子转发 `mousemove`；**Tauri（tao）只设 `WS_EX_TRANSPARENT | WS_EX_LAYERED`，没有 forward**，被屏蔽的时候页面一条消息都收不到。判据必须由"仍在运行、且不依赖被屏蔽通道"的一侧来做：现在是宿主每 60ms 读 `GetCursorPos` 比对渲染层上报的矩形（`hit_rects` / `hit_state`）。附属规则：**拖动中强制不穿透**，否则窗口追光标慢半拍的那一拍会把 `pointerup` 吃掉，`dragging` 永久卡住。
 42. **CDP 合成的鼠标事件不能当作"输入链路通"的证据**。`Input.dispatchMouseEvent` 直接注入渲染进程、绕过 OS 命中测试，所以它能证明"处理逻辑对"，证明不了"鼠标真的进得来"。这一条与 41 是同一个 bug 的两面：闸门 79 条全绿，用户却拖不动。凡是"输入 → 屏蔽 → 再输入"的链路，都要留一条**人工验**的口子并写进台账。
 43. **读别人的数据目录，先确认"这个文件还在被写吗"**。S11 接 DSH 时读了 `~/.dsh/storages/session_projcache.json`——格式合法、字段齐全、解析不报错，只是**停在三个月前**（0.1.x 的遗留），新版用的是同级的 `session_projcache/` 目录。表现是"测试全绿、真实进程 reads 在涨、installed=true、一只猫都不显示"，即**不报错，只是什么都不发生**，比报错难查得多。三条附属规则：① 并排两个同名物，**先 `ls -la` 看 mtime**，几乎总有一个是废弃的；② 诊断视图里除了"读到没有"，还必须有一位说明"读到的数据是不是当下的"（这里是 `has_stats`）；③ 解析器**只认一个确切版本**，形状不对就返回 `None`，不去猜别的版本——猜错的表现同样是静默的。
+44. **只显示事实，不编进度的百分比**。S11 做消息泡泡时用户要"查看具体进度"——agent 侧**没有**这个数据。能给的只有事实：阶段、当前工具、已跑多久、工作目录。硬凑一个 0–100% 第一天很懂事，第三天就会开始骗人（显示 90% 卡二十分钟），而用户一旦发现有一个数字是编的，**连那些真的数字也不信了**。同类：不要在 UI 上给"预计还要多久"，除非数据源真的给了 ETA。

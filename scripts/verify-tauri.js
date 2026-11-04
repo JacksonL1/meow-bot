@@ -492,22 +492,54 @@ async function main() {
     ok("attention 播完自动回 idle（oneshot 真的在走）", (await R.eval("window.petDebug.state()")) === "idle", await R.eval("window.petDebug.state()"));
 
     // 收掉这条会话，否则它会作为"第 4 只猫"混进分身那一段，
-    // 把"场上 3 只"和"每只都有词"同时弄错（它没有 keyword）。
+    // 把"场上 3 只"和"泡泡 3 行"同时弄错（它是一个没有标题的会话）。
     await post("/state", { session_id: "s1", event: "SessionEnd" }, ep.token);
     await sleep(2200);
 
-    // ---------- 6. 分身与头巾 ----------
-    for (const [id, kw] of [["c1", "登录页"], ["c2", "迁移"], ["c3", "写测试"]]) {
-      await post("/state", { session_id: id, event: "UserPromptSubmit", keyword: kw }, ep.token);
-    }
+    // ---------- 6. 分身与泡泡 ----------
+    //
+    // 这里原来测的是"每只猫的头巾上写着各自的词"。2026-11-04 头巾删掉了，
+    // 那套信息搬到了猫头顶的消息泡泡里——判据跟着搬，覆盖的东西没变：
+    // 谁是谁、各自什么状态、点了能不能切换。
+    //
+    // c1 给 PreToolUse（working + 工具名），c2/c3 只给 UserPromptSubmit（thinking）。
+    // 刻意让状态不一样：全都一样的话，"泡泡里的状态真的是各自会话的"这件事
+    // 就退化成"三个同样的字符串"，断言看着绿其实没判什么。
+    await post("/state", { session_id: "c1", event: "PreToolUse", tool_name: "Bash", title: "登录页重构" }, ep.token);
+    await post("/state", { session_id: "c2", event: "UserPromptSubmit", title: "数据迁移" }, ep.token);
+    await post("/state", { session_id: "c3", event: "UserPromptSubmit", title: "写测试" }, ep.token);
     await sleep(1400); // 分身名单 1s 一推
     let cast = JSON.parse((await R.eval("JSON.stringify(window.petDebug.cast())")) || "{}");
     ok("多条会话 → 进入分身模式", cast.mode === "cast", cast.mode);
     ok("场上出现 3 只猫", (cast.cats || []).length === 3, `实际 ${(cast.cats || []).length} 只`);
-    ok("每只猫的头巾都写着各自的词", (cast.cats || []).every((c) => c.keyword && c.keyword.length > 0), JSON.stringify((cast.cats || []).map((c) => c.keyword)));
-    ok("词不同（不是所有人都顶着同一个词）", new Set((cast.cats || []).map((c) => c.keyword)).size === 3);
-    ok("头巾真的显示出来了", (cast.cats || []).every((c) => c.bandana && c.bandana !== "none"), JSON.stringify((cast.cats || []).map((c) => c.bandana)));
     ok("只有一只猫是聚焦的", (cast.cats || []).filter((c) => c.focus).length === 1);
+    ok("猫身上不再写关键词（头巾已删）", !("keyword" in ((cast.cats || [])[0] || {})), JSON.stringify(Object.keys((cast.cats || [])[0] || {})));
+
+    // 泡泡：显示 / 行数 / 状态 / 标题
+    let bub = JSON.parse((await R.eval("JSON.stringify(window.petDebug.bubble())")) || "{}");
+    ok("泡泡出现了（有任务就常驻）", bub.visible === true, JSON.stringify(bub.visible));
+    ok("一行一个任务，和台上的猫一一对应", (bub.rows || []).length === 3, `实际 ${(bub.rows || []).length} 行`);
+    ok("每行前面都带状态词", (bub.rows || []).every((r) => r.tag && r.tag.length > 0), JSON.stringify((bub.rows || []).map((r) => r.tag)));
+    const stateById = new Map((cast.cats || []).map((c) => [c.id, c.state]));
+    ok(
+      "泡泡里的状态和那只猫在演的状态一致（各是各的，不是同一个词）",
+      (bub.rows || []).every((r) => r.tag === stateById.get(r.id)) && new Set((bub.rows || []).map((r) => r.tag)).size > 1,
+      JSON.stringify((bub.rows || []).map((r) => [r.id, r.tag]))
+    );
+    ok("标题各不相同", new Set((bub.rows || []).map((r) => r.title)).size === 3, JSON.stringify((bub.rows || []).map((r) => r.title)));
+    ok(
+      "标题就是会话的标题（不是 id 兜底）",
+      (bub.rows || []).map((r) => r.title).sort().join(",") === ["数据迁移", "写测试", "登录页重构"].sort().join(","),
+      JSON.stringify((bub.rows || []).map((r) => r.title))
+    );
+
+    // 命中区必须含泡泡那一块。缺了它泡泡就是"看得见点不到"——
+    // 而窗口整体是穿透的，这个失败在屏幕上完全看不出来（鼠标就是划过去了）。
+    await sleep(400); // reportHits 200ms 一拍
+    const bubHitSig = await R.eval("window.petDebug.hitRects()");
+    const bubHitCount = String(bubHitSig || "").split("|").filter(Boolean).length;
+    ok("命中区含泡泡那一块（3 只猫 + 1 个泡泡 = 4 块）", bubHitCount === 4, `实际 ${bubHitCount} 块：${bubHitSig}`);
+
     // 用户明确要求"横排、有重叠"，所以这里**不能**断言不重叠。
     // 要断言的是"从左到右排开"（没叠成一坨）和"每只都看得见"（没被完全盖住）。
     const layout = JSON.parse((await R.eval(
@@ -517,22 +549,59 @@ async function main() {
     ok("每只猫都还看得见（没被完全盖住）", layout.length > 0 && layout.every((c) => Number(c.o) > 0.3 && c.w > 20), "");
     ok("相邻两只至少有部分重叠（用户要的是「挤在一起」）", layout.length < 2 || layout[1].l < layout[0].l + layout[0].w);
 
-    // 点另一只 → 聚焦切换
-    const otherId = (cast.cats || []).find((c) => !c.focus);
-    if (otherId) {
-      await R.eval(`(() => { const els=[...document.querySelectorAll('.cat')]; const t=els.find(e=>e.dataset.id==='${otherId.id}'||e.id==='cat-${otherId.id}'); if(t){t.dispatchEvent(new MouseEvent('click',{bubbles:true}));return 1;} const i=els.findIndex(e=>!e.classList.contains('focus')); if(i>=0){els[i].dispatchEvent(new MouseEvent('click',{bubbles:true}));return 1;} return 0; })()`);
-      await sleep(400);
-      cast = JSON.parse((await R.eval("JSON.stringify(window.petDebug.cast())")) || "{}");
-      ok("点一下别的猫能切换聚焦", cast.focused === otherId.id, `focused=${String(cast.focused).slice(0, 8)}`);
-    }
+    // 泡泡不压猫的脸：泡泡的下沿必须在猫耳尖之上。
+    // 这条只有几何能证明——截图里"刚好压住一点"和"没压住"看起来都很自然。
+    // 量的是耳尖（#rig-ear-l）不是 .cat 的盒子：#pet 是 176 的方盒，
+    // 但画出来的猫只占下半截，拿盒子比会把一大片空气当成"猫头"。
+    const geom = JSON.parse((await R.eval(
+      "JSON.stringify((()=>{const b=document.getElementById('bubble-wrap').getBoundingClientRect();const e=document.querySelector('.cat #rig-ear-l')||document.querySelector('#rig-ear-l');const r=e.getBoundingClientRect();return {bBottom:Math.round(b.bottom),earTop:Math.round(r.top)};})())"
+    )) || "{}");
+    ok("泡泡在猫耳尖之上（没有压住脸）", geom.bBottom <= geom.earTop, JSON.stringify(geom));
+    // "在上面"还不够：离着一百像素也算在上面，但那样尾巴就是指着空气。
+    // 这条钉的是"贴着"——判据上限 40px（实测 18px，留给 FX 图标的）。
+    ok(
+      "泡泡贴着猫（间距 0–40px，不是悬在半空）",
+      geom.earTop - geom.bBottom >= 0 && geom.earTop - geom.bBottom <= 40,
+      `间距 ${geom.earTop - geom.bBottom}px`
+    );
+
+    // 点一行 = 聚焦那只猫 + 展开详情
+    const targetRow = (bub.rows || []).find((r) => r.id !== cast.focused) || (bub.rows || [])[0];
+    await R.eval(`window.petDebug.clickBubble(${JSON.stringify(targetRow.id)})`);
+    await sleep(400);
+    cast = JSON.parse((await R.eval("JSON.stringify(window.petDebug.cast())")) || "{}");
+    ok("点泡泡里的一行 → 对应的分身猫到前面来", cast.focused === targetRow.id, `focused=${String(cast.focused)} 期望=${targetRow.id}`);
+    bub = JSON.parse((await R.eval("JSON.stringify(window.petDebug.bubble())")) || "{}");
+    const opened = (bub.rows || []).find((r) => r.id === targetRow.id) || {};
+    ok("点一行 → 展开这一条的详情", bub.expanded === targetRow.id && opened.open === true, JSON.stringify({ expanded: bub.expanded, open: opened.open }));
+    ok(
+      "详情里有阶段 / 已跑 / 目录",
+      /阶段/.test(opened.more || "") && /已跑/.test(opened.more || "") && /目录/.test(opened.more || ""),
+      JSON.stringify(opened.more || "")
+    );
+    ok(
+      "展开的那条能读到「已跑」的具体时长（不是空占位）",
+      /已跑\s*\d+\s*(秒|分)/.test(opened.more || ""),
+      JSON.stringify((opened.more || "").slice(0, 80))
+    );
+
+    // 再点一下：收起详情，但**聚焦不该跟着撤销**
+    await R.eval(`window.petDebug.clickBubble(${JSON.stringify(targetRow.id)})`);
+    await sleep(300);
+    const bubCollapsed = JSON.parse((await R.eval("JSON.stringify(window.petDebug.bubble())")) || "{}");
+    const castAfter = JSON.parse((await R.eval("JSON.stringify(window.petDebug.cast())")) || "{}");
+    ok("再点一下收起详情", bubCollapsed.expanded === null, JSON.stringify(bubCollapsed.expanded));
+    ok("收起详情不会把聚焦也撤掉（用户只是想关掉详情）", castAfter.focused === targetRow.id, String(castAfter.focused));
 
     // 上限 4 只
     for (const id of ["c4", "c5", "c6"]) {
-      await post("/state", { session_id: id, event: "UserPromptSubmit", keyword: "第" + id }, ep.token);
+      await post("/state", { session_id: id, event: "UserPromptSubmit", title: "第" + id }, ep.token);
     }
     await sleep(1400);
     cast = JSON.parse((await R.eval("JSON.stringify(window.petDebug.cast())")) || "{}");
+    bub = JSON.parse((await R.eval("JSON.stringify(window.petDebug.bubble())")) || "{}");
     ok("最多同时 4 只（再多就挤在一起看不清了）", (cast.cats || []).length <= 4, `实际 ${(cast.cats || []).length} 只`);
+    ok("泡泡的行数跟着上限走（不会列出没上台的会话）", (bub.rows || []).length === (cast.cats || []).length, `泡泡 ${(bub.rows || []).length} 行 / 猫 ${(cast.cats || []).length} 只`);
     ok("聚焦的那只不会被新来的挤掉", (cast.cats || []).some((c) => c.focus && c.id === cast.focused));
 
     // 收摊：把会话清掉，回到单猫
@@ -541,6 +610,8 @@ async function main() {
     }
     await sleep(2400); // 淡出 1.6s + 名单 1s
     ok("会话结束后回到单猫", (await R.eval("window.petDebug.cast().mode")) === "solo");
+    const bubEmpty = JSON.parse((await R.eval("JSON.stringify(window.petDebug.bubble())")) || "{}");
+    ok("没有任务了泡泡就收起（不留空壳）", bubEmpty.visible === false && (bubEmpty.rows || []).length === 0, JSON.stringify(bubEmpty));
 
     // ---------- 7. gaze：Rust 侧的光标线程 ----------
     //
@@ -676,7 +747,7 @@ async function main() {
     ok("DSH 会话进了状态机（/state 里能看到它）", !!row1, row1 ? JSON.stringify(row1) : st1.body.slice(0, 200));
     ok("DSH 会话让猫变成 working", !!snap1 && snap1.visual === "working", (snap1 && snap1.visual) || "null");
     ok(
-      "标题与关键词跟着进来了（看板/头巾要用）",
+      "标题与关键词跟着进来了（看板/泡泡要用）",
       !!row1 && row1.title === "DSH 验证会话" && row1.keyword === "DSH 验证会话",
       JSON.stringify({ title: row1 && row1.title, keyword: row1 && row1.keyword })
     );

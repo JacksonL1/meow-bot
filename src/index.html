@@ -37,7 +37,12 @@
       position: absolute;
       inset: 0;
       display: grid;
-      place-items: center;
+      /* 猫贴着窗口底（下面留 32px 是原来"居中于 240 高"时它自己那点边距）。
+         窗口比猫高出来的那一段全留给消息泡泡——**猫在屏幕上的位置不变**：
+         窗口是往上长的，底边不动。 */
+      align-items: end;
+      justify-items: center;
+      padding-bottom: 32px;
       cursor: grab;
     }
     #stage:active {
@@ -113,6 +118,167 @@
     .layer svg.on {
       display: block;
     }
+    /* ======================================================================
+       消息泡泡：任务状态不再印在猫身上，而是挂在它头顶
+       ======================================================================
+       常驻（有活跃会话就显示），一行一个任务，点一行展开详情。
+
+       几何是算过的，别凭手感改：猫头（SVG 里 y≈36/200，缩放后）在 pet 盒里离顶
+       32px，pet 离窗口底还有 32px 留白 → 额头在窗口底往上约 166px，耳尖约 192。
+       气泡的实际位置由 JS 按**当前那只猫的耳尖**算（renderer.js 的 placeBubble），
+       这里的 200 只是没算出来之前的兜底。
+       泡泡长高时是**往上长**，不盖猫脸；窗口给到 460 高就是为了让它长到
+       4 条任务 + 一条展开时也不必滚动。 */
+    #bubble-wrap {
+      position: absolute;
+      left: 6px;
+      right: 6px;
+      bottom: 200px;
+      /* 泡泡必须能点（点行 = 聚焦 + 展开）。窗口其余部分是穿透的，
+         宿主的命中区判定会把这一块单独算进去，见 renderer.js 的 reportHits。 */
+      pointer-events: auto;
+      cursor: default;
+      opacity: 1;
+      transition: opacity 160ms ease, transform 160ms ease;
+    }
+    /* 消失用"淡下去"而不是 display:none——那个是硬切，像窗口闪了一下。
+       但 pointer-events 要立刻关掉，否则透明的泡泡还会吃掉鼠标。 */
+    #bubble-wrap.hide {
+      opacity: 0;
+      transform: translateY(4px) scale(0.98);
+      pointer-events: none;
+    }
+    #bubble {
+      padding: 8px 10px;
+      background: #FFFDF9;
+      border: 1.5px solid #524338;
+      border-radius: 12px;
+      box-shadow: 0 6px 18px rgba(60, 45, 35, 0.16);
+      /* 上界只是保险：正常内容（4 条任务 + 展开一条）大约 205px，用不到滚动。
+         真超了（比如某天标题折行）就内部滚，绝不把窗口撑破——窗口大小是
+         Rust 那边定的，页面撑不破它，只会把内容裁掉，那更糟。 */
+      max-height: 248px;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+    }
+    /* 细滚动条。默认那条 15px 的灰色长条会把这个小卡片压得很脏，
+       而且它只在"4 条任务 + 展开"这种极端情况下才出现，平时根本不该看得见。 */
+    #bubble::-webkit-scrollbar {
+      width: 6px;
+    }
+    #bubble::-webkit-scrollbar-thumb {
+      background: #DED6C6;
+      border-radius: 3px;
+    }
+    #bubble::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    /* 小尖角指向猫。**必须是泡泡的兄弟节点，不能是 ::after**：
+       绝对定位在泡泡内部的伪元素会把「可滚动区域」撑大 7px，
+       于是四条任务也莫名其妙出现滚动条——那是 ScrollOverflow，不是内容真的多。 */
+    #bubble-tail {
+      position: absolute;
+      left: 50%;
+      bottom: -7px;
+      width: 11px;
+      height: 11px;
+      margin-left: -6px;
+      background: #FFFDF9;
+      border-right: 1.5px solid #524338;
+      border-bottom: 1.5px solid #524338;
+      border-bottom-right-radius: 2px;
+      transform: rotate(45deg);
+    }
+    #bubble-list {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+    }
+    .brow {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 6px;
+      border-radius: 7px;
+      font-size: 12px;
+      line-height: 1.35;
+      cursor: pointer;
+    }
+    .brow:hover {
+      background: #F6F1E7;
+    }
+    .brow.open {
+      background: #F1EBDE;
+    }
+    /* 状态点：颜色是"一眼可见"的那一层，文字是"看清楚"的那一层，两个都要。 */
+    .brow .dot {
+      flex: 0 0 7px;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #B9B4AA;
+    }
+    .brow[data-state="working"] .dot { background: #3F7FA8; }
+    .brow[data-state="thinking"] .dot { background: #8E7CB0; }
+    .brow[data-state="attention"] .dot { background: #D9A441; }
+    .brow[data-state="notification"] .dot { background: #C98A3E; }
+    .brow[data-state="error"] .dot { background: #B3201A; }
+    .brow[data-state="idle"] .dot { background: #9A968C; }
+    .brow[data-state="sleeping"] .dot { background: #C6C1B7; }
+    /* 状态词用等宽：四条任务并排时，working / thinking 的宽度差会让标题起点
+       参差不齐，看起来像排版坏了。 */
+    .brow .tag {
+      flex: 0 0 auto;
+      font-family: ui-monospace, Consolas, "Cascadia Mono", monospace;
+      font-size: 10px;
+      color: #7A7468;
+      background: #F1ECE1;
+      padding: 1px 4px;
+      border-radius: 4px;
+    }
+    .brow[data-state="error"] .tag {
+      color: #fff;
+      background: #B3201A;
+    }
+    .brow[data-state="attention"] .tag {
+      color: #7A5A1E;
+      background: #FBE8C2;
+    }
+    .brow .ttl {
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: #3C362E;
+    }
+    /* 展开的详情。手风琴而不是替换列表：列表始终在，对比两条任务不用来回切。 */
+    .bmore {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      padding: 2px 6px 8px 19px;
+    }
+    /* 必须写这条：.bmore 是 display:flex，会盖掉 hidden 属性自带的 display:none。 */
+    .bmore[hidden] {
+      display: none;
+    }
+    .kv {
+      display: flex;
+      gap: 6px;
+      font-size: 11px;
+      line-height: 1.45;
+    }
+    .kv .k {
+      flex: 0 0 26px;
+      color: #9A9285;
+    }
+    .kv .v {
+      flex: 1 1 auto;
+      min-width: 0;
+      color: #4A443B;
+      word-break: break-all;
+    }
     #hint {
       position: absolute;
       bottom: 6px;
@@ -135,6 +301,14 @@
 </head>
 <body>
   <div id="stage">
+    <!-- 泡泡在 #pet 前面：DOM 顺序不影响层叠（它自己 position:absolute），
+         但放在前面能让"猫是主体、泡泡是附注"这件事在结构上也成立。 -->
+    <div id="bubble-wrap" class="hide">
+      <div id="bubble">
+        <div id="bubble-list"></div>
+      </div>
+      <div id="bubble-tail"></div>
+    </div>
     <div id="pet">
       <div id="cast"></div>
       <div id="layerA" class="layer show"></div>

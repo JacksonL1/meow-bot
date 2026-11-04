@@ -89,7 +89,7 @@ const IDLE_POLLS_TO_STOP: u32 = 2;
 /// 一个 step 开了半小时还没收尾，只可能是进程没了（正常一次 step 也就几十秒）。
 const STEP_STALE_MS: i64 = 30 * 60 * 1000;
 
-/// 头巾上只有那么大地方，state.rs 那边也会再截一次；这里先截是为了
+/// 泡泡一行放不下太多，state.rs 那边也会再截一次；这里先截是为了
 /// 让"关键词从哪来"这件事在本文件里一目了然。
 const KEYWORD_CHARS: usize = 8;
 
@@ -208,7 +208,7 @@ impl Obs {
         self.phase_at(now_ms())
     }
 
-    /// 头巾上的词。v1 直接取标题前几个字——DSH 的 title 是"这一轮在干什么"
+    /// 泡泡里的兜底词。v1 直接取标题前几个字——DSH 的 title 是"这一轮在干什么"
     /// 的现成答案（它自己就是 LLM 生成的），不用另造一套关键词。
     fn keyword(&self) -> Option<String> {
         let t = self.title.as_ref()?;

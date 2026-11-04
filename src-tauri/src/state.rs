@@ -84,7 +84,7 @@ const MAX_SESSIONS: usize = 100;
 const MAX_EVENT_LEN: usize = 64;
 const MAX_TITLE: usize = 60;
 const MAX_TOOL: usize = 64;
-// 关键词写在猫的头巾上，超过这个长度就糊成一团（头巾只有那么大）。
+// 关键词是泡泡里的兜底标题（会话没有 title 时才用它），太长就把那一行挤满。
 const MAX_KEYWORD: usize = 8;
 const MAX_CWD_STORE: usize = 1024;
 const MAX_CWD_PUBLIC: usize = 200;
@@ -128,6 +128,13 @@ fn event_state(event: &str) -> Option<Visual> {
 pub struct Session {
     pub id: String,
     pub state: Visual,
+    /// 这条会话第一次被看到是什么时候。
+    ///
+    /// 和 `state_since` 不是一回事：那个会被每一次状态迁移重置，只能回答
+    /// "当前这个姿势多久了"。泡泡里要显示的「这条任务跑了多久」问的是整条任务，
+    /// 所以得有出生时刻。用 `Instant` 而不是 `SystemTime`：这里只做差值，
+    /// 而且改系统时间不该让桌宠显示「跑了 -3 秒」。
+    pub born: Instant,
     pub state_since: Instant,
     pub last_at: Instant,
     pub cwd: Option<String>,
@@ -146,6 +153,9 @@ pub struct SessionView {
     pub keyword: Option<String>,
     #[serde(rename = "idleMs")]
     pub idle_ms: u64,
+    /// 这条会话跑了多久（从第一次出现算起）。泡泡里的「已跑」读它。
+    #[serde(rename = "ageMs")]
+    pub age_ms: u64,
 }
 
 #[derive(Clone, Serialize, Debug)]
@@ -291,6 +301,7 @@ impl Store {
                 tool: s.tool.clone(),
                 keyword: s.keyword.clone(),
                 idle_ms: now.saturating_duration_since(s.last_at).as_millis() as u64,
+                age_ms: now.saturating_duration_since(s.born).as_millis() as u64,
             })
             .collect();
         // HashMap 顺序不稳定；按 id 排一下，让快照可比、回归可断言
@@ -364,6 +375,7 @@ impl Store {
                 Session {
                     id: id.clone(),
                     state: Visual::Idle,
+                    born: now,
                     state_since: now,
                     last_at: now,
                     cwd: None,
@@ -397,7 +409,7 @@ impl Store {
             s.title = title;
         }
         // 关键词跟着标题一起"粘"。新一轮 UserPromptSubmit 会带新词覆盖旧的——
-        // 这正是要的，头巾上写的是**这一轮**在干什么。
+        // 这正是要的，关键词说的是**这一轮**在干什么。
         if keyword.is_some() {
             s.keyword = keyword;
         }
@@ -607,6 +619,20 @@ mod tests {
         // 新一輪会覆盖旧词
         st.apply(&json!({"session_id":"s1","event":"UserPromptSubmit","keyword":"风险评级"}));
         assert_eq!(st.snapshot().sessions[0].keyword.as_deref(), Some("风险评级"));
+    }
+
+    // 泡泡里要显示「这条任务跑了多久」。它和 idleMs 是两个问题：
+    // idleMs 会在每个事件后被清零（"刚动过"），ageMs 不能——
+    // 否则一条跑了半小时的任务，只要刚有动作就显示成"跑了 0 秒"。
+    #[test]
+    fn age_survives_state_migrations_while_idle_resets() {
+        let mut st = Store::new(Timings::default());
+        st.apply(&ev("PreToolUse"));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        st.apply(&json!({"session_id":"s1","event":"Stop"}));
+        let s = &st.snapshot().sessions[0];
+        assert!(s.age_ms >= 15, "出生时刻被重置了：age={}", s.age_ms);
+        assert!(s.idle_ms < 15, "idle 应该被这一条事件清零：idle={}", s.idle_ms);
     }
 
     #[test]

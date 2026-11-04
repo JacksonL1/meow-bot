@@ -65,13 +65,13 @@ function clipTitle(s) {
   return s.length > TITLE_MAX ? `${s.slice(0, TITLE_MAX - 1)}…` : s;
 }
 
-// ---- 关键词：头巾上写的那一个词 ----
+// ---- 关键词：会话没有 title 时，泡泡里顶上去的那一个词 ----
 //
 // 归宿先列清楚，因为**它比标题更暴露**：标题只在打开看板时才上屏幕，
 // 关键词是**一直挂在猫头上**的——投屏、截图、远程会议共享桌面，全都在画面里。
 // 所以它的隐私口径取最严的那处：**和标题同一把尺（命中密钥就整条不要）**，
 // 而且只从 prompt 派生成一个词送出去，原文依旧不离开这个进程（硬约束 28）。
-const KEYWORD_MAX = 6; // 头巾就那么大，2~4 个字最合适，最多 6
+const KEYWORD_MAX = 6; // 泡泡一行也放不下太多，2~4 个字最合适，最多 6
 
 // 中文没有空格，靠这两张表把一句话切成候选片段。
 // **动作词单独一张**：一句"帮我修复登录页面的按钮样式"里真正有信息量的是
@@ -124,7 +124,7 @@ const ZH_CUT = new RegExp(
 );
 
 // 从一段文本里挑一个词。不追求"抽得准"，追求**可预测**：
-// 用户看一眼头巾就该知道"哦这在干那件事"，所以宁可粗一点，也不要每次都变。
+// 用户看一眼泡泡就该知道"哦这在干那件事"，所以宁可粗一点，也不要每次都变。
 function pickKeyword(text) {
   // 1) 拉丁词优先：有天然边界，取第一个非停用实词
   const en = text.match(/[A-Za-z][A-Za-z0-9_+#.]*/g) || [];
@@ -152,14 +152,14 @@ function pickKeyword(text) {
   return best || undefined;
 }
 
-// 返回 undefined = 这一轮没有值得往头巾上写的词
+// 返回 undefined = 这一轮没有值得写进泡泡的词
 function deriveKeyword(event, payload) {
   const named = typeof payload.session_title === "string" ? payload.session_title.trim() : "";
   const src = named || (event === "UserPromptSubmit" && typeof payload.prompt === "string" ? payload.prompt : "");
   if (!src) return undefined;
 
   // 先扒掉代码块 / 行内码 / URL / 路径：这些是最容易把密钥和内网地址带进画面的东西，
-  // 而且它们当关键词毫无意义（头巾上写 "https://" 没有任何信息量）。
+  // 而且它们当关键词毫无意义（泡泡里写 "https://" 没有任何信息量）。
   const text = src
     .replace(/```[\s\S]*?(?:```|$)/g, " ")
     .replace(/`[^`\n]*`/g, " ")
@@ -171,7 +171,7 @@ function deriveKeyword(event, payload) {
 
   // 和标题同一把尺：命中疑似密钥就整条不要。
   // 这里**不做"洗掉再显示"**——洗到一半的密钥仍然是密钥，
-  // 而头巾空一格只是少一个词。
+  // 而泡泡里少一个词只是少一个词。
   if (TITLE_SECRET_RE.test(text)) return undefined;
 
   const kw = pickKeyword(text);

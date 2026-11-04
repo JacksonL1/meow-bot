@@ -196,8 +196,9 @@ function createRiggedRagdollSVG(uid) {
     <path id="rig-torso"
           d="M72 112 C59 114 50 130 50 146 C50 162 54 172 66 174 C80 177 120 177 134 174 C146 172 150 162 150 146 C150 130 141 114 128 112 Z"
           fill="#FAF6F0" stroke="#524338" stroke-width="3.5" stroke-linejoin="round"/>
-      <!-- 高级感金色 "RAG" 衬线字体，带有轻微描边以契合整体画风 -->
-      <text x="100" y="142" font-family="Georgia, serif" font-weight="900" font-size="14" fill="#D4AF37" text-anchor="middle" letter-spacing="2" stroke="#524338" stroke-width="0.8">RAG</text>
+    <!-- 胸前原来有一个金色衬线的 "RAG" 字样（S11 之前留下的）。删掉。
+         它解释不了任何事：用户看不出这是品牌、代号还是某个功能在跑，
+         唯一的效果是每次有人问"这是什么意思"。猫身上不该有需要解释的字。 -->
     <!-- 原来这里还有一块 #rig-torso-patch（cx112 cy134 rx34 ry18 的米色椭圆，opacity 0.65），
          注释写的是"背部柔毛轮廓"，实际读起来是肚子上一块**污渍**：硬边、没有描边、
          颜色比身体暗一档、位置还偏右上（不在身体中心）。
@@ -274,34 +275,15 @@ function createRiggedRagdollSVG(uid) {
     <path d="M100 48 C125 48 142 55 146 72 C150 90 152 105 136 114 C125 120 112 122 100 122 C88 122 75 120 64 114 C48 105 50 90 54 72 C58 55 75 48 100 48 Z"
           fill="none" stroke="#524338" stroke-width="3.5" stroke-linejoin="round"/>
 
-    <!-- 5.5 头巾 (#rig-bandana)：**默认藏起来**，只有这条会话真的抽出了关键词才戴。
-         放在头部轮廓之后、腮红之前——压住头，但绝不能盖到眼睛（眼睛在 y76 以下，
-         头巾下沿在 y60，留了 16px 的安全距离）。
+    <!-- 5.5 头巾：删了（2026-11-04）。
+         它原来承担"这条会话在干什么"的标注，但那个位置根本不够用：
+         布带中段只有 ~72px，6 个汉字就得缩到 10px，而标题动辄十几个字，
+         于是只能截前 6 个字——用户看到的是"登录页重构登录"这种断句。
+         更要紧的是它答不了"现在什么状态"和"跑了多久"。
 
-         为什么是"戴不戴"而不是"写不写字"：没有词的时候留一条空布带，
-         看起来就像一个随机的装饰，用户会以为那是形象的一部分，
-         然后花时间猜它是什么意思。藏起来才是对的。 -->
-    <g id="rig-bandana" display="none">
-      <!-- 结与飘带先画：它被布带压住一半，才像"从布带里系出来的" -->
-      <path id="rig-bandana-tail"
-            d="M136 62 C152 56 164 66 160 79 C157 88 145 88 141 80 C138 73 140 66 136 62 Z"
-            fill="#B8483F" stroke="#7E3330" stroke-width="2.2" stroke-linejoin="round"/>
-      <path id="rig-bandana-knot"
-            d="M130 58 C140 54 148 60 146 68 C144 75 134 74 131 68 C129 64 128 60 130 58 Z"
-            fill="#C9564C" stroke="#7E3330" stroke-width="2.2" stroke-linejoin="round"/>
-      <!-- 横跨额头的布带 -->
-      <path id="rig-bandana-band"
-            d="M54 70 C58 48 78 36 100 36 C122 36 142 48 146 70 C141 64 122 60 100 60 C78 60 59 64 54 70 Z"
-            fill="#C9564C" stroke="#7E3330" stroke-width="2.6" stroke-linejoin="round"/>
-      <!-- 布带上的一道高光，不然纯色看着像贴纸 -->
-      <path d="M64 58 C72 46 84 41 100 41 C116 41 128 46 136 58"
-            fill="none" stroke="#FFFFFF" stroke-opacity="0.16" stroke-width="2.4" stroke-linecap="round"/>
-      <!-- 词写在这里。字号由 JS 按字数调（字数多就缩小），
-           不然 6 个字会顶出布带两边——布带中段能用的宽度只有 ~72px。 -->
-      <text id="rig-bandana-text" x="100" y="55" text-anchor="middle"
-            font-size="13" font-weight="700" fill="#FFF7F0"
-            font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif"></text>
-    </g>
+         现在这套信息全交给猫头顶的消息泡泡（见 index.html 的 #bubble）：
+         状态、标题、当前工具、已跑多久、工作目录都在那儿，可点选可展开。
+         头巾不戴，猫就是猫。 -->
 
     <!-- 脸颊粉嫩腮红 -->
     <ellipse id="rig-blush-l" cx="62" cy="103" rx="6.5" ry="3.8" fill="#F2A7A7" opacity="0.38"/>
@@ -615,8 +597,6 @@ class RagdollRigController {
       caret: this.svg.querySelector("#rig-code-caret"),
       kbGlow: this.svg.querySelector("#rig-kb-glow"),
       headGroup: this.svg.querySelector("#rig-head-group"),
-      bandana: this.svg.querySelector("#rig-bandana"),
-      bandanaText: this.svg.querySelector("#rig-bandana-text"),
       earL: this.svg.querySelector("#rig-ear-l"),
       earR: this.svg.querySelector("#rig-ear-r"),
       eyesOpen: this.svg.querySelector("#rig-eyes-open"),
@@ -719,27 +699,10 @@ class RagdollRigController {
     this.startLoop();
   }
 
-  // 头巾上写什么词。传 undefined / "" = 没词可写，整条头巾藏起来。
-  //
-  // 字号按字数缩：布带中段能用的宽度只有 ~72px，六个汉字按 13px 排是 78px，
-  // 会顶出两边。宁可小一点，也不要让词溢出到布带外面——那看起来像渲染坏了。
-  // 档位写死成表而不是算比例，是因为算比例在 2 个字时会把字放得过大（顶到布带上下沿）。
-  setKeyword(kw) {
-    if (!this.els.bandana || !this.els.bandanaText) return;
-    const word = typeof kw === "string" ? kw.trim() : "";
-    if (!word) {
-      this.els.bandana.setAttribute("display", "none");
-      this.els.bandanaText.textContent = "";
-      return;
-    }
-    this.els.bandana.setAttribute("display", "inline");
-    // textContent，不是 innerHTML：这个词来自 agent 送过来的 prompt 派生结果，
-    // 虽然 hook 侧已经判过一轮（疑似密钥整条丢弃），这里仍然不当 HTML 解析。
-    this.els.bandanaText.textContent = word;
-    const n = [...word].length; // 按码点算，别按 UTF-16 单元（emoji 会算成 2）
-    const size = n <= 2 ? 16 : n === 3 ? 15 : n === 4 ? 13 : n === 5 ? 11 : n === 6 ? 10 : n === 7 ? 9 : 8;
-    this.els.bandanaText.setAttribute("font-size", String(size));
-  }
+  // 「头巾上写什么词」这件事整个删掉了（S11）。
+  // 猫身上不再印字，第一条会话的信息由 #bubble 承担。
+  // 这个方法没有留空壳：留一个什么都不做的 setKeyword，比删掉更坏——
+  // 调用方以为它还在工作，而画面上永远什么都不会发生。
 
   setState(newState) {
     const prev = this.state;
@@ -1254,7 +1217,8 @@ function renderState(stateName) {
 // ============================================================================
 // S10  多会话分身：一个会话一只猫
 //
-// 规则只有一条（用户的原话）：**一条任务 = 一只猫戴头巾；多条任务 = 分身成多只猫**。
+// 规则只有一条（用户的原话）：**多条任务 = 分身成多只猫**。
+// （原话里还有「一只猫戴头巾」——头巾 2026-11-04 删了，标注改由头顶的泡泡承担。）
 // 所以 <=1 条会话时**完全沿用原来的单猫路径**（连带它所有的既有行为与断言），
 // 只有真的有 2 条以上时才切换到分身。这样"改多猫"不会顺手改坏单猫。
 //
@@ -1277,7 +1241,7 @@ const FADE_MS = 1600; // "慢慢消失"——用 300ms 那档会像被删掉，�
 // 状态仲裁的权威实现移到了 src-tauri/src/state.rs（那里有同样的表和同样的测试）。
 const CAST_PRIORITY = { error: 8, notification: 7, attention: 5, working: 3, thinking: 2, idle: 1, sleeping: 0 };
 
-/** @type {Map<string, {el:HTMLElement, rig:any, keyword:string|null}>} */
+/** @type {Map<string, {el:HTMLElement, rig:any}>} */
 const cast = new Map();
 let castEl = null;
 let castSeq = 0;
@@ -1396,7 +1360,7 @@ function syncCast(list, allSessions) {
       el.dataset.sid = String(s.id || "");
       // uid 让每只猫的渐变 id 各不相同（详见 createRiggedRagdollSVG 上的注释）
       const rig = new RagdollRigController(el, "c" + castSeq++);
-      rec = { el, rig, keyword: undefined };
+      rec = { el, rig };
       cast.set(s.id, rec);
     }
     // 每轮都 appendChild 一次，强制 DOM 顺序跟着排序结果走。
@@ -1409,18 +1373,19 @@ function syncCast(list, allSessions) {
     rec.el.style.zIndex = String(s.id === focusedId ? 10 : 10 - i - 1);
     rec.el.classList.toggle("focus", s.id === focusedId);
 
-    if (rec.keyword !== (s.keyword ?? null)) {
-      rec.keyword = s.keyword ?? null;
-      rec.rig.setKeyword(s.keyword);
-    }
     rec.rig.setState(s.state);
   });
 }
 
 // 会话名单 → 单猫 / 多猫。这个分支是"分身"唯一的总开关。
 function applySessions(sessions) {
-  if (!isRagdollTheme(currentTheme)) return; // 帧序列主题不分身，保持原样
   const list = pickCast(sessions, focusedId);
+  // 泡泡和主题无关：帧序列主题没有分身，但"有几件事在跑"照样该看得见。
+  // 所以它放在主题判断之前，用的是同一份 list（台上是谁，泡泡里就是谁）——
+  // 两边不是同一份名单的话，"点一行让对应的猫到前面来"就有一半点不动。
+  renderBubble(list);
+
+  if (!isRagdollTheme(currentTheme)) return; // 帧序列主题不分身，保持原样
   if (list.length <= 1) {
     // 单猫：收掉分身，回到原来的那条路（**连带它所有既有行为**）
     castMode = false;
@@ -1436,12 +1401,251 @@ function applySessions(sessions) {
       ragdollRig.setState(currentState);
       ragdollRig.setGaze(lastGaze.x, lastGaze.y);
     }
-    if (ragdollRig) ragdollRig.setKeyword(list.length ? list[0].keyword : undefined);
+    // 猫立起来了，泡泡才知道该贴多高（见 placeBubble）。
+    placeBubble();
     return;
   }
   castMode = true;
   dropSoloRig();
   syncCast(list, sessions);
+  placeBubble();
+}
+
+// ============================================================================
+// 任务泡泡（2026-11-04，替掉头巾）
+//
+// 为什么是泡泡而不是把字印在猫身上：猫身上能写字的地方只有一条 ~72px 宽的布带，
+// 装得下一个 6 字的词，装不下"是什么任务 / 什么阶段 / 跑了多久 / 在哪个仓库"。
+// 挤不下的信息只能靠猜，而猜错比不显示更糟——头巾上是"登录页重构"，
+// 用户读到的是"这猫在做登录页"，实际可能是别的会话刚抢走了它。
+//
+// 三条设计约束：
+//   ① **常驻**：只要有活跃会话就挂着。不靠悬停、不靠角标——"不问就不知道"
+//      等于没有，而这个东西存在的全部意义就是让人随手瞥一眼。
+//   ② **一行一个任务**：前面是状态（working / thinking …），后面是标题。
+//      多任务不弹多个泡泡——那会糊满桌面，也没人分得清哪个泡泡属于哪只猫。
+//   ③ **点行 = 聚焦 + 展开**：分身模式下"谁是谁"全靠这个动作，所以点一行要
+//      同时把对应的猫调到最前面；详情用手风琴而不是替换列表，
+//      这样对比两条任务不用来回切。
+//
+// 显示的每一个字都是事实：阶段、当前工具、已跑多久、工作目录。
+// **没有百分比进度**——agent 侧根本没有这个东西，编一个出来第一天很懂事，
+// 第三天就会开始骗人（显示 90% 卡了二十分钟）。
+// ============================================================================
+
+// 状态词用英文原样：泡泡里地方小，而且用户排查问题时脑子里用的就是这组词
+// （"它为什么显示 working"）。中文放在展开的详情里，一行一句。
+const BUBBLE_LABEL = {
+  working: "干活中",
+  thinking: "思考中",
+  attention: "干完了，等你",
+  notification: "有新消息",
+  error: "出错了",
+  sleeping: "睡着",
+  idle: "空闲",
+};
+
+let bubbleEl = null;
+let bubbleListEl = null;
+/** @type {Map<string, {row:HTMLElement, more:HTMLElement}>} */
+const bubbleRows = new Map();
+let bubbleSig = "";
+// 展开的是哪一条。**存 id 而不是存元素**：整行是重建的（标题/状态会变），
+// 存元素的话下一次重建就丢；存 id 才能"数据变了但展开状态还在"。
+let expandedId = null;
+let bubbleShown = false;
+
+function ensureBubbleEl() {
+  // #bubble-wrap 而不是 #bubble：尖角是泡泡的兄弟节点（理由见 index.html 的注释），
+  // 显隐与命中区都得按"整块"算，否则尖角会在泡泡淡出后还挂在屏幕上。
+  if (!bubbleEl) bubbleEl = document.getElementById("bubble-wrap");
+  if (!bubbleListEl) bubbleListEl = document.getElementById("bubble-list");
+  return bubbleEl && bubbleListEl;
+}
+
+// "3 分 12 秒" 比 "192 秒" 好读，但别超过两级：没人需要知道跑了 2 小时 41 分 9 秒。
+function fmtDur(ms) {
+  const s = Math.max(0, Math.round((Number(ms) || 0) / 1000));
+  if (s < 60) return `${s} 秒`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} 分 ${s % 60} 秒`;
+  return `${Math.floor(m / 60)} 小时 ${m % 60} 分`;
+}
+
+// 一行的标题：标题 → 关键词 → 目录名 → id 前 8 位。
+// 全都拿不到也得显示点什么：空行会被当成渲染坏了。
+function bubbleTitle(s) {
+  const t = (s && (s.title || s.keyword || s.cwd)) || "";
+  if (t) return String(t);
+  return String((s && s.id) || "").slice(0, 8) || "未命名会话";
+}
+
+function buildBubbleRow(s) {
+  const row = document.createElement("div");
+  row.className = "brow";
+  row.dataset.sid = String(s.id || "");
+  row.dataset.state = String(s.state || "");
+  row.title = "点一下：这只猫到前面来，并展开详情";
+
+  const dot = document.createElement("span");
+  dot.className = "dot";
+  const tag = document.createElement("span");
+  tag.className = "tag";
+  // textContent 而不是 innerHTML：状态来自宿主，但这条链路上任何一环都不该
+  // 去解析一段字符串。（标题更是 agent 直接送来的，绝不能当 HTML。）
+  tag.textContent = String(s.state || "?");
+  const ttl = document.createElement("span");
+  ttl.className = "ttl";
+  ttl.textContent = bubbleTitle(s);
+
+  row.append(dot, tag, ttl);
+
+  const more = document.createElement("div");
+  more.className = "bmore";
+  more.dataset.sid = String(s.id || "");
+
+  const kv = (k, v, key) => {
+    const line = document.createElement("div");
+    line.className = "kv";
+    const kk = document.createElement("span");
+    kk.className = "k";
+    kk.textContent = k;
+    const vv = document.createElement("span");
+    vv.className = "v";
+    if (key) vv.dataset.k = key;
+    vv.textContent = v;
+    line.append(kk, vv);
+    return line;
+  };
+
+  const zh = BUBBLE_LABEL[s.state] || s.state || "";
+  // 标题在行里会被截断（一行放不下十几个字），展开时必须能看全——
+  // 否则"点开看详情"这个动作最该解决的问题反而没解决。
+  more.append(kv("任务", bubbleTitle(s)));
+  more.append(kv("阶段", `${zh} · ${s.state || "?"}`));
+  // 工具只在有的时候显示。空着写"—"会让每一行都多一个占位，
+  // 而"没有工具在跑"本身就是信息（说明它在等模型）。
+  if (s.tool) more.append(kv("工具", String(s.tool)));
+  more.append(kv("已跑", fmtDur(s.ageMs), "age"));
+  more.append(kv("目录", s.cwd ? String(s.cwd) : "未知", "cwd"));
+
+  return { row, more };
+}
+
+function rebuildBubbleRows(list) {
+  const alive = new Set(list.map((s) => String(s.id || "")));
+  if (expandedId && !alive.has(String(expandedId))) expandedId = null;
+
+  bubbleListEl.replaceChildren();
+  bubbleRows.clear();
+
+  for (const s of list) {
+    const { row, more } = buildBubbleRow(s);
+    const on = expandedId != null && String(expandedId) === String(s.id || "");
+    more.hidden = !on;
+    row.classList.toggle("open", on);
+    bubbleListEl.append(row, more);
+    bubbleRows.set(String(s.id || ""), { row, more });
+  }
+}
+
+// 时间每秒都在变，但整行不用重建——只把展开那一条的文本换掉。
+// 重建会让 hover 态和滚动位置闪一下，而"每秒闪一次"比不显示时间更烦人。
+function updateBubbleTimes(list) {
+  for (const s of list) {
+    const rec = bubbleRows.get(String(s.id || ""));
+    if (!rec || rec.more.hidden) continue;
+    const age = rec.more.querySelector('[data-k="age"]');
+    if (age) age.textContent = fmtDur(s.ageMs);
+  }
+}
+
+function renderBubble(list) {
+  if (!ensureBubbleEl()) return;
+  const rows = Array.isArray(list) ? list.filter(Boolean) : [];
+
+  if (!rows.length) {
+    if (bubbleShown) {
+      bubbleEl.classList.add("hide");
+      bubbleShown = false;
+    }
+    // 清空是因为下一次"有任务了"要重建，留着上一轮的 DOM 只会留旧标题。
+    if (bubbleSig) {
+      bubbleSig = "";
+      bubbleRows.clear();
+      bubbleListEl.replaceChildren();
+      expandedId = null;
+    }
+    return;
+  }
+
+  // 只有"会影响行内容"的字段变了才重建。idleMs / ageMs 每秒都在变，
+  // 把它们放进签名等于每秒重建一次。
+  const sig = rows
+    .map((s) => [s.id, s.state, s.title || "", s.tool || "", s.cwd || ""].join("\u0001"))
+    .join("\u0002");
+  if (sig !== bubbleSig) {
+    bubbleSig = sig;
+    rebuildBubbleRows(rows);
+  }
+  updateBubbleTimes(rows);
+
+  if (!bubbleShown) {
+    bubbleEl.classList.remove("hide");
+    bubbleShown = true;
+  }
+}
+
+// 点一行：这只猫到最前面 + 展开/收起详情。
+// 委托在列表上而不是每行挂一个监听：行是重建的，挂在上面的监听会跟着一起没。
+if (typeof document !== "undefined" && document.getElementById("bubble-list")) {
+  document.getElementById("bubble-list").addEventListener("click", (e) => {
+    const row = e.target && e.target.closest ? e.target.closest(".brow") : null;
+    if (!row) return;
+    const id = row.dataset.sid;
+    if (!id) return;
+    expandedId = String(expandedId) === String(id) ? null : id;
+    // 反复点同一行的第二步是收起，但**聚焦不该跟着撤销**：
+    // 用户只是想关掉详情，不代表他想把另一只猫叫到前面。
+    focusCat(id);
+    for (const [sid, rec] of bubbleRows) {
+      const on = expandedId != null && String(expandedId) === sid;
+      rec.more.hidden = !on;
+      rec.row.classList.toggle("open", on);
+    }
+  });
+}
+
+// 泡泡贴在哪：按**猫耳尖的真实位置**算，不是按窗口高度写死一个数。
+//
+// 为什么要动态算：分身时每只猫只有 88px 且沉在 pet 盒底部，单猫时是 176px 撑满，
+// 两者的头顶相差近百像素。写死一个 bottom，必然在其中一种情况下露出一条
+// 「尾巴指着空气」的缝——那条缝不报错、断言也测不到，只有人看一眼才觉得别扭。
+//
+// 量 #rig-ear-l 而不是 .cat / #pet：那两个是盒子，画的猫只占盒子下半截，
+// 拿盒子比等于把一大片空气当成猫头。
+function placeBubble() {
+  if (!bubbleEl) return;
+  // 按**当前真正在台上的那个 rig**取耳朵，不按 DOM 顺序找。
+  // 反例（踩过）：分身退回单猫时，正在淡出的那几只 .cat 还留在 #cast 里 1.6 秒，
+  // 而 #cast 排在 #layerA 前面——用 querySelector("#rig-ear-l") 会先命中那只
+  // 已经缩小下移的幽灵猫，泡泡于是贴着空气停在半空。
+  let ear = null;
+  if (cast.size) {
+    const first = [...cast.values()][0];
+    ear = first && first.el ? first.el.querySelector("#rig-ear-l") : null;
+  }
+  if (!ear && ragdollRig && ragdollRig.svg) ear = ragdollRig.svg.querySelector("#rig-ear-l");
+  if (!ear) return;
+  const r = ear.getBoundingClientRect();
+  if (!r.height) return;
+  // 视口底部往上量。留 18px 而不是贴着放：猫头顶上还有一整套 FX 图标
+  // （attention 的 "!"、error 的 "✗"、sleeping 的 zZz），它们比耳朵更高。
+  // 贴到 8px 时截图里看到的是泡泡的角正好啃掉那个 "✗"。
+  // 不用 getBBox 去量 FX：那些组是用 opacity 控制的，bbox 会把**不可见**的
+  // 云朵和 zZz 也算进来，泡泡会莫名其妙被顶到半空。
+  const want = Math.round(window.innerHeight - r.top + 18);
+  bubbleEl.style.bottom = `${Math.max(40, Math.min(300, want))}px`;
 }
 
 function focusCat(id) {
@@ -1606,6 +1810,10 @@ window.addEventListener("mousemove", (e) => {
 
 if (stage) {
   stage.addEventListener("pointerdown", (e) => {
+    // 泡泡里的点击（聚焦 / 展开）不能顺带把窗口拖走。
+    // 不拦的话，手指在行上按下 → 窗口跟着鼠标跑 → 松手时那一下变成拖动，
+    // 用户看到的是"我点了一下，桌宠飞出去了"。
+    if (e.target && e.target.closest && e.target.closest("#bubble")) return;
     if (e.button === 0) {
       if (ragdollRig) ragdollRig.onPoke();
       if (window.clawd && typeof window.clawd.dragStart === "function") {
@@ -1698,6 +1906,13 @@ function reportHits() {
     const r = pet.getBoundingClientRect();
     if (r.width > 0 && r.height > 0) rects.push([r.left, r.top, r.width, r.height]);
   }
+  // 泡泡单独算一块，**不和猫合并**：合并出来的大矩形会把中间那片空气也变成挡板，
+  // 用户想点桌面就点不动了。同理它也不能并进任何一只猫的矩形——
+  // 泡泡在猫头顶上方，两者的矩形本来就不该相接。
+  if (bubbleEl && bubbleShown) {
+    const r = bubbleEl.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) rects.push([r.left, r.top, r.width, r.height]);
+  }
   const sig = rects.map((r) => r.map((n) => Math.round(n)).join(",")).join("|");
   if (sig === lastHitSig) return;
   lastHitSig = sig;
@@ -1717,14 +1932,23 @@ reportHits();
 // 这些不是"方便"，是**唯一能让回归测到内部状态的窗口**。
 // 只看像素是没用的：静止画面和动画可能长得一样。
 // ============================================================================
-// S10：把"词有没有真的写进 DOM"读回来。
-// 观测窗口必须有自检（硬约束 23）：setKeyword 写了但 DOM 没变，
-// 在不报错的情况下没人会发现——尤其是当那只猫正好被别的东西盖住时。
-function petKeywordProbe() {
-  const read = (rig) => (rig && rig.els.bandanaText ? rig.els.bandanaText.textContent : null);
-  if (ragdollRig) return read(ragdollRig);
-  const first = [...cast.values()][0];
-  return first ? read(first.rig) : null;
+// 泡泡的观测窗口。**必须有**（硬约束 23）：泡泡是照着"会话名单"画的，
+// 而名单每秒重推一次——DOM 被重建了、展开状态被重置了、或者根本没显示，
+// 这三种失败在屏幕上长得都像"没问题"，只有把 DOM 读回来才能分辨。
+function bubbleProbe() {
+  const rows = [...bubbleRows.entries()].map(([id, rec]) => ({
+    id,
+    state: rec.row.dataset.state || "",
+    tag: rec.row.querySelector(".tag") ? rec.row.querySelector(".tag").textContent : "",
+    title: rec.row.querySelector(".ttl") ? rec.row.querySelector(".ttl").textContent : "",
+    open: rec.row.classList.contains("open"),
+    more: rec.more.hidden ? "" : rec.more.textContent || "",
+  }));
+  return {
+    visible: bubbleShown,
+    expanded: expandedId,
+    rows,
+  };
 }
 
 window.petDebug = {
@@ -1806,10 +2030,10 @@ window.petDebug = {
   // 一张静态截图里，慢慢睁开和瞬间睁开长得一模一样。
   eyeOpen: () => (ragdollRig ? Math.min(1, Math.max(0, ragdollRig.sp.eyeOpen.pos)) : null),
   stateLog: () => stateLog.slice(),
-  // ---- S10：分身与头巾 ----
+  // ---- S10：分身 / S11：泡泡 ----
   // 每个出口都要有断言证明它自己有货（硬约束 23）：观测窗口没有自检就只是装饰。
   //
-  // 台上有几只猫、各自演什么状态、头巾上写的什么词、当前聚焦谁。
+  // 台上有几只猫、各自演什么状态、当前聚焦谁。
   // 靠肉眼验证不了"第 2 只猫是不是真的在演自己的状态"——它和第一只
   // 长得一模一样，只有读它自己的 rig 才知道。
   // 上报给宿主的命中区签名（"x,y,w,h|…"）。断言"矩形真的发出去了"只能靠它：
@@ -1821,26 +2045,26 @@ window.petDebug = {
     cats: [...cast.entries()].map(([id, rec]) => ({
       id,
       state: rec.rig.state,
-      keyword: rec.rig.els.bandanaText ? rec.rig.els.bandanaText.textContent : "",
-      bandana: rec.rig.els.bandana ? rec.rig.els.bandana.getAttribute("display") : null,
       focus: rec.el.classList.contains("focus"),
       width: rec.el.style.width,
     })),
   }),
-  // 单猫那只的头巾（分身模式下它是 null）
-  solo: () => {    if (!ragdollRig) return null;
-    return {
-      state: ragdollRig.state,
-      keyword: ragdollRig.els.bandanaText ? ragdollRig.els.bandanaText.textContent : "",
-      bandana: ragdollRig.els.bandana ? ragdollRig.els.bandana.getAttribute("display") : null,
-    };
+  // 单猫那只（分身模式下它是 null）
+  solo: () => {
+    if (!ragdollRig) return null;
+    return { state: ragdollRig.state };
   },
-  // 直接给当前台上所有猫塞一个词，用来验证"词真的写进了 DOM"。
-  // 走的是和业务完全相同的那条路径（setKeyword），不是另开一条。
-  setKeyword: (kw) => {
-    if (ragdollRig) ragdollRig.setKeyword(kw);
-    for (const rec of cast.values()) rec.rig.setKeyword(kw);
-    return petKeywordProbe();
+  // 泡泡：显示没显示、展开的是哪条、每行写着什么状态和标题。
+  // 标题和状态是**从 DOM 读回来的**，不是从入参读的——断言要证明的是
+  // "画面上真的写出来了"，不是"函数被调用了"。
+  bubble: bubbleProbe,
+  // 直接点一行（回归里模拟点击用）。走的是和真实点击完全相同的路径，
+  // 不是另开一条快捷方式——否则测的是快捷方式，不是功能。
+  clickBubble: (id) => {
+    const rec = bubbleRows.get(String(id));
+    if (!rec) return false;
+    rec.row.click();
+    return true;
   },
   // 最近 30 条 agent 事件（主进程记录的）：每个事件叫什么、把会话从什么改成了什么，
   // 还是压根没认出来（how:"ignored"）。查"那里明明在干活为什么显示 idle"先看这个。
