@@ -18,7 +18,7 @@ S1–S10 全部完成。**2026-11-02 补上 S10-5：容器从 Electron 换成 Ru
 | 闸门 | 脚本 | 结果 | 断言数 |
 |---|---|---|---|
 | Tauri 2.12.5 + WebView2 | `npm run verify:tauri` | **92 PASS / 0 FAIL** | 92 |
-| Rust 单测 | `cd src-tauri && cargo test` | **38 passed / 0 failed** | 38 |
+| Rust 单测 | `cd src-tauri && cargo test` | **42 passed / 0 failed** | 42 |
 | 打包（NSIS 安装包） | `npm run verify:bundle:install` | **25 PASS / 0 FAIL** | 25 |
 | 状态回放（真实事件序列） | `npm run verify:diag` | **10 步全中期望** | 10 |
 | Rust 依赖审计 | `cargo audit`（见 SECURITY「依赖审计」） | **0 漏洞 / 2 条警告**（都不在 Windows 构建图里） | 1402 条公告 / 425 个依赖 |
@@ -165,12 +165,38 @@ DSH 的观测被翻成已有的 hook 事件词汇（`SessionStart` / `UserPrompt
 那是**正确行为**）。夹具现造现撤，撤掉并等一拍再往下走，否则那只多出来的猫会把
 后面「场上有几只猫」「attention 播完回 idle」全部带偏。
 
-**「说」的结论（未落地）**：`dsh --profile headless --session-id <id> "消息"` 可以 adopt
-已有会话并发一个新 turn，实测同一 sessionId 下 turn 从 1 递增到 2，退出码 0/1 +
+**「说」的结论（已实测，仍未落地）**：`dsh --profile headless --session-id <id> "消息"`
+可以 adopt 已有会话并发一个新 turn，同一 sessionId 下 turn 从 1 递增，退出码 0/1 +
 `turn_end.reason.kind`（`completed` / `aborted` / `interrupted` / `error`）构成**完整回执**。
 所以它与当年被砍掉的「写信」**性质不同**——hook 是 fire-and-forget、永远 exit 0，
-而这条路失败看得见，不落进硬约束 29 的陷阱。**但还没验并发**：web host 同时持有该会话时
-再 headless 双写是否安全，没测过。这是要接这条线之前的前置条件。
+而这条路失败看得见，不落进硬约束 29 的陷阱。
+
+#### 并发双写：DSH 有独占写句柄，**安全拒绝**而不是交错写
+
+2026-11-04 实测。这是接「说」之前的唯一前置风险（Web UI 开着的时候再 headless 注入）。
+
+**实验方法**：`dsh headless --patch <假端点> --session-id <S>`，假端点只接不回，
+把 turn 卡在 LLM 调用上，于是「另一个进程同时写同一会话」的窗口从几十毫秒变成无限长。
+
+| 实验 | 结果 |
+|---|---|
+| A 挂住，4s 后 B 抢同一会话 | B 立刻退出：`session "…" is already owned by an active write handle`，退出码 1 |
+| **8 个进程同时抢** | **恰好 1 个拿到句柄**（`turn_start`），其余 7 个同一条错误、退出码 1 |
+| 被拒的 7 个有没有污染日志 | **一个字都没写**：日志里只有胜者的 `user/message` |
+| 日志完整性 | 10 帧全解开 / 24 行全合法 JSON / `seq` 0 重复 0 倒退 |
+| A 被 `timeout` 强杀后，C 再进场 | **正常接管**（turn 接上），**没有僵尸锁** |
+| 强杀留下的悬空 turn | 下次打开时被补成 `turn/end(reason: interrupted)`（`dsh-session` 的 repair 机制） |
+
+两条结论：**① 并发不会被写坏，被拒的一方明确报错**——所以接「说」不会毁用户会话；
+**② 强杀不留死锁**，但会留下悬空 `openStep`，要等下次打开会话才被 repair 收尾。
+
+②顺带在桌宠侧补了一道闸：`dsh.rs` 的 `STEP_STALE_MS`（30 分钟），按
+`openStep.startTime` / `pendingCalls` 的**派发时刻**判活，判死就当 idle。
+不加这道闸的话，一条被强杀的 web 会话会让猫永远显示「正在干活」——
+正是用户报过的「没有任务，但桌宠一直在工作」。注意它只对 `dsh web` / 桌面版有意义：
+`dsh headless` 根本不写 `sessionStats`，那条路上的会话永远只显示 idle。
+
+`cargo test` 38 → **42**（+4：悬空步骤、悬空工具调用、时间戳缺失按活着算、解析 startTime/pendingCalls）。
 
 ### S10-10 修「整窗永久穿透」：拖不动、点不了（2026-11-04）
 
@@ -1143,6 +1169,7 @@ spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"]);
 
 | 日期 | 类型 | 内容 |
 |---|---|---|
+| 2026-11-04 | 测试 | **DSH 并发双写：独占写句柄，安全拒绝而非交错写**（S11 追加，见上方「已完成」）。用「只接不回的假端点」把 turn 卡住，把并发窗口从几十毫秒撑成无限长：**8 个进程同时抢同一会话 → 恰好 1 个拿到句柄，其余 7 个报 `already owned by an active write handle` 并退出 1，一个字都没写进日志**；日志 10 帧全解开 / 24 行全合法 / `seq` 0 重复 0 倒退；`timeout` 强杀后 C 能正常接管（**无僵尸锁**），悬空 turn 在下次打开时被 repair 成 `turn/end(interrupted)`。顺带补了 `STEP_STALE_MS` 闸：按 `openStep.startTime` 判活，防止被强杀的 web 会话让猫永远显示 working（用户报过「没有任务但桌宠一直在工作」）。`cargo test` 38 → 42 |
 | 2026-11-04 | 新增 | **接上 DeepSeek Harness，先只做「看」**（S11，见上方「已完成」）。放弃 WorkBuddy 接入线。`src-tauri/src/dsh.rs`（约 700 行含注释与 14 条测试）把 DSH 的投影缓存**翻译**成既有 hook 事件词汇灌进 `Store::apply()`，状态机一行没改——另起一套就是把刚消灭的「同一 agent 两幅画面」重造。**数据源踩了三个坑才找对**：同级 `session_projcache.json` 是 0.1.x 遗留（本机停在 8-31，读它不报错、只安静地一只猫不显示）；0.2.x 改成目录 + 一会话一文件 `{version:7, record:{identity,rows}}`；**会话 id 只在文件名里**。刻意不读多帧 zstd 会话日志（要引解压依赖，取舍见硬约束）。新增 `Meta` 事件让「回填标题」能只改元数据不动状态；`openStep` 步骤间会变 null，所以「这一轮结束」要 2 拍去抖。`verify:tauri` 80→**92**、`cargo test` 23→**38**。DSH 断言**用临时 `DSH_HOME` 夹具**而非本机真实缓存——第一版拿真实缓存做断言，本机所有会话都超 30 分钟窗口，于是必然红，而那其实是正确行为 |
 | 2026-11-03 | 新增 | **README 整体重写**（S10-9 ⑤，`2c6ec41`，+496 / −347）。旧版是 S1–S9 时期写的，开头还是 `npm install` / `npm start`（指向**已经删掉的 Electron**），大半篇幅在讲"每个阶段做了什么"。改成「使用者先看、开发者后看」：这是什么 → 三分钟跑起来 → **代码签名**（新增一章：Authenticode 三层、三条路的价格与地区、Azure/OV/EV 各自能不能立刻不弹 SmartScreen、环境变量怎么配、`--verify` 怎么读、自签名怎么进受信根）→ 接 agent（三家 matcher 差异）→ 怎么用 → 端点 → 主题 → 回归 → 内存实话 → 限制 → 踩坑。**文档里留一条指向已删容器的命令，比没有文档更坏**：照着抄的人第一步就失败 |
 | 2026-11-03 | 新增 | **发布物接上签名**（S10-9 ②，`8a4a9bd`）。`scripts/sign-release.js`（128 行）由 `bundle.windows.signCommand` 以 `../scripts/sign-release.js %1` 调用，证书走 `CLAWD_SIGN_PFX`(+密码) 或 `CLAWD_SIGN_THUMBPRINT`，强制 RFC3161 时间戳（没有它证书一过期，旧安装包立刻变无效签名）。两条硬规则：**一个都没配 = 响亮跳过（退出 0）**，**配了却签失败 = 退出非 0 让打包红**——不允许"以为签了其实没签"。两条跑出来才知道的硬性事实：`signCommand` 的 cwd 是 `src-tauri/`（写相对路径会找不到脚本）；`cargo tauri build` 结束后**裸 exe 不带签名**（打包器在签名后又覆写了它，日志说签了、产物 `NotSigned`），`npm run bundle` 末尾因此串了一刀补签。本机用自签名证书端到端验过，**P2 只解决一半**（见安全状态表 S10-9 行） |

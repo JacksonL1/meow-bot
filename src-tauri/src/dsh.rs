@@ -75,6 +75,20 @@ const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 /// 连续几拍都 Idle 才算这一轮真的结束了（见文件头"为什么去抖"）。
 const IDLE_POLLS_TO_STOP: u32 = 2;
 
+/// 一个 step / 一次工具调用"还活着"的最长时限。
+///
+/// 为什么需要这条：投影缓存是事件的折叠结果，**它不知道写它的进程已经死了**。
+/// 实测（2026-11-04）：一个跑到一半被 `timeout` 杀掉的进程，会留下一个悬空的
+/// `openStep`；DSH 会在**下一次打开这个会话时**补一条 `turn/end(interrupted)` 把它
+/// 收尾（见 `dsh-session/lib/types/repair.d.ts`），但在那之前，投影里那条会话
+/// 一直是"正在干活"。
+///
+/// 桌宠要是照单全收，就会永远显示 working——正是用户报过的
+/// 「没有任务，但桌宠一直在工作」。所以这里按**数据自带的时间戳**判活，
+/// 不是按文件 mtime：`openStep.startTime` / `pendingCalls` 的值都是派发时刻，
+/// 一个 step 开了半小时还没收尾，只可能是进程没了（正常一次 step 也就几十秒）。
+const STEP_STALE_MS: i64 = 30 * 60 * 1000;
+
 /// 头巾上只有那么大地方，state.rs 那边也会再截一次；这里先截是为了
 /// 让"关键词从哪来"这件事在本文件里一目了然。
 const KEYWORD_CHARS: usize = 8;
@@ -140,8 +154,10 @@ pub struct Obs {
     pub open_step: bool,
     /// openStep 里 firstTokenTime 的时间戳；None = 还没出第一个 token。
     pub first_token_at: Option<i64>,
-    /// 还没落地的工具调用数。工具期 openStep 可能已经是 null，靠它补。
-    pub pending_calls: usize,
+    /// openStep 里 startTime：这一步是什么时候开始的。用来判"这一步是不是早就死了"。
+    pub step_started_at: Option<i64>,
+    /// 还没落地的工具调用，记的是**派发时刻**（原样来自 `pendingCalls` 的值）。
+    pub pending_at: Vec<i64>,
     /// plan 模式在跑（它自己就是一个"在干活"的理由）。
     pub plan_active: bool,
     /// 最后一次用户提问题的时刻（ms）。这是"新一轮"唯一可靠的信号。
@@ -157,12 +173,26 @@ pub struct Obs {
 }
 
 impl Obs {
-    pub fn phase(&self) -> Phase {
+    /// 这一拍该算成什么状态。`now` 显式传进来，是为了让"悬空步骤"这件事可测——
+    /// 掺一个 `now_ms()` 在函数里，测试就只能靠 sleep 去撞时间。
+    pub fn phase_at(&self, now: i64) -> Phase {
+        let dead = |t: i64| {
+            // 时间戳缺失（0/负数）时判不了，按"还活着"处理：
+            // 宁可短暂多显示一会儿 working，也不要凭空说一条会话干完了。
+            t > 0 && now.saturating_sub(t) > STEP_STALE_MS
+        };
+
         // 工具在跑 / plan 在跑，都是"确实在干活"，压过模型侧的判断。
-        if self.pending_calls > 0 || self.plan_active {
+        // 但只有**还活着**的工具调用才算数（见 STEP_STALE_MS）。
+        if self.plan_active || self.pending_at.iter().any(|t| !dead(*t)) {
             return Phase::Working;
         }
         if !self.open_step {
+            return Phase::Idle;
+        }
+        // step 开着，但它的开始时间已经老到不可能是活的了：写它的进程没了，
+        // 而 DSH 的 repair 要等下次打开会话才补收尾。这中间不能让猫一直喊在干活。
+        if self.step_started_at.map(dead).unwrap_or(false) {
             return Phase::Idle;
         }
         // 有 step 但还没有第一个 token = 在等首字。这是 thinking 的**真实含义**，
@@ -172,6 +202,10 @@ impl Obs {
         } else {
             Phase::Thinking
         }
+    }
+
+    pub fn phase(&self) -> Phase {
+        self.phase_at(now_ms())
     }
 
     /// 头巾上的词。v1 直接取标题前几个字——DSH 的 title 是"这一轮在干什么"
@@ -215,11 +249,11 @@ pub fn parse_session(id: &str, raw: &str, mtime_ms: i64) -> Option<Obs> {
         .and_then(|x| x.get("openStep"))
         .filter(|x| !x.is_null());
 
-    let pending_calls = stats
+    let pending_at: Vec<i64> = stats
         .and_then(|x| x.get("pendingCalls"))
         .and_then(|x| x.as_object())
-        .map(|m| m.len())
-        .unwrap_or(0);
+        .map(|m| m.values().filter_map(|v| v.as_i64()).collect())
+        .unwrap_or_default();
 
     // headless 一次性会话在投影里只有 title，没有 sessionListMetadata，
     // 于是没有 lastPromptAt。那种情况下用文件 mtime 兜底：
@@ -246,7 +280,10 @@ pub fn parse_session(id: &str, raw: &str, mtime_ms: i64) -> Option<Obs> {
         first_token_at: open_step
             .and_then(|x| x.get("firstTokenTime"))
             .and_then(|x| x.as_i64()),
-        pending_calls,
+        step_started_at: open_step
+            .and_then(|x| x.get("startTime"))
+            .and_then(|x| x.as_i64()),
+        pending_at,
         plan_active: row(rows, "plan")
             .and_then(|p| p.get("active"))
             .and_then(|b| b.as_bool())
@@ -638,7 +675,9 @@ mod tests {
             cwd: Some("E:\\work\\proj".into()),
             open_step: open,
             first_token_at: first_token,
-            pending_calls: pending,
+            // 默认"刚刚开始"，也就是活着。判死的用例自己把它改老。
+            step_started_at: if open { Some(t0()) } else { None },
+            pending_at: vec![t0(); pending],
             plan_active: false,
             // 必须是"刚刚"。reconcile 会把超出 ACTIVE_WINDOW_MS 的 idle 会话滤掉，
             // 写成固定的小数字（比如 1000）等于断言"1970 年那次提问还在活跃"。
@@ -737,6 +776,59 @@ mod tests {
     fn plan_active_counts_as_working() {
         let mut o = obs("s", false, None, 0);
         o.plan_active = true;
+        assert_eq!(o.phase(), Phase::Working);
+    }
+
+    /// 跑着跑着被强杀的会话：投影里会留下悬空的 openStep。
+    /// DSH 要等**下次打开这个会话**才补 `turn/end(interrupted)`，
+    /// 在那之前桌宠要是照单全收，就会永远显示"正在干活"。
+    const SAMPLE_DANGLING: &str = r#"{
+      "version": 7,
+      "record": {
+        "identity": { "cwd": "E:\\w" },
+        "rows": {
+          "sessionStats": { "ver": 1, "seq": 9, "val": {
+            "turns": 1, "steps": 1, "lastTurn": 1,
+            "openStep": { "turn": 1, "step": 1, "startTime": 1700000000000, "firstTokenTime": 1700000000500 },
+            "pendingCalls": { "call-a": 1700000001000, "call-b": 1700000002000 } } },
+          "sessionListMetadata": { "ver": 1, "seq": 9, "val": { "blank": false, "lastPromptAt": 1700000000000 } },
+          "title": { "ver": 1, "seq": 9, "val": "跑一半被杀" }
+        }
+      }
+    }"#;
+
+    #[test]
+    fn parses_step_start_and_pending_dispatch_times() {
+        let o = parse_session("s", SAMPLE_DANGLING, 0).unwrap();
+        // openStep.startTime 与 pendingCalls 的值（派发时刻）都要留住——
+        // 判"这一步是不是早就死了"全靠它们，丢了就只能看文件 mtime 猜。
+        assert_eq!(o.step_started_at, Some(1_700_000_000_000));
+        assert_eq!(o.pending_at, vec![1_700_000_001_000, 1_700_000_002_000]);
+        // 刚写下的时候确实是"在干活"
+        assert_eq!(o.phase_at(1_700_000_002_000), Phase::Working);
+    }
+
+    #[test]
+    fn dangling_step_is_not_working_forever() {
+        let o = parse_session("s", SAMPLE_DANGLING, 0).unwrap();
+        // 一步开了半小时还没收尾：进程没了。
+        let much_later = 1_700_000_000_000 + STEP_STALE_MS + 60_000;
+        assert_eq!(o.phase_at(much_later), Phase::Idle, "悬空步骤不许一直挂着 working");
+    }
+
+    #[test]
+    fn dangling_pending_call_is_not_working_forever() {
+        let mut o = obs("s", false, None, 0);
+        o.pending_at = vec![t0() - STEP_STALE_MS - 60_000];
+        assert_eq!(o.phase(), Phase::Idle, "悬空的工具调用也不许一直挂着 working");
+    }
+
+    // 时间戳缺失（0）时判不了一具死活，按"还活着"处理：
+    // 宁可短暂多显示一会儿 working，也不要凭空宣布一条会话干完了。
+    #[test]
+    fn missing_timestamps_are_treated_as_alive() {
+        let mut o = obs("s", false, None, 0);
+        o.pending_at = vec![0];
         assert_eq!(o.phase(), Phase::Working);
     }
 
