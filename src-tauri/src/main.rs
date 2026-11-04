@@ -10,6 +10,7 @@
 //   Menu.popup                        → tauri::menu 的 ContextMenu
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod dsh;
 mod permission;
 mod risk;
 mod server;
@@ -58,6 +59,10 @@ struct AppState {
     /// ticks 涨而 pushes 不涨 = 线程活着但没发出（窗口不可见 / 变化太小）。
     gaze_ticks: AtomicU64,
     gaze_pushes: AtomicU64,
+    /// DSH 适配层的最近一次观测。探测线程每秒刷新，`dsh_state` 命令读它。
+    /// 存的是**视图快照**而不是 Probe 本体：Probe 的 prev 表要独占，
+    /// 让命令去抢同一把锁，只会让调试动作干扰正在跑的探测。
+    dsh: Mutex<dsh::ProbeView>,
 }
 
 fn clamp(v: f64, lo: f64, hi: f64) -> f64 {
@@ -423,6 +428,19 @@ fn hit_rects(window: WebviewWindow, st: tauri::State<'_, AppState>, rects: Vec<[
     Ok(())
 }
 
+/// 只读诊断：DSH 适配层现在看到了什么。
+///
+/// 用户说"接上 DSH 了但猫不动"时，这一条能一次区分三种情况：
+///   installed=false          路径不对（DSH_HOME / USERPROFILE）
+///   polls 在涨但 reads 不涨   文件没变过——不是我们的问题，是那边真的没动静
+///   reads 在涨 feeds=0        读到了但没产出事件——会话全是 blank 或全在窗口外
+#[tauri::command]
+fn dsh_state(window: WebviewWindow, st: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
+    only(&window, W_MAIN)?;
+    let v = st.dsh.lock().unwrap().clone();
+    serde_json::to_value(v).map_err(|e| e.to_string())
+}
+
 /// 只读诊断：用户报"点不到"时，这一条能一次说清是"没命中"还是"没人关穿透"。
 #[tauri::command]
 fn hit_state(window: WebviewWindow, app: AppHandle, st: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
@@ -654,6 +672,43 @@ fn spawn_timers(app: AppHandle) {
             let st = app.state::<AppState>();
             let snap = st.store.lock().unwrap().snapshot();
             let _ = app.emit("cast", &snap.sessions);
+        });
+    }
+
+    // ---- DSH 适配层 1s ----
+    //
+    // 这是第二个**事件来源**（第一个是 server.rs 的 /state，hook 在用）。
+    // 两者最终都走 Store::apply，所以仲裁、oneshot 时长、睡意计时完全一致。
+    //
+    // 为什么必须在这里 emit：apply() 内部会调 tick()，而 tick() 把 last_visual
+    // 一并更新了。也就是说上面那个 250ms 的心跳线程**看不到**这次变化
+    // （它比较的就是 last_visual），不在这里推，这一帧就永远不发出去。
+    {
+        let app = app.clone();
+        std::thread::spawn(move || {
+            let mut probe = dsh::Probe::new();
+            loop {
+                std::thread::sleep(dsh::Probe::interval());
+                let events = probe.poll();
+                if !events.is_empty() {
+                    let st = app.state::<AppState>();
+                    let (snap, changed) = {
+                        let mut s = st.store.lock().unwrap();
+                        let mut changed = false;
+                        for p in &events {
+                            let (_, c) = s.apply(p);
+                            changed = changed || c;
+                        }
+                        (s.snapshot(), changed)
+                    };
+                    if changed {
+                        let _ = app.emit("state", &snap);
+                    }
+                }
+                // 诊断视图每拍都刷：polls / reads 这两个计数本身要能看出"线程还在跑"，
+                // 只在有事件时更新的话，一个安静的 DSH 会看起来像死了。
+                *app.state::<AppState>().dsh.lock().unwrap() = probe.view();
+            }
         });
     }
 
@@ -920,6 +975,7 @@ fn main() {
                 ignore: AtomicBool::new(true),
                 gaze_ticks: AtomicU64::new(0),
                 gaze_pushes: AtomicU64::new(0),
+                dsh: Mutex::new(dsh::ProbeView::default()),
             });
 
             // ---- 单实例的另一半：等第二份进程来捅 ----
@@ -978,6 +1034,7 @@ fn main() {
             mouse_ignore,
             hit_rects,
             hit_state,
+            dsh_state,
             pet_hover,
             app_quit,
             pet_menu,

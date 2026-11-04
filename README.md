@@ -262,7 +262,33 @@ Import-Certificate -FilePath .\clawd-starter-selfsign.cer `
 
 ## 接上你的 agent
 
-hook 是把 agent 事件送进桌宠的唯一通道，由 `hooks/install.js` 写进 agent 的全局配置。
+有**两条互不相干**的路能把 agent 的状态送进桌宠，选一条就行：
+
+| | hook（HTTP） | DeepSeek Harness（只读文件） |
+|---|---|---|
+| 支持 | Claude Code / CodeBuddy | DSH `web` / 桌面版 |
+| 原理 | agent 跑 hook → `POST /state` | 主进程 1s 轮询 DSH 的投影缓存 |
+| 要改 agent 配置 | **要**（下面那套备份/原子写） | **不要**，只读 |
+| 能看到 | 工具名、权限请求、压缩 | 状态、标题、目录、权限档位（**没有工具名**） |
+
+### 一、DeepSeek Harness：不用配置，装上即可
+
+桌宠会自动去找 `$DSH_HOME`（默认 `%USERPROFILE%\.dsh`）下的
+`storages/session_projcache/sessions/<id>.json`，**一会话一文件**，只读。
+
+- 什么都不用装、不用改。DSH 没装就当没这回事，零开销。
+- `dsh web` / 桌面版的会话状态完整：`thinking`（在等首字）/ `working`（在出字或跑工具）/
+  `attention`（这一轮做完了）/ `idle` / `sleeping`。
+- `dsh headless "…"` 这类一次性会话在投影里**只有标题**，没有统计行，
+  所以只能显示成 idle（它本来就是跑完就退的东西）。
+- 看板上**工具名那一格是空的**：投影里的 `pendingCalls` 只有 `callId → 派发时刻`，
+  不含工具名。这是刻意留的诚实缺口，不是没接完。
+
+排查用 `window.clawd.dshState()`（见下面「调试入口」）。
+
+### 二、hook：把 agent 事件送进来
+
+hook 由 `hooks/install.js` 写进 agent 的全局配置。
 它是**整个项目里唯一会改用户配置的地方**：
 
 1. 先备份 `settings.json.clawd-backup-<时间戳>`
@@ -430,8 +456,8 @@ themes/ragdoll/
 
 | 闸门 | 命令 | 现在的数 | 它回答什么 |
 |---|---|---|---|
-| UI | `npm run verify:tauri` | **80 PASS / 0 FAIL** | 二进制跑起来之后，行为对不对 |
-| 单测 | `cd src-tauri && cargo test` | **23 passed** | 状态机 / 风险评级 / 主题校验的纯逻辑 |
+| UI | `npm run verify:tauri` | **92 PASS / 0 FAIL** | 二进制跑起来之后，行为对不对 |
+| 单测 | `cd src-tauri && cargo test` | **38 passed** | 状态机 / 风险评级 / 主题校验 / DSH 翻译的纯逻辑 |
 | 打包 | `npm run verify:bundle` | **10 PASS**（`--install` 再 +15） | 用户拿到手的那一包，装得上、卸得干净 |
 | 回放 | `npm run verify:diag` | **10 步全中** | 真实事件序列走一遍，状态有没有掉 |
 | 审计 | `cargo audit` | **0 漏洞 / 2 条警告** | 1402 条公告 × 425 个依赖 |
@@ -441,6 +467,10 @@ themes/ragdoll/
 - **`verify:tauri` 会给自己开一个临时端点文件（`CLAWD_PORT_FILE` 指到 tmp），所以开着桌宠也能跑。**
   但它有一条"陈旧二进制"守卫：release exe 比源码旧就直接拒跑并提示 `cargo build --release`——
   拿旧二进制跑测试得到的绿是假的。
+- **`verify:tauri` 里的 DSH 断言用临时 `DSH_HOME` 夹具，不碰你真实的 `~/.dsh`。**
+  夹具是现造现撤的：造出来 → 断言 `/state` 里出现它、猫变 working → 改成 idle 断言结束发 `Stop`
+  → 撤掉再等一拍。**拿真实缓存做断言是错的**——那里面有几个会话、是不是还在活跃窗口内
+  由你的历史决定，闸门会变成看运气（第一版就是这么红的，而那其实是正确行为）。
 - **`verify:diag` 的位置最特殊**：它起一份临时实例，把现场观察到的一轮事件照原样喂回去
   （SessionStart → UserPromptSubmit → 补发 SessionStart → 工具 → PreCompact → 压缩后 SessionStart
   → UserPromptSubmit → Stop → SessionEnd），每一步都对**服务端快照**和**渲染层画面**两个读数。
@@ -481,6 +511,16 @@ WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333 npm start
 | `springs()` / `eyeOpen()` | 28 个弹簧通道的当前值 / 睁眼程度 0–1（证明"有过渡"只能靠它） |
 | `cast()` / `solo()` | 台上有几只猫、各自演什么、头巾上写的什么词、聚焦谁 |
 | `desk()` / `variant()` / `builds()` | working 桌面的进度 / 当前播第几套资产 / 重建过几次 |
+| `window.clawd.dshState()` | DSH 适配层看到了什么（见下） |
+
+`window.clawd.dshState()` 是排查「接了 DSH 但猫不动」的第一站，四个数一次说清死在哪一步：
+
+| 现象 | 含义 |
+|---|---|
+| `installed: false` | `$DSH_HOME` / `dir` 路径不对（没装 DSH，或 `DSH_HOME` 指错了） |
+| `polls` 在涨、`reads` 不涨 | 线程活着，但那个目录里的文件真的没变过 |
+| `reads` 在涨、`feeds == 0` | 读到了却没产出事件：会话全是 `blank`，或全在 30 分钟活跃窗口外 |
+| `sessions[].has_stats == false` | 这条会话的投影里没有统计行（`dsh headless` 就是这样），状态只能是 idle |
 
 `scripts/cdp.js` 是三个回归脚本共用的那一段——**同一套判据必须用同一段代码丢进页面**，
 否则两边的绿没有可比性。
@@ -502,6 +542,7 @@ clawd-starter/
 │   └── src/
 │       ├── main.rs            窗口、菜单、托盘、IPC 命令、定时器
 │       ├── state.rs           状态机 + 多会话仲裁 + 事件账本
+│       ├── dsh.rs             DeepSeek Harness 适配层（读投影缓存 → 翻译成事件）
 │       ├── server.rs          本地 HTTP（四道锁）
 │       ├── permission.rs      权限裁决台（settle() 是唯一出口）
 │       ├── risk.rs            命令风险评级（纯函数，无副作用）
@@ -546,6 +587,11 @@ WebView2 那 6 个子进程是系统共享的渲染引擎——**换容器换不
   要点「更多信息 → 仍要运行」。这是签名问题不是 bug，见[代码签名](#代码签名)
 - **看板的「模型 / 上下文用量」没有做**：hook 的 payload 里没有这两个字段，
   硬编一个数字出来比不显示更糟
+- **DSH 侧看不到工具名**：投影缓存里 `pendingCalls` 是 `callId → 派发时刻`，不含工具名。
+  hook 那条路能看到（`tool_name`），DSH 这条路看不到
+- **DSH 的 `headless` 一次性会话只能显示成 idle**：它的投影里只有标题，没有统计行
+- **DSH 只做「看」，没做「说」**：桌宠不会把消息送回 agent。这条路技术上可行
+  （`dsh --profile headless --session-id <id> "…"` 有完整回执），但还没验并发双写，所以没接
 - **主题只支持 SVG**，不支持 GIF/APNG/WebP；也不能用 CSS 动画（白名单拒了 `<style>` 和 SMIL）
 - **一个实例、优先固定端口 23333**，与主仓库 `clawd-on-desk` 不能同时跑
 - **权限请求只在内存里**，不落盘：重启就没了，也没有决策历史
@@ -553,6 +599,28 @@ WebView2 那 6 个子进程是系统共享的渲染引擎——**换容器换不
 - **云签名没接**：只支持 PFX 与证书库指纹
 
 ## 踩坑记录
+
+**接了 DSH 之后「一切正常」但一只猫都不显示**
+
+2026-11-04 接 DeepSeek Harness 时踩的。代码写完、单测全绿、真实进程里 `dshState()` 报
+`installed: true`、`reads` 在涨、4 条会话都解析出了标题——**状态机里却一条会话都没有**。
+
+原因是读错了文件。`~/.dsh/storages/` 下并排躺着两个东西：
+
+```text
+session_projcache.json     ← 8 月 31 日，0.1.x 留下的单文件全量快照
+session_projcache/         ← 11 月 4 日，0.2.x 用的目录，一会话一文件
+```
+
+读的是前者。它格式合法、字段齐全、**解析不报错**，只是里面的会话全是三个月前的，
+全部落在「30 分钟内才活跃」的窗口外，被过滤得干干净净。**最坏的一种失败：不报错，只是什么都不发生。**
+
+新版还有三个只有拆开文件才知道的事实：形状多了 `record` 一层（`{version, record:{identity, rows}}`）、
+**会话 id 只在文件名里**（record 内没有）、`dsh headless` 跑出来的会话**只有 `title`**，
+连 `lastPromptAt` 都没有（所以要用文件 mtime 兜底）。
+
+教训写在台账硬约束 43 里：**读别人的数据目录，先 `ls -la` 看 mtime**——
+并排两个同名物，几乎总有一个是废弃的。
 
 **拖不动、点不了、双击和右键全没反应（整窗永久穿透）**
 

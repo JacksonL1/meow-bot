@@ -131,6 +131,9 @@
     // 等它回话就是死锁（2026-11-04 的手感事故，见 main.rs 的 hit_rects 注释）。
     setHitRects: (rects) => send("hit_rects", { rects: rects || [] }),
     hitState: () => call("hit_state"),
+    // 只读诊断：DSH 适配层此刻看到了什么（装没装、读没读到、产出过几条事件）。
+    // 与 hitState 同一个用途——用户说"接上了但猫不动"时，一次说清死在哪一步。
+    dshState: () => call("dsh_state"),
     // 鼠标停上去只是"请求"醒来，真正改状态的是主进程的状态机。
     wake: () => send("pet_hover"),
     quit: () => send("app_quit"),

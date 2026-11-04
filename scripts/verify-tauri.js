@@ -40,6 +40,48 @@ const TMP_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-verify-tauri-"));
 const PORT_FILE = path.join(TMP_ROOT, "clawd-starter.port");
 process.env.CLAWD_PORT_FILE = PORT_FILE;
 
+// ---------- DSH 夹具 ----------
+// 为什么不拿本机真实的 ~/.dsh 做断言：那里面有哪些会话、它们是不是"还在活跃窗口内"，
+// 完全由用户的历史决定。用它做断言，闸门就成了看运气——本机所有会话都超过 30 分钟
+// 没动静时必然 FAIL，而那是**正确行为**。
+// 所以造一个临时 DSH_HOME，把 目录扫描 → 解析 → 翻译 → 状态机 → /state 整条链跑通；
+// 顺带也就验了 DSH_HOME 这个环境变量覆盖真的生效。
+const DSH_FIXTURE = path.join(TMP_ROOT, "dsh-home");
+const DSH_FIXTURE_ID = "session-dsh-verify";
+
+function writeDshFixture(phase, promptAt) {
+  const dir = path.join(DSH_FIXTURE, "storages", "session_projcache", "sessions");
+  fs.mkdirSync(dir, { recursive: true });
+  const openStep =
+    phase === "idle"
+      ? null
+      : {
+          turn: 1,
+          step: 1,
+          startTime: Date.now(),
+          // phase === "thinking" 时首 token 还没落地，这正是它和 working 的分界
+          firstTokenTime: phase === "thinking" ? null : Date.now(),
+        };
+  const record = {
+    version: 7,
+    record: {
+      identity: { createdAt: Date.now(), cwd: "E:\\JacksonLee\\project\\clawd-starter" },
+      rows: {
+        sessionStats: {
+          ver: 1,
+          seq: 9,
+          val: { turns: 1, steps: 1, lastTurn: 1, llmMs: 10, toolMs: 0, openStep, pendingCalls: {} },
+        },
+        title: { ver: 1, seq: 9, val: "DSH 验证会话" },
+        sessionListMetadata: { ver: 1, seq: 9, val: { blank: false, lastPromptAt: promptAt } },
+        plan: { ver: 2, seq: 9, val: { active: false } },
+        permissions: { ver: 1, seq: 9, val: { preset: "read-only" } },
+      },
+    },
+  };
+  fs.writeFileSync(path.join(dir, DSH_FIXTURE_ID + ".json"), JSON.stringify(record));
+}
+
 const RELEASE = process.argv.includes("--release");
 const EXE = path.join(
   ROOT,
@@ -237,12 +279,18 @@ async function main() {
     fs.unlinkSync(PORT_FILE);
   } catch {}
 
+  // 启动前**不要**摆夹具：那份 "working" 的会话会从第一秒就多出一只猫，
+  // 把后面所有"场上有几只猫 / attention 播完回 idle"的断言全部带偏。
+  // 夹具在 DSH 那一段里现造现撤（见下文）。
+
   const child = spawn(EXE, [], {
     cwd: ROOT,
     env: {
       ...process.env,
       CLAWD_PERMISSION_TIMEOUT_MS: String(BUBBLE_TIMEOUT_MS),
       CLAWD_PORT_FILE: PORT_FILE,
+      // 指向临时夹具，不碰用户真实的 ~/.dsh
+      DSH_HOME: DSH_FIXTURE,
       // WebView2 认这个变量：注入 Chromium 命令行开关。
       // 这是 Tauri 版能被 CDP 驱动的前提，也是当年整套 Electron 回归能平移过来的原因。
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${CDP_PORT}`,
@@ -289,9 +337,9 @@ async function main() {
     ok("页面加载完成", (await R.eval("document.readyState")) === "complete");
     ok("宿主标记为 tauri（桥真的装了，不是空转）", (await R.eval("window.__CLAWD_HOST__")) === "tauri");
     ok(
-      "window.clawd 14 个动作齐全",
+      "window.clawd 15 个动作齐全",
       (await R.eval(
-        "['onState','onCast','onGaze','dragStart','dragEnd','setIgnoreMouse','setHitRects','hitState','wake','quit','petMenu','toggleDashboard','getTheme','onTheme'].every(k=>typeof (window.clawd||{})[k]==='function')"
+        "['onState','onCast','onGaze','dragStart','dragEnd','setIgnoreMouse','setHitRects','hitState','dshState','wake','quit','petMenu','toggleDashboard','getTheme','onTheme'].every(k=>typeof (window.clawd||{})[k]==='function')"
       )) === true
     );
     ok(
@@ -580,6 +628,81 @@ async function main() {
       await R.eval("window.clawd.setHitRects(" + JSON.stringify(realRects) + ")");
       await sleep(300);
     }
+
+    // ---- DSH 适配层（S11）----
+    // 这条路与 hook 那条 HTTP 路**完全无关**：它读的是 DSH 的投影缓存。
+    // 与上面命中区同一套说法——全绿只证明判据连着，真机上猫动没动仍要人工看。
+    const d1 = await R.eval("window.clawd.dshState()");
+    ok(
+      "dshState 返回探测视图（home / dir / polls / reads / feeds 都有）",
+      d1 && typeof d1.polls === "number" && typeof d1.reads === "number" && typeof d1.feeds === "number" && "dir" in d1,
+      JSON.stringify({ home: d1 && d1.home, installed: d1 && d1.installed })
+    );
+    // Windows 路径大小写/分隔符不敏感，直接比字符串会给出假失败
+    const normPath = (p) => String(p || "").replace(/[\\/]+/g, "\\").replace(/\\$/, "").toLowerCase();
+    ok(
+      "DSH_HOME 覆盖生效（接的是夹具，没碰真实 ~/.dsh）",
+      normPath(d1 && d1.home) === normPath(DSH_FIXTURE),
+      (d1 && d1.home) || ""
+    );
+
+    await sleep(2200);
+    const d2 = await R.eval("window.clawd.dshState()");
+    ok("DSH 探测线程在跑（polls 在涨）", Number(d2.polls) > Number(d1.polls), `${d1.polls} → ${d2.polls}`);
+    ok("DSH 探测没报错", !d2.error, d2.error || "无");
+
+    // 现造夹具。此时目录是新出现的——顺带验了"目录晚于进程启动才存在"这条路。
+    const dshPromptAt = Date.now();
+    writeDshFixture("working", dshPromptAt);
+    await sleep(2200);
+
+    const d3 = await R.eval("window.clawd.dshState()");
+    ok("DSH 投影缓存读到了（reads ≥ 1）", Number(d3.reads) >= 1, `reads=${d3.reads}`);
+
+    const seen = (d3.sessions || []).find((s) => s.id === DSH_FIXTURE_ID);
+    ok(
+      "DSH 会话被认出来了（id / 标题 / 目录 / 在跑）",
+      !!seen && seen.title === "DSH 验证会话" && !!seen.cwd && seen.open_step === true,
+      JSON.stringify(seen)
+    );
+
+    // 端到端第一段：夹具是 working，状态机就该是 working。
+    const st1 = await post("/state", null, ep.token, { method: "GET" });
+    let snap1 = null;
+    try {
+      snap1 = JSON.parse(st1.body);
+    } catch (_) {}
+    const row1 = ((snap1 && snap1.sessions) || []).find((s) => s.id === DSH_FIXTURE_ID);
+    ok("DSH 会话进了状态机（/state 里能看到它）", !!row1, row1 ? JSON.stringify(row1) : st1.body.slice(0, 200));
+    ok("DSH 会话让猫变成 working", !!snap1 && snap1.visual === "working", (snap1 && snap1.visual) || "null");
+    ok(
+      "标题与关键词跟着进来了（看板/头巾要用）",
+      !!row1 && row1.title === "DSH 验证会话" && row1.keyword === "DSH 验证会话",
+      JSON.stringify({ title: row1 && row1.title, keyword: row1 && row1.keyword })
+    );
+
+    // 端到端第二段：把夹具改回 idle，这一轮就该被判定为"结束"。
+    // 这是整个适配层最容易误判的一处（openStep 在步骤之间也会变 null），
+    // 所以必须让它在真实进程中跑一遍，而不是只靠单测。
+    writeDshFixture("idle", dshPromptAt);
+    await sleep(3800);
+    const st2 = await post("/state", null, ep.token, { method: "GET" });
+    let snap2 = null;
+    try {
+      snap2 = JSON.parse(st2.body);
+    } catch (_) {}
+    const stopped = ((snap2 && snap2.recent) || []).some(
+      (e) => e.event === "Stop" && String(e.sid).startsWith("session-")
+    );
+    ok("DSH 会话这一轮结束后发了 Stop", stopped, ((snap2 && snap2.recent) || []).map((e) => e.event).join(","));
+    ok("结束后猫不再挂着 working", !!snap2 && snap2.visual !== "working", (snap2 && snap2.visual) || "null");
+
+    // 撤掉夹具并等一拍，把状态机还原成干净状态：
+    // 后面还有"场上有几只猫""attention 播完回 idle"这些断言，不能被这只猫带偏。
+    fs.rmSync(DSH_FIXTURE, { recursive: true, force: true });
+    await sleep(1800);
+    const after = await R.eval("window.clawd.dshState()");
+    ok("夹具撤掉后探测不再报它（SessionEnd 已收尾）", (after.sessions || []).every((s) => s.id !== DSH_FIXTURE_ID), (after.sessions || []).map((s) => s.id).join(","));
 
     await R.eval("window.petDebug.gaze({x:1,y:1}, true)");
     await sleep(500);

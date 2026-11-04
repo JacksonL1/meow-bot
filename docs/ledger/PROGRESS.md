@@ -17,8 +17,8 @@ S1–S10 全部完成。**2026-11-02 补上 S10-5：容器从 Electron 换成 Ru
 
 | 闸门 | 脚本 | 结果 | 断言数 |
 |---|---|---|---|
-| Tauri 2.12.5 + WebView2 | `npm run verify:tauri` | **80 PASS / 0 FAIL** | 80 |
-| Rust 单测 | `cd src-tauri && cargo test` | **23 passed / 0 failed** | 23 |
+| Tauri 2.12.5 + WebView2 | `npm run verify:tauri` | **92 PASS / 0 FAIL** | 92 |
+| Rust 单测 | `cd src-tauri && cargo test` | **38 passed / 0 failed** | 38 |
 | 打包（NSIS 安装包） | `npm run verify:bundle:install` | **25 PASS / 0 FAIL** | 25 |
 | 状态回放（真实事件序列） | `npm run verify:diag` | **10 步全中期望** | 10 |
 | Rust 依赖审计 | `cargo audit`（见 SECURITY「依赖审计」） | **0 漏洞 / 2 条警告**（都不在 Windows 构建图里） | 1402 条公告 / 425 个依赖 |
@@ -105,6 +105,72 @@ S8 的「跟桌宠说话」**2026-10-30 整套删掉了**（理由见下方被�
 - [x] ~~状态时长（25s 发呆 / 60s 入睡）仍写死在 `state.js`~~ → **已进 `theme.json.timings`**（2026-10-28）。注意原来写的「25s 发呆」是个误会：那个 `IDLE_AFTER_MS` **从头没有消费者**，连配置项都算不上，已删（见 DEVLOG）。搬过去的是 `oneshot` 三个时长 + `sleepAfterMs`
 
 ## 已完成
+
+### S11 接上 DeepSeek Harness：先只要「看」（2026-11-04）
+
+用户放弃 WorkBuddy 接入线，改用 **DeepSeek Harness（DSH）**，明确要求「**先保证能看，后面视情况再加说**」。
+所以本轮只做**读**，一个字都不往 DSH 里送。「说」的可行性已探明（见下），但不落地。
+
+**架构决定：翻译，而不是另起一套状态机。**
+
+DSH 的观测被翻成已有的 hook 事件词汇（`SessionStart` / `UserPromptSubmit` / `PreToolUse` /
+`Stop` / `SessionEnd` / `Meta`），灌进 `Store::apply()`。这样优先级、oneshot 时长、睡意计时、
+多会话仲裁**一行都不用重写**。反过来说，另写一套状态机就是把 2026-11-03 刚消灭掉的
+「同一 agent 演出两幅画面」重新造出来。
+
+**数据源：`$DSH_HOME/storages/session_projcache/sessions/<id>.json`（一会话一文件）。**
+
+这条路径是**踩了坑才找对的**，三个事实都不在文档里：
+
+1. 同级的 `session_projcache.json`（单文件、全量）是 **0.1.x 的遗留**，本机那份停在 2026-08-31。
+   读它不会报错，只会安静地一只猫都不显示——**比报错更难查**。
+2. 0.2.x 改成目录 + 每会话一个文件，形状 `{ version: 7, record: { identity, rows } }`，
+   **会话 id 只存在于文件名**，record 里没有。
+3. 每会话一个文件反而更好：按 `(mtime, size)` 只重读变过的那个，目录里躺几十个也不心疼。
+
+**刻意不读 `session.v4.jsonl.zstd`**：那是 append-only 的多帧 zstd（每追加一次一个 frame，
+单次解压只出第一帧——实测 14095 字节只解出 1 行，按 magic `28 B5 2F FD` 切帧后才是 42 帧 / 85 行）。
+解压要引 zstd/ruzstd，而本项目的取舍一贯是「每多一块依赖就多一块常驻内存」。
+投影缓存已经够画一只猫了，**唯一拿不到的是工具名**（`pendingCalls` 是 `callId → 派发时刻`，
+不含名字），所以看板上那一格在 DSH 下是空的——这是诚实的缺口。
+
+**状态怎么推（都是事实，不是猜）**：
+- `lastPromptAt` 前进 → 新一轮 → `UserPromptSubmit`（thinking）
+- `openStep` 存在但 `firstTokenTime` 为空 → 在等首字 → thinking；落地了 → working
+- `pendingCalls` 非空 / `plan.active` → working（工具期 `openStep` 可能已是 null，靠它补）
+- 连续 2 拍 idle → 这一轮结束 → `Stop`（attention）
+
+**那个 2 拍去抖不是保险，是必需的**：`openStep` 的官方注释写着「null outside a step
+**or after its message assembled**」——一轮里只要有工具调用，步骤之间 `openStep` 会短暂变 null。
+不去抖就会在轮内反复喊「做完了」，猫一闪一闪。
+
+**新增 `Meta` 事件**（`state.rs` 里约 10 行）：DSH 的标题是一轮进行中由 LLM 生成后回填的，
+落地那一刻**没有任何状态变化可以搭载**。`apply()` 里 title 的赋值本来就在 match 之前，
+所以这条事件天然只改元数据——要做的只是别把它当未知事件报警。没有它，气泡和看板
+要到下一轮才会有标题。
+
+**诊断出口** `window.clawd.dshState()`，与 `hitState` 同一个用途：「接上了但猫不动」时一次说清
+死在哪一步——`installed=false` 是路径不对，`polls` 涨而 `reads` 不涨是文件真没变，
+`reads` 涨而 `feeds=0` 是会话全 blank 或全在活跃窗口外。
+
+**覆盖面的实话**：`dsh web` / 桌面版投影行齐全，状态完整；`dsh headless "…"` 的投影里
+**只有 title，没有 `sessionStats` / `sessionListMetadata`**，连 `lastPromptAt` 都没有——
+这类会话靠**文件 mtime** 兜底判「最近动过」，状态只能是 idle（它本来就是跑完就退的东西）。
+
+**闸门**：`verify:tauri` 80 → **92**（+12：`dshState` 形状、`DSH_HOME` 覆盖生效、线程节拍、
+缓存可读、四个字段解析、进状态机、变 working、标题与关键词、结束发 Stop、不再挂 working、
+撤掉后收尾），`cargo test` 23 → **38**（+15）。**DSH 那段用临时 `DSH_HOME` 夹具**，
+不拿本机真实缓存做断言——真实缓存里有几个会话、是否还在活跃窗口内由用户历史决定，
+拿它断言等于让闸门看运气（第一版就是这么红的：本机所有会话都超过 30 分钟没动静，
+那是**正确行为**）。夹具现造现撤，撤掉并等一拍再往下走，否则那只多出来的猫会把
+后面「场上有几只猫」「attention 播完回 idle」全部带偏。
+
+**「说」的结论（未落地）**：`dsh --profile headless --session-id <id> "消息"` 可以 adopt
+已有会话并发一个新 turn，实测同一 sessionId 下 turn 从 1 递增到 2，退出码 0/1 +
+`turn_end.reason.kind`（`completed` / `aborted` / `interrupted` / `error`）构成**完整回执**。
+所以它与当年被砍掉的「写信」**性质不同**——hook 是 fire-and-forget、永远 exit 0，
+而这条路失败看得见，不落进硬约束 29 的陷阱。**但还没验并发**：web host 同时持有该会话时
+再 headless 双写是否安全，没测过。这是要接这条线之前的前置条件。
 
 ### S10-10 修「整窗永久穿透」：拖不动、点不了（2026-11-04）
 
@@ -1077,6 +1143,7 @@ spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"]);
 
 | 日期 | 类型 | 内容 |
 |---|---|---|
+| 2026-11-04 | 新增 | **接上 DeepSeek Harness，先只做「看」**（S11，见上方「已完成」）。放弃 WorkBuddy 接入线。`src-tauri/src/dsh.rs`（约 700 行含注释与 14 条测试）把 DSH 的投影缓存**翻译**成既有 hook 事件词汇灌进 `Store::apply()`，状态机一行没改——另起一套就是把刚消灭的「同一 agent 两幅画面」重造。**数据源踩了三个坑才找对**：同级 `session_projcache.json` 是 0.1.x 遗留（本机停在 8-31，读它不报错、只安静地一只猫不显示）；0.2.x 改成目录 + 一会话一文件 `{version:7, record:{identity,rows}}`；**会话 id 只在文件名里**。刻意不读多帧 zstd 会话日志（要引解压依赖，取舍见硬约束）。新增 `Meta` 事件让「回填标题」能只改元数据不动状态；`openStep` 步骤间会变 null，所以「这一轮结束」要 2 拍去抖。`verify:tauri` 80→**92**、`cargo test` 23→**38**。DSH 断言**用临时 `DSH_HOME` 夹具**而非本机真实缓存——第一版拿真实缓存做断言，本机所有会话都超 30 分钟窗口，于是必然红，而那其实是正确行为 |
 | 2026-11-03 | 新增 | **README 整体重写**（S10-9 ⑤，`2c6ec41`，+496 / −347）。旧版是 S1–S9 时期写的，开头还是 `npm install` / `npm start`（指向**已经删掉的 Electron**），大半篇幅在讲"每个阶段做了什么"。改成「使用者先看、开发者后看」：这是什么 → 三分钟跑起来 → **代码签名**（新增一章：Authenticode 三层、三条路的价格与地区、Azure/OV/EV 各自能不能立刻不弹 SmartScreen、环境变量怎么配、`--verify` 怎么读、自签名怎么进受信根）→ 接 agent（三家 matcher 差异）→ 怎么用 → 端点 → 主题 → 回归 → 内存实话 → 限制 → 踩坑。**文档里留一条指向已删容器的命令，比没有文档更坏**：照着抄的人第一步就失败 |
 | 2026-11-03 | 新增 | **发布物接上签名**（S10-9 ②，`8a4a9bd`）。`scripts/sign-release.js`（128 行）由 `bundle.windows.signCommand` 以 `../scripts/sign-release.js %1` 调用，证书走 `CLAWD_SIGN_PFX`(+密码) 或 `CLAWD_SIGN_THUMBPRINT`，强制 RFC3161 时间戳（没有它证书一过期，旧安装包立刻变无效签名）。两条硬规则：**一个都没配 = 响亮跳过（退出 0）**，**配了却签失败 = 退出非 0 让打包红**——不允许"以为签了其实没签"。两条跑出来才知道的硬性事实：`signCommand` 的 cwd 是 `src-tauri/`（写相对路径会找不到脚本）；`cargo tauri build` 结束后**裸 exe 不带签名**（打包器在签名后又覆写了它，日志说签了、产物 `NotSigned`），`npm run bundle` 末尾因此串了一刀补签。本机用自签名证书端到端验过，**P2 只解决一半**（见安全状态表 S10-9 行） |
 | 2026-11-03 | 重构 | **删掉 Electron 容器，Tauri 成为唯一容器**（S10-9 ①，`8a4a9bd`）。先画依赖拓扑再按删除键，`git rm` 9 个文件（`main.js` / `preload.js` / `bubble-preload.js` / `dashboard-preload.js` / `state.js` / `risk.js` / `permission.js` / `server.js` / `verify-electron.js`），`dependencies` 与 `devDependencies` 双双归零。**三处会连带坏掉的地方都先查了**：`DEFAULT_PORT = 23333` 从 `server.js` 迁进 `port-file.js`（`hooks/install.js` 要用它拼端点 URL，跟着删就等于把已装好的 hook 指向 `undefined`）；`theme.js` 原位保留（`build-preview-bundle.js` 在用，与容器无关）；`preview-shot.js` 整份是 Electron 写的，移植到 Tauri 后七状态对照图实测能重画。`verify-tauri` 减 1 条（"自启的 Electron 侧与 Rust 侧对齐"失去对象）76 → 75；同轮把 gaze 的"造变化"从 3px 改成 8px——阈值是 `0.02 × 260 = 5.2px`，**3px 永远够不着**，一道会看心情变红的闸门只会训练人忽略红色 |

@@ -423,8 +423,17 @@ impl Store {
             }
             Some(_) => how = "same", // 映射了但状态没变
             None => {
-                // 只报一次：未知事件通常是每一轮都发的，刷屏会把别的告警淹掉。
-                if self.last_unknown.as_deref() != Some(event.as_str()) {
+                if event == "Meta" {
+                    // 只带元数据（标题/关键词/cwd）、**不动状态**。
+                    //
+                    // 为什么需要它：DSH 的会话标题是 LLM 生成后回填的，落地时刻在一轮
+                    // 进行当中，往往离 UserPromptSubmit 已经过去几秒。那一刻没有任何
+                    // 状态变化可以搭载这个标题，而硬塞进 PreToolUse 会把一条 idle 的
+                    // 会话说成"正在干活"。上面 title/keyword 的赋值本来就在 match 之前，
+                    // 所以这条事件天然只改元数据——这里要做的只是别把它当成未知事件报警。
+                    how = "meta";
+                } else if self.last_unknown.as_deref() != Some(event.as_str()) {
+                    // 只报一次：未知事件通常是每一轮都发的，刷屏会把别的告警淹掉。
                     self.last_unknown = Some(event.clone());
                     eprintln!("[state] 未知事件 {event:?}（没在 EVENT_STATE 里，它不会改变任何状态）");
                 }
@@ -605,5 +614,19 @@ mod tests {
         let mut st = Store::new(Timings::default());
         st.apply(&ev("PreToolUse"));
         assert!(!st.wake(), "working 不该被鼠标改写");
+    }
+
+    // DSH 的标题是生成后回填的，落地时没有对应的状态变化可以搭载。
+    // Meta 就是那个"只改元数据"的事件——它必须能改标题，又必须一动状态都不动。
+    #[test]
+    fn meta_updates_title_without_touching_state() {
+        let mut st = Store::new(Timings::default());
+        st.apply(&ev("PreToolUse"));
+        assert_eq!(st.snapshot().visual, Some(Visual::Working));
+
+        st.apply(&json!({"session_id":"s1","event":"Meta","title":"重构状态机"}));
+        let snap = st.snapshot();
+        assert_eq!(snap.visual, Some(Visual::Working), "Meta 不许改状态");
+        assert_eq!(snap.sessions[0].title.as_deref(), Some("重构状态机"));
     }
 }
