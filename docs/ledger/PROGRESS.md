@@ -17,7 +17,7 @@ S1–S10 全部完成。**2026-11-02 补上 S10-5：容器从 Electron 换成 Ru
 
 | 闸门 | 脚本 | 结果 | 断言数 |
 |---|---|---|---|
-| Tauri 2.12.5 + WebView2 | `npm run verify:tauri` | **75 PASS / 0 FAIL** | 75 |
+| Tauri 2.12.5 + WebView2 | `npm run verify:tauri` | **80 PASS / 0 FAIL** | 80 |
 | Rust 单测 | `cd src-tauri && cargo test` | **23 passed / 0 failed** | 23 |
 | 打包（NSIS 安装包） | `npm run verify:bundle:install` | **25 PASS / 0 FAIL** | 25 |
 | 状态回放（真实事件序列） | `npm run verify:diag` | **10 步全中期望** | 10 |
@@ -105,6 +105,37 @@ S8 的「跟桌宠说话」**2026-10-30 整套删掉了**（理由见下方被�
 - [x] ~~状态时长（25s 发呆 / 60s 入睡）仍写死在 `state.js`~~ → **已进 `theme.json.timings`**（2026-10-28）。注意原来写的「25s 发呆」是个误会：那个 `IDLE_AFTER_MS` **从头没有消费者**，连配置项都算不上，已删（见 DEVLOG）。搬过去的是 `oneshot` 三个时长 + `sleepAfterMs`
 
 ## 已完成
+
+### S10-10 修「整窗永久穿透」：拖不动、点不了（2026-11-04）
+
+用户原话：「我运行 exe 后，目前无法拖拽，也没有交互了」。画面对（眼睛还在追光标），
+但拖、点、双击、右键全哑——**输入根本没进过窗口**。
+
+**根因**：迁移时照抄了 Electron 的「启动先整窗穿透 → 页面收到 mousemove 命中猫再关掉」。
+这套写法在 Electron 上成立，因为它在 Windows 上装了低级鼠标钩子转发 mousemove（`forward: true`）；
+Tauri（tao 0.37.2）只做一件事：
+
+```rust
+style_ex |= WS_EX_TRANSPARENT | WS_EX_LAYERED;   // platform_impl/windows/window_state.rs
+```
+
+`WS_EX_TRANSPARENT` = 不参与命中测试，鼠标消息直接给下层窗口。于是页面**一条 mousemove 都收不到**，
+"收到就关掉穿透"永远等不到触发条件 → 自我死锁。
+
+**修法**：判定搬到还在转的那一侧。
+- 渲染层每 200ms 上报猫的矩形（`hit_rects`，分身时每只 `.cat` 一个，**不合并**——合并会让猫之间的空隙变成挡板）
+- 宿主每 60ms 读 `GetCursorPos`，落在矩形里 → `set_ignore_cursor_events(false)`，离开 → `true`
+- **拖动中强制不穿透**：窗口追光标慢半拍的那一拍会把 `pointerup` 吃掉，`dragging` 卡死
+- 诊断出口 `window.clawd.hitState()`：一次看清 `ignore` / `inside` / `local` / 宿主侧 gaze 计数
+
+**为什么四道闸门全绿时它还在**：CDP 的 `Input.dispatchMouseEvent` 直接注入渲染进程、绕过 OS 命中测试，
+合成事件照常触发 DOM 监听。75 条断言全过，真人用鼠标却什么都点不到。
+回归这次补了 5 条（命中区签名、`hitState` 三个字段、盖住光标 → 关穿透、离开 → 恢复穿透、
+gaze 线程节拍计数），并给闸门加了 `SKIP` 机制：环境调不动系统光标时**响亮地跳过**、不冒充 PASS。
+**但这 5 条证明的是判据连着，不证明"真机拖得动"**——那一下只能人工试，已写进 README 与硬约束 42。
+
+**顺带**：gaze 那条断言此前靠"自己挪光标"造变化，某些环境下挪不动就会红。现在拆成
+「线程在跑（宿主计数，永远可判）」+「真的推过一次（挪不动就 SKIP）」两条。
 
 ### S10-9 删掉 Electron 容器 + 接上发布物签名（2026-11-03）
 
@@ -1038,6 +1069,7 @@ spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"]);
 | S10-5 容器换 Rust | 0 | 0 | 0 | 1 | **Tauri 没有换掉安全基线，但有一处必然变松**（核对全节见 SECURITY.md「S10-5 容器换成 Rust」）：渲染层动作面 12 个没变、主题 SVG 白名单没变、本地 HTTP 四道锁逐条照搬、单实例锁已在 S10-6 补齐。**变松的只有一处**：`withGlobalTauri` 关掉后仍摘不掉 `__TAURI_INTERNALS__`，渲染层理论上还能自己 `invoke` 任意命令——但桥刻意不把 `core.invoke` 挂出去（回归有断言钉着），16 个命令的边界仍按"只能调具体动作"守。两处已知差异不是漏洞：`/permission` 挂起中浏览器被关掉时没有 `res.on("close")` 等价物，只能等超时兜底（结论仍是 204）；CSP 显式放行 `ipc: http://ipc.localhost`（硬约束 20 的一次显式例外，只放这一个假域名） |
 | S10-6 收尾 + 打包 | 0 | 0 | **1** | 0 | **新增一条 P2：安装包没有代码签名**（SECURITY.md「打包分发（S10-6④）」）——用户无法验证"这个安装包确实来自这个项目"，SmartScreen 会报「未知发布者」，要对外分发必须解决。这条不是回归能挡的，属于发布流程缺口。其余四项都是收紧：单实例锁补上（`single.rs` 命名互斥量 + 命名事件）、`withGlobalTauri` 关掉 + 每窗口命令白名单、锁屏从 2s 轮询换成 WTS 会话事件且失败退回轮询、`installMode: currentUser` 不提权。**另一条已知限制不是安全问题但影响可用性**：`webviewInstallMode` 默认 `downloadBootstrapper`，离线机器装不上 |
 | S10-7 自启 + 诊断 | 0 | 0 | 0 | 0 | **无新增 SEC 编号**。开机自启是第一条**会在进程外留全局状态**的功能（`HKCU\...\Run` 一条值），按最小面实现：默认关、写的是**带引号**的当前 exe 完整路径（不拼参数、不接用户输入）、勾选状态从注册表读回来而不是本地变量、写入未生效时告警不假装成功。其余两项是观测能力（`diag-events.js` 只读 `GET /state` 的 `recent`，回放用临时实例）与构建期守卫（陈旧二进制拦截），都不扩大渲染层可达面 |
+| S10-9 删容器 + 签名 | 0 | 0 | **1** | 0 | **依赖面归零，签名只补了一半**。① 删掉 Electron 之后 `dependencies` / `devDependencies` 均为空、`package-lock.json` 里 electron 计数 0，SEC-08 从"已升到 45.0.0"变成**已消除**（SECURITY.md 修复记录表）——这是本项目最大的一笔攻击面削减：为一个桌宠的几张 SVG 引进 300+ 传递依赖这件事不再成立。② S10-6 那条 **P2「安装包没有代码签名」只解决一半**：本期接上的是**自签名证书**（`CN=clawd-starter (local dev)`，仅本机受信），对外的「未知发布者 / SmartScreen」提示**仍在**，要消除仍需 OV/EV 或 Azure 制品签名。私钥落在**仓库外**的 `~/.clawd-signing/`，`.gitignore` 另加 `*.pfx` / `*.p12` / `signing.local.json` 防手滑；签名的判据是"配了证书却签失败必须让打包红"，不产出"没签成功却看起来签了"的安装包 |
 
 下一阶段开工前，先看 [SECURITY.md](./SECURITY.md) 里该阶段的预判小节。
 
@@ -1045,6 +1077,9 @@ spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"]);
 
 | 日期 | 类型 | 内容 |
 |---|---|---|
+| 2026-11-03 | 新增 | **README 整体重写**（S10-9 ⑤，`2c6ec41`，+496 / −347）。旧版是 S1–S9 时期写的，开头还是 `npm install` / `npm start`（指向**已经删掉的 Electron**），大半篇幅在讲"每个阶段做了什么"。改成「使用者先看、开发者后看」：这是什么 → 三分钟跑起来 → **代码签名**（新增一章：Authenticode 三层、三条路的价格与地区、Azure/OV/EV 各自能不能立刻不弹 SmartScreen、环境变量怎么配、`--verify` 怎么读、自签名怎么进受信根）→ 接 agent（三家 matcher 差异）→ 怎么用 → 端点 → 主题 → 回归 → 内存实话 → 限制 → 踩坑。**文档里留一条指向已删容器的命令，比没有文档更坏**：照着抄的人第一步就失败 |
+| 2026-11-03 | 新增 | **发布物接上签名**（S10-9 ②，`8a4a9bd`）。`scripts/sign-release.js`（128 行）由 `bundle.windows.signCommand` 以 `../scripts/sign-release.js %1` 调用，证书走 `CLAWD_SIGN_PFX`(+密码) 或 `CLAWD_SIGN_THUMBPRINT`，强制 RFC3161 时间戳（没有它证书一过期，旧安装包立刻变无效签名）。两条硬规则：**一个都没配 = 响亮跳过（退出 0）**，**配了却签失败 = 退出非 0 让打包红**——不允许"以为签了其实没签"。两条跑出来才知道的硬性事实：`signCommand` 的 cwd 是 `src-tauri/`（写相对路径会找不到脚本）；`cargo tauri build` 结束后**裸 exe 不带签名**（打包器在签名后又覆写了它，日志说签了、产物 `NotSigned`），`npm run bundle` 末尾因此串了一刀补签。本机用自签名证书端到端验过，**P2 只解决一半**（见安全状态表 S10-9 行） |
+| 2026-11-03 | 重构 | **删掉 Electron 容器，Tauri 成为唯一容器**（S10-9 ①，`8a4a9bd`）。先画依赖拓扑再按删除键，`git rm` 9 个文件（`main.js` / `preload.js` / `bubble-preload.js` / `dashboard-preload.js` / `state.js` / `risk.js` / `permission.js` / `server.js` / `verify-electron.js`），`dependencies` 与 `devDependencies` 双双归零。**三处会连带坏掉的地方都先查了**：`DEFAULT_PORT = 23333` 从 `server.js` 迁进 `port-file.js`（`hooks/install.js` 要用它拼端点 URL，跟着删就等于把已装好的 hook 指向 `undefined`）；`theme.js` 原位保留（`build-preview-bundle.js` 在用，与容器无关）；`preview-shot.js` 整份是 Electron 写的，移植到 Tauri 后七状态对照图实测能重画。`verify-tauri` 减 1 条（"自启的 Electron 侧与 Rust 侧对齐"失去对象）76 → 75；同轮把 gaze 的"造变化"从 3px 改成 8px——阈值是 `0.02 × 260 = 5.2px`，**3px 永远够不着**，一道会看心情变红的闸门只会训练人忽略红色 |
 | 2026-11-03 | 安全 | **`cargo audit` 第一次跑：0 漏洞 / 2 条警告**（S10-7④，详见 SECURITY.md「依赖审计」）。425 个依赖、1402 条公告；两条警告 `proc-macro-error 1.0.4`（unmaintained）与 `glib 0.18.5`（unsound）经 `cargo tree --target x86_64-pc-windows-msvc -i` 确认**都不在 Windows 构建图里**（来自 `tray-icon` 的 Linux/GTK 分支），发出去的二进制不含这块代码；将来做 Linux 构建要先处理。工具用官方预编译的 `cargo-audit 0.22.2`（zip sha256 `0a73165…710ab`），因为本机源码编译 40 分钟没完；公告库让工具自己 fetch 会 failed to consume the pack（libgit2），换 `git clone --depth 1` 五秒完成 |
 | 2026-11-03 | 修复 | **verify-tauri 的 gaze 断言不再依赖"有人碰鼠标"**（`7c1b35a`）。gaze 线程有变化检测（位移 < 0.02 不 emit，省 IPC 省电），光标静止时 0 条推送**是正确行为**，可断言写的是"这一轮至少推过一次"——于是它的成败取决于测试期间有没有人动鼠标。复跑时红了一条，看着像回归。修法不是放宽判据（`>=1` 已最松），是**让测试自己造条件**：光标没动就挪 3px 再挪回去（PowerShell 调 `System.Windows.Forms.Cursor`，Node 没有 user32 入口），等 400ms 再读，稳定 `累计 5 次`。**一条断言如果需要外部世界配合，它测的就不是代码，是运气** |
 | 2026-11-02 | 新增 | **托盘图标超采样重绘**（S10-7③，`d2e277d`）。`make-icons.js` 原来是「每个像素问一次点在不在形状里」，256px 上看不出问题，但托盘真正用的是 16~24px：猫脸半径只剩 6 个像素、耳朵退化成两块直角三角、眼睛摊成一层雾——**远看像颗花椰菜**。改 **4× 超采样 + 覆盖率降采样**：RGB 取**覆盖样本**的平均、alpha = 覆盖率（按全部样本平均会把透明像素的 (0,0,0) 混进边缘，半透明轮廓发灰发脏）；**≤24px 走简化几何**（眼睛放大 1.6 倍、去鼻子和内耳、耳朵加厚外移）——抗锯齿解决"锯齿"，解决不了"特征小于一个像素"（16px 时眼睛半径只有 0.94px）。ICO 从 5 个尺寸扩到 7 个（16/20/24/32/48/64/256），最近邻 8× 拼图检查过 16px 起耳朵和眼睛都还在 |
