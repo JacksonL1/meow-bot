@@ -4,13 +4,15 @@
 > HTML/JS，靠 `src/tauri-bridge.js` 把 `window.clawd` 装回去）。Electron 的 9 个文件已整套 `git rm`，
 > 需要考古从 git 历史里找。
 >
-> **33 个源文件 / 10369 行**：
-> `src/` 9 个 = 6 个 `.js` 2855 行 + 3 个 `.html` 621 行；
-> `src-tauri/` 12 个 = 8 个 `.rs` 3972 行 + `build.rs` 3 行 + `Cargo.toml` 56 行 +
+> **34 个源文件 / 12402 行**：
+> `src/` 9 个 = 6 个 `.js` 3122 行 + 3 个 `.html` 795 行；
+> `src-tauri/` 13 个 = 9 个 `.rs` 5297 行 + `build.rs` 3 行 + `Cargo.toml` 56 行 +
 > `tauri.conf.json` 37 行 + `capabilities/default.json` 13 行（`Cargo.lock` **生成物不计**）；
-> `hooks/` 2 个 644 行；`scripts/` 10 个 2168 行。
-> 实测 **2026-11-04**（S10-9 删掉 Electron 之后；11-03 首记的 34 个 / 10361 有两处加法错，
-> 已逐项 `wc -l` 复算：`src-tauri/` 实为 12 个、`scripts/` 实为 2168 行）。
+> `hooks/` 2 个 644 行；`scripts/` 10 个 2435 行。
+> 实测 **2026-11-04 16:55**（S11 DSH + 泡泡全部落盘之后；同日 16 点前这里是 33 个 / 10369 行，
+> 涨的 718 行是 `dsh.rs` 两轮修复 +249、`src/` 6 js +224 / 3 html +174、`scripts/` +71）。
+> 11-03 首记的 34 个 / 10361 有两处加法错，
+> 已逐项 `wc -l` 复算：`src-tauri/` 实为 12 个（当时还没 `dsh.rs`）、`scripts/` 实为 2168 行）。
 > 上一次是 41 个 / 14328 行（2026-11-02 16:45，S10-7③ 之后）。**差 −8 个文件 / −3959 行基本全是删容器**：
 > 9 个 Electron 文件走掉（`verify-electron.js` 2411 + `main.js` 555 + `state.js` 435 + `risk.js` 375 +
 > `permission.js` 140，另加 `server.js` / `preload.js` 27 / 两份 preload）；同期 `scripts/preview-shot.js`

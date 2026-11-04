@@ -964,6 +964,41 @@ cargo tree --target x86_64-pc-windows-msvc -i proc-macro-error@1.0.4
 
 ---
 
+## S11 DSH 接入（2026-11-04）：不碰凭据，但标题多了一条绕过过滤的路
+
+接 DeepSeek Harness 只做「看」——读 DSH 自己的投影缓存，翻译成既有 hook 事件词汇灌进
+`Store::apply()`。状态机一行没改，所以 S5–S10 的判定全部沿用；**新东西只有数据源**。
+
+### SEC-17 会话标题有第二个来源，而过滤只装在第一个来源上（P3，记录在案）
+
+- **严重度**：P3。触发条件是"标题本身就含敏感串"，且数据源是本机第三方工具的缓存。
+- **位置**：`src-tauri/src/dsh.rs` 的 `parse_session()`（`title: row(rows, "title")`）→
+  `keyword()`（取前 `KEYWORD_CHARS` 个字）→ `Meta` 事件 → 泡泡/看板标题。
+- **影响**：SEC-16 的口径是"过滤在源头做，不在显示时洗"，落点是 `hooks/clawd-hook.js` 的
+  `TITLE_SECRET_RE`——它只作用于 `UserPromptSubmit` 派生出来的那一行。DSH 这条路的标题
+  **不经过 hook**，直接从缓存文件的 `title.val` 进来，中途没有任何正则，于是同一个屏幕上
+  可能出现一个本该被整条丢弃的标题。泡泡是常驻的，比只在开看板时出现的标题更暴露。
+- **修复建议**：把 SEC-16 的正则下沉到 `dsh.rs` 的 `keyword()` / `Meta` 入口（或
+  `Store::apply()` 的 meta 分支），命中即整条丢弃、不截断保留。两条来源共用一个函数，
+  避免"下次再加数据源又忘一遍"。
+- **未受影响的相邻面**：`cwd` 走的是 `identity.cwd` → `sanitize_cwd` → `public_cwd`，
+  快照里只有 basename、完整路径留在 Rust 侧（SEC-09 的兑现点，`hidden_cwd_is_only_basename_in_snapshot`
+  这条用例仍在跑）。
+
+### 凭据面：本项目的读取面里没有 key
+
+- `dsh.rs` 只用 `std::env::var` 读 `DSH_HOME` 与 `USERPROFILE` 两个变量，**不读**
+  `~/.dsh/.credentials.yaml`；key 的解析交给 DSH 自己。
+- `~/.dsh/.credentials.yaml` 里 `refs.DEEPSEEK_API_KEY` 是**明文**（51 字符）。这是 DSH 的
+  落盘选择，不是本项目的文件、也不在本项目的读取面内，但**它和本项目跑在同一台机器、同一个
+  用户下**——任何以该用户身份运行的进程都能读。记在这里是为了让下次审计的人知道边界在哪，
+  而不是把它当成"桌宠的漏洞"。
+- 本轮为跑通测试曾把该 key 放进进程环境变量（未打印明文，只打印长度），进程退出即消失；
+  事后确认那把是内网 key、打官方端点 401。**要记住的是这个动作本身**：给测试喂凭据时，
+  环境变量是"本进程可见"的最小面，比写进任何文件都安全，但仍应在测试结束后显式清掉。
+
+---
+
 ## 附：值得保留的好设计
 
 审计不是只挑毛病，以下三点是这个骨架最容易在后续开发中被破坏、必须守住的东西：
