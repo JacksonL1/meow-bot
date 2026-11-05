@@ -999,6 +999,112 @@ cargo tree --target x86_64-pc-windows-msvc -i proc-macro-error@1.0.4
 
 ---
 
+## S12「说」：本项目第一次主动拉起外部进程（2026-11-05）
+
+前面所有阶段都是"读别人的文件 + 收别人的请求"，S12 第一次**自己 fork 一个会调用模型的进程**。
+攻击面从"数据进来看得见"变成"命令出去要论证"。
+
+### 一、命令里没有用户的文字（这条是设计，不是巧合）
+
+```rust
+c.arg(&l.bin).arg("--profile").arg("headless").arg("--json");
+if let Some(id) = id { c.arg("--session-id").arg(id); }
+c.arg("-");                     // ← 任务从 stdin 读
+```
+
+用户输入**一个字都不进 argv**，全部走 stdin。三个理由，前两个是安全：
+
+1. **argv 有语法**。用户完全可能发「`--help`」「`-1`」——那会被 commander 当成 flag，
+   轻则这条消息变成一次帮助输出，重则改变这次运行的语义。
+2. **转义在 Windows 上是一门玄学**。`Command` 的引号规则与 `cmd` 的不同，而 `dsh` 是
+   经 node 解析的；只要文字进 argv，就得同时对两个解析器正确。走 stdin 这条路上没有解析器。
+3. 顺带解决"超长输入"：9600 字的一句话塞进 argv 会撞命令行长度上限。
+
+**`--session-id` 是唯一的可变参数位**，所以它必须来自宿主（状态机里已有的 id），
+**不能来自页面传来的字符串**——一个能指定"续哪条会话"的接口，加上"目录由宿主查"这一条，
+才关得住"把 agent 起在任意目录"。
+
+### 二、目标与目录一律宿主查（硬约束 46）
+
+`say_send(id, text)` 的签名里**没有 cwd**。目录只可能来自两处：
+`full_cwd(id)`（这条会话自己的桶）或 `pinned_new_cwd()`（用户上一次干活的地方）。
+渲染层能做的只有"选哪条会话、说什么"。
+
+反面例子就在旁边：如果把 `cwd` 做成参数，页面（或任何能调这条命令的窗口）就能
+让 `dsh` 在 `C:\Windows\System32` 下起一条会话，而 `dsh` 的 `sandboxMode: workspace-write`
+是**相对 cwd** 的——**目录选错就是沙箱边界选错**。这条比"路径泄露"严重得多。
+
+### 三、窗口白名单：新开的两扇门各配一条
+
+```rust
+const W_COMPOSE: &[&str] = &["compose"];                    // 输入窗只能自己那点事
+const W_SAY:     &[&str] = &["main", "compose", "dashboard"]; // 谁能说
+```
+
+`say_send` 对三扇窗开放（桌宠 / 输入窗 / 看板都能发起），`compose_context` / `compose_close`
+只给输入窗，`dsh_sessions` 仍只给看板。**每加一扇窗，就要单独钉一条"它不能调别人的命令"**——
+回归里那条 `输入窗调 theme_get → 被拒` 守的就是这个（硬约束 36 的延续）。
+
+**ACL 是白名单，而且失败得非常安静**。Tauri v2 的窗口/插件权限来自 `capabilities/*.json`
+的 `windows` 列表：**没有列进任何 capability 的窗口，一条 core 权限都没有**。
+S12 第一版只改了 `default.json` 的三条命令白名单，忘了把 `compose` 登记进 capabilities，
+结果 `invoke('plugin:event|listen')` 直接被拒、页面收不到任何事件——而界面上的样子是
+"目标不刷新、发完没回音"，看起来像时序问题（当时真以为是"emit 赶在 show 的那一帧丢了"，
+还加了 500ms 轮询兜底把它盖住了）。
+
+修法是**给它单独一份最小 capability**（`capabilities/compose.json`，只 `core:event:default`），
+而不是把 `compose` 塞进 `default.json`——后者会顺手给它窗口移动/拖拽权限，
+而输入窗根本不需要移动自己（关窗走宿主侧的 `compose_close`）。回归里两条断言钉住这个边界：
+`input 窗能 listen`（ACL 真的生效了）与 `input 窗 set_position 被拒`（没有多给）。
+**推论（硬约束 51）**：新增窗口时，"命令白名单"和"capability 登记"是两件事，
+少任何一件都会得到一个静默失效的窗口。
+
+### 四、CSP 与能力：输入窗是最小的一扇
+
+`compose.html` 与其余页面同款 `default-src 'none'`（脚本 'self'、样式 'self'），
+`capabilities/default.json` 没有为它加任何能力，它也**不 import 任何不是自己的东西**。
+这个窗存在的意义只有一件事：把一段文字交给 `say_send`。它不读文件、不拿剪贴板、
+不弹窗、不导航。
+
+### 五、我们自己的孩子进程：三条管道各一线程
+
+`stdin` / `stdout` / `stderr` 都必须单独线程收发，否则 64KB 管道缓冲写满后子进程阻塞在写、
+父进程阻塞在 wait ——两边互等。**这不是性能问题，是死锁**，而且在短输入下测不出来
+（8KB 塞得进缓冲），只在某个输入变长的版本上突然开始"发出去没反应"。
+`stderr` 只留尾部 4KB（DSH 的报错在最后一行，前面全是启动日志），
+**读它不是为了展示，是为了让子进程不被自己的日志憋死**。
+
+### 六、凭据：本轮把"最小面"换成了"DSH 自己那一份"
+
+S11 的结论是"本项目不读 `~/.dsh/.credentials.yaml`，key 交给 DSH 解析"。S12 需要
+`dsh headless` 能真的调用模型，两条路：
+
+| 方案 | 面 | 判断 |
+|---|---|---|
+| 每次发消息把 key 塞进子进程环境 | 该 key 出现在**每一个**子进程的 `environ` 里，`say_send` 每发一句就来一次；崩溃转储 / 进程浏览器都能看到 | 否 |
+| 把 headless profile 的 `credentials` 插件打开，让 dsh 自己读 `~/.dsh/.credentials.yaml` | key 只在 dsh 进程内，本项目**一行都没碰** | **是** |
+
+选了后者（配置在 `~/.dsh/profiles/headless/cordis.patch.yml`，**仓库外、不属于本项目**）。
+结果：本项目的读取面里**依然没有 key**，而"谁能读那个文件"这件事的答案没变——
+还是"以该用户身份运行的任何进程"，这是 DSH 的落盘选择，记在这里免得下次审计的人
+把它当成桌宠新增的漏洞。
+
+### 七、新增的攻击面清单
+
+| 面 | 谁能触到 | 现状 |
+|---|---|---|
+| `say_send`（起进程） | 主窗 / 输入窗 / 看板 | 目标与目录宿主查；同一目标只允许一条在飞；文字上限 8000 字 |
+| `node bin.js` 的路径 | 只来自 `locate()`（扫 `PATH` 找 `@deepseek-ai/dsh`） | 找不到就是"这个功能不可用"，**不从页面接受路径** |
+| `--dump-config` | 启动时一次，只读 stdout | 只解析 `provider` / `model` 两个字段；认不出就 `None` |
+| 子进程 stdout（NDJSON） | dsh 自己 | 逐行 `serde_json::from_str`，**解析不了就跳过**；`text` / `final` 只当字符串用，从不拼 HTML |
+
+第一条有一个明确的**未覆盖点**：`locate()` 拿的是 `PATH` 上第一个含
+`node_modules/@deepseek-ai/dsh/lib/bin.js` 的目录，所以**能改 `PATH` 的人能让桌宠跑任意
+`bin.js`**。这与"能改 `PATH` 的人也能改桌宠自己的 exe"是同一个权限级，故不额外加白名单，
+但要知道结论的边界在这儿。
+
+---
+
 ## 附：值得保留的好设计
 
 审计不是只挑毛病，以下三点是这个骨架最容易在后续开发中被破坏、必须守住的东西：

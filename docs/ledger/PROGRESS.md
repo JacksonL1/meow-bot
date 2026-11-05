@@ -13,12 +13,16 @@ S1–S10 全部完成。**2026-11-02 补上 S10-5：容器从 Electron 换成 Ru
 同一天接上发布物签名（自签名证书已在本机跑通端到端）。
 现在只剩**一道 UI 闸门**，原来那行 Electron 的 193–194 已成为历史注脚。
 
+**2026-11-04～05：接上 DeepSeek Harness**——S11 只做「看」（把 DSH 投影翻译成既有 hook 事件词汇），
+S12 补上「说」（从桌宠直接发消息，走 `dsh headless --session-id`）并把看板从"谁在发呆"改成"这条会话在干什么"。
+当前停在：三条路都真机验过，剩下的都是**已知让渡**（桌面端/网页端建的会话续不了，见「已知的能力让渡」）。
+
 四道闸门同时是绿的，前两道**判据同源**（后两道管的是"用户装不装得上 / 状态掉不掉"，判据天然不同源）：
 
 | 闸门 | 脚本 | 结果 | 断言数 |
 |---|---|---|---|
-| Tauri 2.12.5 + WebView2 | `npm run verify:tauri` | **106 PASS / 0 FAIL** | 106 |
-| Rust 单测 | `cd src-tauri && cargo test` | **46 passed / 0 failed** | 46 |
+| Tauri 2.12.5 + WebView2 | `npm run verify:tauri` | **123 PASS / 0 FAIL** | 123 |
+| Rust 单测 | `cd src-tauri && cargo test` | **68 passed / 0 failed** | 68 |
 | 打包（NSIS 安装包） | `npm run verify:bundle:install` | **25 PASS / 0 FAIL** | 25 |
 | 状态回放（真实事件序列） | `npm run verify:diag` | **10 步全中期望** | 10 |
 | Rust 依赖审计 | `cargo audit`（见 SECURITY「依赖审计」） | **0 漏洞 / 2 条警告**（都不在 Windows 构建图里） | 1402 条公告 / 425 个依赖 |
@@ -83,7 +87,9 @@ S8 的「跟桌宠说话」**2026-10-30 整套删掉了**（理由见下方被�
 
 ## 进行中
 
-- **问题 1 的根因**：等用户把 `petDebug.events()` 的输出发来。已定位两个最可能的元凶：`SessionEnd`（删会话后 `dominant()` 直接返回 idle）、或 `EVENT_STATE` 漏映射（漏的事件会进 `recent` 里标 `ignored`，并被终端告警）
+- 无。S12 的三件事（供应商 / 看板 / 说）都已真机验过，闸门 121 + 68 全绿。
+  下一步取决于用户：是把「说」的接力棒交给**多轮对话 UI**（现在一次一窗，发完就关），
+  还是先把「桌面端会话续不了」这件事在界面上讲得更醒目。
 
 ## 待办
 
@@ -99,12 +105,80 @@ S8 的「跟桌宠说话」**2026-10-30 整套删掉了**（理由见下方被�
 
 ### 已知的能力让渡（不是 bug，是选择）
 
+- [ ] **桌面端 / 网页端建的 DSH 会话，桌宠续不了**。`assertAdoptable()` 里有一条硬闸：
+      记录过 `agentPreset` 的会话，一次性 runner 组不出那套 preset，一律拒。**不去绕过它**——
+      绕过等于拿另一套工具集去写用户的会话。产品上的处理是提前告知（`can_resume=false` →
+      输入窗显示「桌面端会话 · 只能看」），而不是让用户打完字按回车才在错误里看到。
+      想对这些会话说，只能用桌面端/网页端自己（S12）
 - [ ] 主题只支持 SVG。GIF / APNG / WebP 要写解码器，没做
 - [ ] 主题不能用 `<style>` 做 CSS 动画（只能用帧序列）。换来的是「主题文件里没有可执行的样式入口」
 - [ ] 没有在线主题目录，主题只能手工放进 `themes/`。换来的是供应链攻击面为零
 - [x] ~~状态时长（25s 发呆 / 60s 入睡）仍写死在 `state.js`~~ → **已进 `theme.json.timings`**（2026-10-28）。注意原来写的「25s 发呆」是个误会：那个 `IDLE_AFTER_MS` **从头没有消费者**，连配置项都算不上，已删（见 DEVLOG）。搬过去的是 `oneshot` 三个时长 + `sleepAfterMs`
 
 ## 已完成
+
+### S12 看板重做 + 从桌宠发消息（2026-11-05）
+
+用户一句话提了三件事：「**我自己配置了供应商，你就直接用就行了。还有现在的看板没有任何有效信息。
+我要能从桌宠直接发消息**」。三件都落地，第三件逼出了一整套新机制（`say.rs`）。
+
+**① 供应商：照抄用户自己配的，一个默认值都不写**
+
+`dsh headless` 读不到 `.credentials.yaml`，因为 headless bundle 默认 `credentials: disabled: true`。
+两条路：往子进程环境里塞 API key（错——key 会出现在进程环境里，而且每发一句话塞一次），
+或者把那个插件打开（对）。选了后者，顺带补上三件 headless 缺的配置（`~/.dsh/profiles/headless/cordis.patch.yml`，
+**仓库外**）：内网端点 + `maxTokens: 131072`（默认 256000 会被内网代理拒）+ `llm-pi-ai` 的 cmg 路由。
+这些**都不是我们的代码**，是用户环境的配置——README 里写清楚了为什么这么配。
+
+**② 看板：从「谁在发呆」改成「这条会话在干什么」**
+
+上一版卡片只有「状态 + 标题 + 目录 + 闲置多久」，等于只说"有这么一条会话"。现在每张卡片回答四个问题：
+你在问什么（最后一轮 prompt）、它答了什么（response 前 400 字）、用哪个模型 / 供应商、
+花了多少（`1.2k → 340` · `上下文 0.6%` · `模型 6s`）。数据来自两路 join：
+状态机（250ms，管"在不在跑"）+ 投影（1s，管"跑的是什么"），按 id 合，两边各自多余的也都要显示。
+
+**投影里读不到的东西，不编。** 三类缺口各有各的处理：
+- `turnOutline` 缺失（headless 会话）→ 用我们发消息时接住的那一段补，并用 `reply_from_say` 标出来源；
+- `modelSelection` 缺失（同样是 headless）→ 用 `dsh --profile headless --dump-config` 里的
+  `agent-default-model` 补，并用 `model_default` 标"这是 profile 的默认，不是这条会话记的"；
+- `sessionStats` 缺失 → 轮数退回 `turnBoundary.lastTurn`，其余**不显示**（硬约束 25 的延续）。
+
+**③ 说：`dsh headless [--session-id] -` 是"接着说话"的一等公民入口**
+
+不是我们发明的机制——`dsh headless --help` 的原话是 `--session-id <id> adopt the persisted Session`。
+三条硬规矩（都在 `say.rs` 文件头，每条都是踩出来的）：任务走 **stdin**（`-`）不走 argv、
+**cwd 必须是这条会话自己的目录**、**记录过 `agentPreset` 的会话一律续不了**（`assertAdoptable` 的硬闸）。
+
+第三条是设计不是 bug：绕过它等于拿另一套工具集去写用户的会话。所以**不绕**，
+改成提前告知——`can_resume` 在输入窗打开的那一刻就显示「桌面端会话 · 只能看」，
+而不是让用户打完半屏字按回车才在错误里看到。
+
+**这轮踩出来的五个坑（每个都是"不跑一次就不知道"）**
+
+1. **`--json` 不是可选项**。没有它，既不知道新会话的 id，也拿不到答案——headless 建的会话
+   在投影里**没有 `turnOutline`**，stdout 那行 NDJSON 是唯一能知道"它回了什么"的地方。
+2. **输入窗显示的目录和实际落地的目录会分叉**。两处各查一次"最近有活干的目录"，
+   中间隔着几百毫秒，`last_at` 换了人 → 窗里写 `…\Users\Think`、消息落进 `…\project\DeepseekWorkSpace`。
+   这不是显示错误，是这条会话**真的起在了另一个项目里**。改成第一次算出来就钉住（`pinned_new_cwd`）。
+3. **看板上"用哪个模型"对 headless 会话永远是空的**（见上），且这个空不是 bug 是投影缺字段。
+   补法要带标记（`model_default`），否则是在替会话编事实。
+4. **验收脚本自己骗自己**：`if (!done) done = await eval(...)` 一旦取回字符串 `"null"` 就不再轮询，
+   于是"事件到了"也永远显示没到。**闸门脚本的 bug 会伪装成产品的 bug**，差点让我去查一条已经通的链路。
+5. **新窗口不会自己获得权限**。Tauri 的 ACL 是白名单，`compose` 没登记进
+   `capabilities/*.json` → `plugin:event|listen` 被拒 → 输入窗**一次事件都没收到过**。
+   第一版误判成"emit 赶在窗口 show 的那一帧丢了"，加了 500ms 轮询兜底把 bug 盖住
+   （轮询走普通命令，不受 ACL 管）。真因找到后补了单独一份最小 capability
+   （`capabilities/compose.json`，只有 `core:event:default`）+ 两条断言。
+
+**顺带补的一处**：发送是立即返回的，而**失败**是几十秒后才知道的（模型 401 / 网络断 / 45 分钟超时），
+那时输入窗早已自己藏起来——用户会以为发出去了，然后永远等不到回音。现在失败时宿主**把窗重新亮出来**，
+`say:done` 带上原话把它放回输入框，改一改就能重发。
+
+**闸门**：`cargo test` **68 passed / 0 failed**（+6：`say` 的 dump-config 解析 3 条、`state::tail_cwd` 3 条）；
+`npm run verify:tauri` **PASS 123 / FAIL 0**（121 + 2 条 ACL 断言）。
+真机端到端（仓库外 `%TEMP%\say-e2e.js`，要一次真实模型调用，故不进闸门）：
+发新会话 → `say:done` 带 id 与回复（9.0s）；看板立即显示问答 / `cmg · DeepSeek-V4.1-Flash-1017（默认）` / `238 → 2`；
+再对同一条会话说第二句 → 同样 9.0s 回 `好的`、`lastTurn` 2、`outputTokens` 4、**没有新建会话文件**（续写路径通）。
 
 ### S11 接上 DeepSeek Harness：先只要「看」（2026-11-04）
 
@@ -1246,6 +1320,7 @@ spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"]);
 
 | 日期 | 类型 | 内容 |
 |---|---|---|
+| 2026-11-05 | 功能 | **看板重做 + 从桌宠发消息**（S12，见上方「已完成」）。三件事一起来：用户自己配的供应商（照抄，不写默认值）、看板要"有有效信息"、桌宠要能直接说话。看板改成四问一卡：你在问什么 / 它答了什么 / 用哪个模型 / 花了多少，数据按 id 把状态机（250ms）与投影（1s）join 起来。**投影里没有的东西不编**：`turnOutline` 缺失用我们发消息时接住的回复补并标 `reply_from_say`；`modelSelection` 缺失用 `dsh --dump-config` 的 `agent-default-model` 补并标 `model_default`；`sessionStats` 缺失只退回 `turnBoundary.lastTurn`，其余不显示。发消息走 `dsh headless [--session-id] -`（产品自带的一等公民入口），三条硬规矩：任务走 stdin、cwd 必须是这条会话自己的目录、**记录过 `agentPreset` 的会话一律续不了**——第三条是设计不是 bug，所以不绕，改成在输入窗打开时就显示「只能看」。四个坑：① `--json` 不是可选项（headless 会话投影里没有 `turnOutline`，stdout 是唯一能拿到答案的地方）；② **输入窗显示的目录和实际落地的目录会分叉**（两处各查一次"最近有活干的目录"，几百毫秒内换了人 → 会话真的起在了另一个项目里），改成第一次就钉住；③ headless 会话没有 `modelSelection`；④ **验收脚本自己骗自己**（`if (!done)` 把字符串 `"null"` 当成"已拿到"，于是通了的链路显示成没通）——闸门脚本的 bug 会伪装成产品的 bug；⑤ **新窗口不会自己获得权限**（Tauri 的 ACL 是白名单，`compose` 没登记进 capabilities → 一次事件都没收到过，而表现像时序问题，被 500ms 轮询兜底盖住）。`cargo test` 62 → **68**，`verify:tauri` 106 → **123 / 0**，真机端到端验过发新会话与续会话两条路 |
 | 2026-11-04 | 修复 | **「运行 exe 后拖不动、点不了，双击右键全哑」= 整窗永久穿透**（S10-10，`6d5a0a7`，见上方「已完成」）。迁移时照抄了 Electron 的「启动先整窗穿透 → 页面收到 mousemove 命中猫再关掉」：Electron 在 Windows 上装了低级鼠标钩子转发（`forward: true`），这套写法成立；而 tao 0.37.2 只设 `WS_EX_TRANSPARENT` ＋ `WS_EX_LAYERED`——不参与命中测试，页面**一条 mousemove 都收不到**，"收到就关掉穿透"永远等不到触发条件，自我死锁。修法是把判定搬到还在转的那一侧：渲染层每 200ms 上报 `hit_rects`（分身时每只 `.cat` 一个，**不合并**——合并会让猫之间的空隙变成挡板），宿主每 60ms 读 `GetCursorPos`，落进矩形 → `set_ignore_cursor_events(false)`、离开 → `true`；**拖动中强制不穿透**（窗口追光标慢半拍的那一拍会吃掉 `pointerup`，`dragging` 卡死）。诊断出口 `clawd.hitState()` 一次看清 `ignore`/`inside`/`local` 与宿主侧 gaze 计数。**四道闸门 75 条全绿时它还在**：CDP 的 `Input.dispatchMouseEvent` 直接注入渲染进程、绕过 OS 命中测试，合成事件照常触发 DOM 监听——闸门因此加了 `SKIP`（环境调不动系统光标时响亮跳过、不冒充 PASS），并写下硬约束 41/42：靠"页面收到输入"再解除输入屏蔽一律是死锁；合成事件不能当"输入链路通"的证据。回归 75 → **80**，README 踩坑第一条同步记入 |
 | 2026-11-04 | 修复 | **「没有任何任务却一直 thinking」**（S11，见上方「已完成」）。四步自我循环：headless 的投影没有 `lastPromptAt` → 退到文件 mtime → mtime 每写一次盘就前进 → 被当成"用户又提了一轮"发 `UserPromptSubmit` → 但这类会话不写 `sessionStats`，phase 永远是 Idle，Idle 分支的 `saw_active` 闸永不放行 Stop，于是**一句话把会话关进 thinking、再没人放它出来**。触发者是当天两条测试命令留下的死会话。修两层：源头加 `Obs.has_prompt_at`（只有真 `lastPromptAt` 才算新一轮，mtime 只判活跃窗口）+ 把我们自己发的 UserPromptSubmit 也置 `saw_active`；兜底加 `THINKING_MAX_MS` 10 分钟（thinking 是唯一"没有任何后续事件也能存在"的状态，必须自己会死）。`cargo test` 43 → 46 |
 | 2026-11-04 | 改版 | **头巾 + 胸前 RAG 删掉，换成猫头顶的消息泡泡**（S11 追加，见上方「已完成」）。用户原话：「任务状态直接以消息泡泡的方式弹出，如果有多个就在消息泡泡中列出标题，用户可以点选，查看具体进度。」泡泡常驻、一行一条（`● working 登录页重构`），点一行那只猫顶到最前并展开「任务 / 阶段 / 当前工具 / 已跑多久 / 目录」。**刻意不做百分比**——agent 侧没有这个东西，编出来的进度第三天就会开始骗人。窗口 240×240 → 240×460（多出来的 220px 是透明的，只有猫和泡泡的矩形关穿透；猫在屏幕上的位置不变，窗口往上长）。三个坑：绝对定位伪元素会把可滚动溢出区撑大 7px（四条任务也滚）→ 尖角改成兄弟节点；写死 `bottom` 会让尾巴指着空气（单猫 176px / 分身 88px 头顶差近百像素）→ `placeBubble()` 按当前耳尖实时算；分身退回单猫时 `#cast` 里还有淡出中的幽灵猫，量到它的耳朵 → 按「当前真正在台上的 rig」取。`verify:tauri` 92 → **106**，`cargo test` 42 → **43**（新增 `ageMs`：`idleMs` 每个事件清零，跑了半小时的任务只要刚有动作就会显示「跑了 0 秒」） |

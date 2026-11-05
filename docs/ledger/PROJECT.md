@@ -58,13 +58,15 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 | 权限裁决 | 挂起请求、等待决定、唯一出口 `settle()` 保证恰好响应一次 | `src-tauri/src/permission.rs` |
 | 风险评级 | 命令词 + 参数两级判定，输出 低/中/高/极高 + 最多 4 条理由（纯函数，可单测） | `src-tauri/src/risk.rs` |
 | 权限气泡 | 卡片 UI、两个按钮、Esc 不表态、量高度回传 | `src/bubble.html` + `bubble-renderer.js` |
-| 会话看板 | 独立窗口、双击开关、1s 轮询快照、按「最吵的排前面」排序、演示模式、复制路径 | `src/dashboard.html` + `dashboard-renderer.js` |
+| 会话看板 | 独立窗口、双击开关、两路数据 join（状态机 250ms + 投影 1s，按 id 合）、每条会话显示"最后问了什么 / 答了什么 / 哪个模型 / 花了多少"、演示模式、复制路径 | `src/dashboard.html` + `dashboard-renderer.js` |
+| 发消息（说） | 定位 `node` + dsh 的 `bin.js`、拼 `--profile headless --json [--session-id] -`、三条管道各一线程、从 NDJSON 捡 id 与答案、stderr 翻人话 | `src-tauri/src/say.rs` |
+| 输入窗 | 400×128 浮动卡片，贴在被点的那扇窗上；`.to` 行说"这句话落到哪"；`Esc` 关 / `Enter` 发 / `Shift+Enter` 换行；`can_resume=false` 时改发新会话 | `src/compose.html` + `compose-renderer.js` |
 | 渲染 | **两条路径**：① 骨骼弹簧（`rigType: ragdoll-spring-v2`，JS 直接拼 SVG + 二阶弹簧阻尼通道，60fps）；② 帧序列（双图层交叉淡入、帧轮播、瞳孔位移插值）。两条都共用 `svgNode()` 白名单出口；分身 / **消息泡泡**也在这层 | `src/renderer.js` |
 | 主题 | 扫目录、校验 schema 与资产、校验 `motion` 规则、缺状态补齐、全坏兜底（Rust）；换主题 = 换帧数据 + 重画 | `src-tauri/src/theme.rs` + `themes/<id>/theme.json` |
 | 进程间桥 | 在 `window` 上装出与旧 `preload.js` 形状相同的 `clawd` / `bubble` / `dashboard`，只暴露动作 | `src/tauri-bridge.js` |
 | 端点约定 | 端点文件路径规则（纯 Node 也能算）+ `DEFAULT_PORT`，hook 与回归都用它 | `src/port-file.js` |
 | 调试 | 假数据源，三种用法（完整剧本 / 单事件 / 保持某状态）；形象对照截图；主题打包 | `scripts/fake-feed.js`、`preview-shot.js`、`build-preview-bundle.js` |
-| 回归闸门 | WebView2 CDP（`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=`），**75 条断言；当前 75 PASS / 0 FAIL**。开跑前比对源码与 exe 的 mtime，旧了直接拒跑 | `scripts/verify-tauri.js` + 共用的 `scripts/cdp.js` |
+| 回归闸门 | WebView2 CDP（`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=`），**121 条断言；当前 121 PASS / 0 FAIL**。开跑前比对源码与 exe 的 mtime，旧了直接拒跑 | `scripts/verify-tauri.js` + 共用的 `scripts/cdp.js` |
 | 打包闸门 | NSIS 安装包，**25 条断言；当前 25 PASS / 0 FAIL**（10 条只读 + 15 条真装/真跑/真卸） | `scripts/verify-bundle.js` + `src-tauri/tauri.conf.json` 的 `bundle` 段 |
 | 签名 | 由 `bundle.windows.signCommand` 调用；接 PFX 或证书库指纹，强制带 RFC3161 时间戳；也支持手工 `--verify` | `scripts/sign-release.js` |
 
@@ -73,6 +75,10 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 - **真实 agent 会话验证刚开始**：用户在 WorkBuddy 上实测过 S1–S7 的链路（hook 确实触发了，状态会跟着变），并报回三个问题——其中"working 中途睡着"已修，"thinking 显示成 idle"根因未定（诊断口 `petDebug.events()` 已就位）。**"WorkBuddy 把 `UserPromptSubmit` 的 stdout 并进消息"这一步仍未经证实**
 - 事件名以 Claude Code 为基准；`hooks/install.js` 已能装到 CodeBuddy / WorkBuddy，但**WorkBuddy 是否支持 hooks 未经证实**（官方文档无 hooks 章节，装的是按 CodeBuddy 契约推的）
 - 会话只存内存 `Map`，没有持久化与掉电恢复
+- **「说」是"一次一句"，不是对话 UI**（S12）。发完 `dsh headless` 就退出，回答显示在看板卡片上和输入窗的提示里；没有多轮会话界面，也没有流式输出（只取最后那一段 `final`，或流式文字拼起来的兜底）。真正的多轮要靠反复打开输入窗
+- **桌面端 / 网页端建的 DSH 会话续不了**：`assertAdoptable()` 拒收带 `agentPreset` 的会话。**不绕过**（绕过等于用另一套工具集写用户的会话），界面上提前显示「桌面端会话 · 只能看」
+- **和 dsh 的耦合是 CLI 契约，不是 API 契约**：依赖 `--profile headless`、`--json` 的 NDJSON 事件形状（`session` / `text` / `final`）、`--dump-config` 的输出格式、`--session-id` 的采纳语义。**上游改形状不会报错，只会静默地少一行字或拿不到答案**——`absorb()` 刻意对不认识的事件安静跳过，但"整条流都不认识了"这件事没有哨兵，靠真机 e2e 兜
+- **headless 会话在投影里缺三类行**：`turnOutline`（所以问答要靠我们自己接）、`modelSelection`（所以模型靠 profile 默认值补，标「（默认）」）、`sessionStats`（所以只退回 `turnBoundary.lastTurn`，其余不显示）
 - 每 250ms 统一 tick，不是事件驱动定时器
 - 看板 1s 轮询，不是推送——`idleMs` 天然随时间变，这是故意的取舍
 - 权限请求只存内存，没有决策历史与审计日志
@@ -157,3 +163,10 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 42. **CDP 合成的鼠标事件不能当作"输入链路通"的证据**。`Input.dispatchMouseEvent` 直接注入渲染进程、绕过 OS 命中测试，所以它能证明"处理逻辑对"，证明不了"鼠标真的进得来"。这一条与 41 是同一个 bug 的两面：闸门 79 条全绿，用户却拖不动。凡是"输入 → 屏蔽 → 再输入"的链路，都要留一条**人工验**的口子并写进台账。
 43. **读别人的数据目录，先确认"这个文件还在被写吗"**。S11 接 DSH 时读了 `~/.dsh/storages/session_projcache.json`——格式合法、字段齐全、解析不报错，只是**停在三个月前**（0.1.x 的遗留），新版用的是同级的 `session_projcache/` 目录。表现是"测试全绿、真实进程 reads 在涨、installed=true、一只猫都不显示"，即**不报错，只是什么都不发生**，比报错难查得多。三条附属规则：① 并排两个同名物，**先 `ls -la` 看 mtime**，几乎总有一个是废弃的；② 诊断视图里除了"读到没有"，还必须有一位说明"读到的数据是不是当下的"（这里是 `has_stats`）；③ 解析器**只认一个确切版本**，形状不对就返回 `None`，不去猜别的版本——猜错的表现同样是静默的。
 44. **只显示事实，不编进度的百分比**。S11 做消息泡泡时用户要"查看具体进度"——agent 侧**没有**这个数据。能给的只有事实：阶段、当前工具、已跑多久、工作目录。硬凑一个 0–100% 第一天很懂事，第三天就会开始骗人（显示 90% 卡二十分钟），而用户一旦发现有一个数字是编的，**连那些真的数字也不信了**。同类：不要在 UI 上给"预计还要多久"，除非数据源真的给了 ETA。
+45. **一个值只要被"展示"和"执行"两处分别用到，就必须只算一次**。S12：`compose_open` 和 `say_send` 各查一次"最近有活干的目录"，中间隔几百毫秒，`last_at` 换了人 → 输入窗写着 `…\Users\Think`、消息落进 `…\project\DeepseekWorkSpace`。**这不是显示错误**：DSH 按目录分桶存会话，那条会话真的起在了另一个项目里，而且它会被当成"最近的目录"，下一句话继续错下去。修法是第一次算出来就钉在 `AppState` 上（`pinned_new_cwd`）。推论：凡是"给用户确认一个将要生效的值"的界面，**那个值必须是待执行的那一份，不能是它的同类重算**。
+46. **发消息这类动作，目标与会话目录一律宿主查，不接受渲染层传来的路径**。`say_send(id, text)` 只收 id 和文字；目录由 `full_cwd` / `pinned_new_cwd` 在宿主侧决定。一个能传路径的接口，就是一个**能把 agent 起在任意目录**的接口。配套：同一目标只允许一条在飞（`say_jobs`），否则两个进程同时写一条会话会被独占写句柄拒（实测 8 抢 1），用户看到的是"点了没反应"。
+47. **判断"能不能做"要看数据，不要试图绕过对方的硬闸**。`dsh headless` 拒收带 `agentPreset` 的会话（`assertAdoptable`），因为一次性 runner 组不出那套工具集。抹掉字段就能绕过去——但那是**用另一套工具集写用户的会话**，坏的是用户的记录。产品的处理是把 `can_resume` 提前显示出来（「桌面端会话 · 只能看」），而不是让用户打完半屏字按回车才在错误里看到。**做不到有三种：没能力、没权限、对方不给；第三种只能靠界面说清楚，伪装成第一种会让用户一直重试。**
+48. **别把"补来的值"和"本来就有的值"混成同一句话**。S12 的看板上有两类补值：`reply_from_say`（这段回答是桌宠那一次发送从 stdout 捡的，不是从投影读的）和 `model_default`（模型是从 profile 的 `agent-default-model` 补的，不是这条会话记的）。两者都在界面上标出来（「（默认）」）。前半句是"字段缺了"，后半句是"我替你推的"——**混成一句，用户看到的就是一个善意的谎**。同理，"没写"和"没到时候"要分开：前者要补来源，后者要等下一拍。
+49. **验收脚本自己也会撒谎，它撒的谎最像产品 bug**。S12：`if (!done) done = await eval("JSON.stringify(window.__done||null)")`——第一次拿回字符串 `"null"`（truthy），从此不再轮询。后端日志明明白白写着"收工 ok=true，reply=收到"，脚本坚持说事件没到，我差点去查管道死锁。**`JSON.stringify` 是把"没有"变成"有"的编码器**：跨进程传值要先解码再判空（`=== null`），不要在序列化后的文本上判。排查顺序的一般规则：**同一个输入在 A 处通、B 处不通，先怀疑 A 与 B 之间那层"测量"**。
+50. **新增窗口要做两件事：命令白名单 + capability 登记，缺一不可**。Tauri v2 的 ACL 是白名单——**没列进任何 `capabilities/*.json` 的窗口一条 core 权限都没有**，包括 `core:event` 的 `listen`。少登记的表现极其安静：页面收不到任何事件，界面上只是"目标不刷新、发完没回音"，看起来像时序问题（S12 第一版就误判成"emit 赶在 show 那一帧丢了"，还加了轮询兜底把 bug 盖住）。**兜底能救功能，救不了诊断**：一个"反正有兜底"的假设，会让真正的失效活到下一轮。给新窗口的 capability 要**按最小面写**（`compose.json` 只有 `core:event:default`），不要图省事塞进 `default.json`——那会顺手给它窗口移动权限。
+
