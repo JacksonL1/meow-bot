@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "compose",
+  "description": "输入窗只需要一件事：收宿主发来的事件（compose:open 说目标是谁，say:done 说结局）。刻意不给窗口能力——它不移动自己、不读剪贴板、不碰文件；关自己走的是宿主侧的 compose_close 命令",
+  "windows": ["compose"],
+  "permissions": ["core:event:default"]
+}

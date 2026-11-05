@@ -5,7 +5,7 @@
     <!-- SEC-03：和主窗口同样的策略——默认全禁，只开需要的。
          connect-src 只放行 IPC 假域名（理由同 index.html 的 meta 注释，
          Tauri 的 invoke 在 Windows 上是 fetch 到 http://ipc.localhost）。
-         除此之外页面不发任何网络请求：会话数据全部来自主进程的快照。 -->
+         除此之外页面不发任何网络请求：会话数据全部来自主进程的两份快照。 -->
     <meta
       http-equiv="Content-Security-Policy"
       content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; connect-src ipc: http://ipc.localhost"
@@ -18,6 +18,8 @@
         --line: #e6e2d8;
         --text: #2c2c2a;
         --muted: #8a8578;
+        --faint: #b6b0a1;
+        --accent: #c8794a;
       }
       html,
       body {
@@ -37,7 +39,7 @@
         display: flex;
         align-items: center;
         gap: 10px;
-        padding: 14px 16px 10px;
+        padding: 12px 14px 10px;
         border-bottom: 1px solid var(--line);
       }
       h1 {
@@ -45,21 +47,62 @@
         font-weight: 600;
         margin: 0;
       }
-      .count {
-        font-size: 12px;
+      /* 顶部的聚合比"几条会话"有用得多：一眼知道现在有没有东西在跑、
+         以及这些会话一共烧了多少 token。 */
+      .sum {
+        font-size: 11.5px;
         color: var(--muted);
         font-variant-numeric: tabular-nums;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .sum b {
+        color: var(--text);
+        font-weight: 600;
       }
       .spacer {
         flex: 1;
       }
+      button {
+        font: inherit;
+        cursor: pointer;
+        border-radius: 7px;
+        border: 1px solid var(--line);
+        background: var(--card);
+        color: var(--muted);
+        padding: 4px 9px;
+        font-size: 11.5px;
+        flex: none;
+      }
+      button:hover {
+        color: var(--text);
+        border-color: #cfc9ba;
+      }
+      button:active {
+        background: #f3f1ea;
+      }
+      button.primary {
+        color: #fff;
+        background: var(--accent);
+        border-color: var(--accent);
+      }
+      button.primary:hover {
+        background: #b96b3f;
+        color: #fff;
+      }
+      button:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
       .toggle {
         display: inline-flex;
         align-items: center;
-        gap: 6px;
-        font-size: 12px;
+        gap: 5px;
+        font-size: 11.5px;
         color: var(--muted);
         cursor: pointer;
+        flex: none;
       }
       .toggle input {
         accent-color: #5b8def;
@@ -82,22 +125,10 @@
         background: var(--card);
         border: 1px solid var(--line);
         border-radius: 10px;
-        padding: 10px 12px;
-        display: grid;
-        grid-template-columns: auto minmax(0, 1fr) auto;
-        grid-template-areas:
-          "badge title idle"
-          "badge dir   dir"
-          "badge meta  copy";
-        gap: 4px 10px;
-        align-items: center;
-      }
-      /* 还没拿到标题时（这条会话还没说过话）不给它留一行空的——
-         空行会让每条都多出 4px 的死高度，看着像"内容还没加载出来" */
-      li.untitled {
-        grid-template-areas:
-          "badge dir  idle"
-          "badge meta copy";
+        padding: 9px 11px 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
       }
       /* 当前真正在屏幕上播的那条，用左侧色条标出来——
          和状态徽标是两件事：徽标说"这条在干什么"，色条说"现在显示的是它" */
@@ -105,15 +136,21 @@
         border-color: #cfd8e6;
         box-shadow: inset 3px 0 0 #5b8def;
       }
+      .head {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        min-width: 0;
+      }
       .badge {
-        grid-area: badge;
-        font-size: 11px;
+        font-size: 10.5px;
         line-height: 1;
-        padding: 5px 7px;
+        padding: 4px 6px;
         border-radius: 6px;
         white-space: nowrap;
         background: #f1efe8;
         color: #6b675c;
+        flex: none;
       }
       .b-working {
         background: #e8f1fd;
@@ -139,77 +176,104 @@
         background: #f2f1ee;
         color: #9a958a;
       }
-      /* 标题是看板上唯一"像人话"的一行，所以给它最重的位置和最强的对比。
-         它来自用户自己说的第一句话（hook 侧取的，prompt 原文不进这条链路）。 */
       .title {
-        grid-area: title;
         font-weight: 600;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+        min-width: 0;
       }
-      .dir {
-        grid-area: dir;
-        font-weight: 500;
+      .idle {
+        margin-left: auto;
+        font-size: 11px;
+        color: var(--faint);
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+        flex: none;
+      }
+      /* 目录 / 模型 / 计数这一层是"背景信息"：小、灰、一行放得下的都放一行，
+         放不下就省略——它们不该抢走用户看对话的注意力。 */
+      .sub {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 11px;
+        color: var(--muted);
+        min-width: 0;
+      }
+      .sub .dir,
+      .sub .model {
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      .meta {
-        grid-area: meta;
+      .sub .dir {
+        flex: 0 1 auto;
+      }
+      .sub .dot {
+        color: #d5cfc1;
+        flex: none;
+      }
+      .sub .chip {
+        background: #f3f1ea;
+        border-radius: 5px;
+        padding: 1px 5px;
+        flex: none;
+      }
+      /* 「最后一轮说了什么」——看板上唯一真正回答"这条会话在干什么"的东西。 */
+      .ask {
+        font-size: 12px;
+        line-height: 1.45;
+        color: #4a453c;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        word-break: break-word;
+      }
+      .ask::before {
+        content: "你：";
+        color: var(--faint);
+      }
+      .ans {
+        font-size: 11.5px;
+        line-height: 1.45;
+        color: #7d7768;
+        border-left: 2px solid #eee9dd;
+        padding-left: 7px;
+        display: -webkit-box;
+        -webkit-line-clamp: 3;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        word-break: break-word;
+      }
+      .ans::before {
+        content: "它：";
+        color: var(--faint);
+      }
+      /* 还没有任何一轮（刚建 / 还在启动）时不留空行，否则卡片会有个空洞 */
+      .ask:empty,
+      .ans:empty {
+        display: none;
+      }
+      .foot {
         display: flex;
         align-items: center;
         gap: 6px;
-        min-width: 0;
+        margin-top: 1px;
       }
-      .sid {
-        font-size: 11px;
-        color: var(--muted);
-        font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+      .foot .grow {
+        flex: 1;
+      }
+      .note {
+        font-size: 10.5px;
+        color: var(--faint);
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      /* 工具名：看板上第二有用的一行。这条数据 hook 一直都在送，
-         只是此前没人存、没人显示（见 src-tauri/src/state.rs 的 sanitizeTool 注释）。 */
-      .tool {
-        font-size: 11px;
-        color: #5b6b52;
-        background: #eef3ea;
-        border-radius: 5px;
-        padding: 1px 6px;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        max-width: 130px;
-      }
-      .tool:empty {
-        display: none;
-      }
-      .idle {
-        grid-area: idle;
-        font-size: 11px;
-        color: var(--muted);
-        font-variant-numeric: tabular-nums;
-        white-space: nowrap;
-      }
-      .copy {
-        grid-area: copy;
-        font-size: 11px;
-        color: var(--muted);
-        background: none;
-        border: 1px solid var(--line);
-        border-radius: 6px;
-        padding: 3px 8px;
-        cursor: pointer;
-        font-family: inherit;
-      }
-      .copy:hover {
-        color: var(--text);
-        border-color: #cfc9ba;
-      }
-      .copy:active {
-        background: #f3f1ea;
+      .note.bad {
+        color: #b03a3a;
       }
       .empty {
         color: var(--muted);
@@ -224,13 +288,13 @@
         border-radius: 4px;
       }
       footer {
-        padding: 9px 16px;
+        padding: 8px 14px;
         border-top: 1px solid var(--line);
         color: var(--muted);
         font-size: 11px;
         display: flex;
         align-items: center;
-        gap: 12px;
+        gap: 10px;
       }
       footer .grow {
         flex: 1;
@@ -239,31 +303,33 @@
          所以放在底部这种随手可及的位置，而不是藏进菜单。 */
       footer select {
         font: inherit;
+        font-size: 11px;
         color: var(--text);
         background: var(--card);
         border: 1px solid var(--line);
         border-radius: 6px;
-        padding: 2px 6px;
-        max-width: 140px;
+        padding: 2px 5px;
+        max-width: 130px;
       }
     </style>
   </head>
   <body>
     <header>
       <h1>会话</h1>
-      <span class="count" id="count">0</span>
+      <span class="sum" id="sum"></span>
       <span class="spacer"></span>
-      <label class="toggle" title="投屏/直播时隐藏项目目录名">
+      <label class="toggle" title="投屏/直播时隐藏项目目录名与对话内容">
         <input type="checkbox" id="demo" />
         演示模式
       </label>
+      <button class="primary" id="sayNew" title="在桌宠里新起一条会话">说一句</button>
     </header>
 
     <main>
       <ul id="list"></ul>
       <div class="empty" id="empty">
         还没有会话。<br />
-        在 agent 里发一条消息就会出现在这里。
+        在 agent 里发一条消息，或者点右上角<b>说一句</b>。
       </div>
     </main>
 

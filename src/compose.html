@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <!-- SEC-03：和另外三扇窗同样的策略。这扇窗只跟宿主说话，
+         不加载任何外部资源——它处理的是用户刚敲进来的原文。 -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; connect-src ipc: http://ipc.localhost"
+    />
+    <title>clawd · 说句话</title>
+    <style>
+      /* 这扇窗是一张**浮在桌面上的卡片**，不是"对话框"：
+         它没有标题栏、没有关闭按钮，因为它出现的位置就是用户视线的落点，
+         而挡住猫的头部（猫是唯一在动的东西）比少一个 × 更难忍。
+         退出永远是 Esc。 */
+      :root {
+        --card: #fffdf8;
+        --line: #e8e2d4;
+        --text: #2c2c2a;
+        --muted: #8a8578;
+        --accent: #c8794a;
+        --bad: #b03a3a;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: transparent;
+        font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+        font-size: 13px;
+        color: var(--text);
+        overflow: hidden;
+      }
+      body {
+        padding: 6px;
+        box-sizing: border-box;
+      }
+      .card {
+        height: 100%;
+        box-sizing: border-box;
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        box-shadow: 0 10px 26px rgba(60, 50, 30, 0.18);
+        padding: 10px 12px 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .top {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        min-width: 0;
+      }
+      /* 目标行说的是"这句话会落到哪儿"——比"输入框"本身更重要。
+         用户最怕的是打了一屏字、按了回车，才发现发错会话。 */
+      .to {
+        font-size: 11px;
+        color: var(--muted);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .to b {
+        color: var(--text);
+        font-weight: 600;
+      }
+      .esc {
+        margin-left: auto;
+        font-size: 10px;
+        color: #b6b0a1;
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        padding: 0 4px;
+        flex: none;
+      }
+      textarea {
+        flex: 1;
+        resize: none;
+        border: none;
+        outline: none;
+        background: transparent;
+        font: inherit;
+        line-height: 1.5;
+        color: var(--text);
+        padding: 0;
+        /* 中文输入法组字时不要被滚动条打断视线 */
+        overflow-y: auto;
+      }
+      textarea::placeholder {
+        color: #b6b0a1;
+      }
+      .foot {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 15px;
+        font-size: 10.5px;
+        color: var(--muted);
+      }
+      .foot .msg {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .foot.bad .msg {
+        color: var(--bad);
+      }
+      /* 送出去之后用户其实不需要再做什么，所以整张卡片淡下去表示"这话不归你管了" */
+      .card.busy {
+        opacity: 0.72;
+      }
+      .card.busy textarea {
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card" id="card">
+      <div class="top">
+        <span class="to" id="to">新会话</span>
+        <span class="esc">Esc</span>
+      </div>
+      <textarea id="text" rows="2" placeholder="跟它说点什么…" spellcheck="false"></textarea>
+      <div class="foot" id="foot"><span class="msg" id="msg">Enter 发送 · Shift+Enter 换行</span></div>
+    </div>
+    <script src="./tauri-bridge.js"></script>
+    <script src="./compose-renderer.js"></script>
+  </body>
+</html>

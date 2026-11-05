@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "三个窗口（桌宠 / 气泡 / 看板）的核心能力。刻意不给文件系统、shell、http 插件权限——后端自己能做的绝不下放给前端",
+  "description": "三个窗口（桌宠 / 气泡 / 看板）的核心能力。刻意不给文件系统、shell、http 插件权限——后端自己能做的绝不下放给前端。**输入窗不在这里**，见 compose.json",
   "windows": ["main", "bubble", "dashboard"],
   "permissions": [
     "core:default",

@@ -13,6 +13,7 @@
 mod dsh;
 mod permission;
 mod risk;
+mod say;
 mod server;
 mod single;
 mod state;
@@ -44,6 +45,10 @@ const WIN_W: f64 = 240.0;
 /// 猫在屏幕上的位置也没变——窗口是往上长的，底边不动（见 build_main_window）。
 const WIN_H: f64 = 460.0;
 const BUBBLE_W: f64 = 360.0;
+/// 输入窗的尺寸。宽度刻意比猫（240）宽得多：这是**唯一**一个用户要往里打字的
+/// 窗口，一行的可用宽度直接决定它好不好用。高度够放下「目标 + 一行输入 + 提示」。
+const COMPOSE_W: f64 = 400.0;
+const COMPOSE_H: f64 = 128.0;
 const DEFAULT_THEME_ID: &str = "ragdoll";
 const CAST_PUSH_MS: u64 = 1000;
 
@@ -77,6 +82,63 @@ struct AppState {
     /// 存的是**视图快照**而不是 Probe 本体：Probe 的 prev 表要独占，
     /// 让命令去抢同一把锁，只会让调试动作干扰正在跑的探测。
     dsh: Mutex<dsh::ProbeView>,
+    /// 正在飞的「说」：目标 key（session id 或 "(new)"）→ 取消旗标。
+    /// 同一目标只允许一条——理由见 say_send 里的注释。
+    say_jobs: Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
+    /// 桌宠自己发出去的那几次：session id → 说了什么 / 回了什么。
+    ///
+    /// 为什么需要单独存一份：`dsh headless` 建的会话在投影里**没有**
+    /// `turnOutline`（那一行是桌面/网页端写的），所以看板从投影只能读到标题和用量，
+    /// 读不到"我说了什么、它答了什么"。而这两段文字此刻正从我们手里过——
+    /// 不接住，用户从桌宠发完消息就永远看不到回答。
+    ///
+    /// 只保留最近若干条：它是"补充说明"，不是第二份会话数据库。
+    say_reply: Mutex<std::collections::HashMap<String, SayNote>>,
+    /// 输入窗这一次要发给谁。写在宿主侧而不是让页面自己记：
+    /// 窗口是复用的，页面可能是上一次打开的那份（甚至还没加载完），
+    /// 谁都能出错，只有"打开它的那一刻"知道正确答案。
+    compose_target: Mutex<Option<ComposeTarget>>,
+    /// 新会话该起在哪个目录——**第一次算出来就钉住**。
+    ///
+    /// 原来每次现算（"最近有动静的那条会话的目录"），结果是输入窗显示
+    /// `…\Users\Think`、消息却落到 `…\project\DeepseekWorkSpace`：这两个查询之间
+    /// 隔着几百毫秒，而"最近有动静"在这段时间里换了人。目录选错的代价不是
+    /// 提示难看，是这条会话起在了另一个项目里（DSH 按目录分桶存会话）。
+    /// 钉住之后，"你看到的"和"它落到的"就是同一个值。
+    new_session_cwd: Mutex<Option<String>>,
+    /// headless profile 的默认模型（provider, model）。
+    ///
+    /// 为什么需要它：`dsh headless` 建的会话**不在投影里写 `modelSelection`**
+    /// （那一行由桌面/网页端写），所以看板上"用哪个模型"对这些会话永远是空的。
+    /// 而默认模型是确定可查的：`dsh --profile headless --dump-config`（0.2s）。
+    /// 启动时查一次就够——它由用户的 profile 决定，不会在一次运行里变。
+    headless_model: Mutex<Option<(String, String)>>,
+}
+
+/// 桌宠替用户说的一句话，以及 dsh 的回答。
+#[derive(Clone, serde::Serialize)]
+struct SayNote {
+    prompt: String,
+    reply: String,
+}
+
+/// 输入窗的「发给谁」。
+#[derive(Clone, serde::Serialize)]
+struct ComposeTarget {    /// Some = 接着这条说；None = 新起一条。
+    id: Option<String>,
+    /// 会话标题（新会话时是 None）。只用于显示。
+    title: Option<String>,
+    /// 这句话会落到哪个目录——**只给最后两段**（SEC-09：完整路径不出宿主）。
+    /// 为什么不给 basename：DSH 按目录分桶存会话，起错目录等于起在空工作区里，
+    /// 而 `…\project\a` 和 `…\work\a` 的 basename 一模一样——只看一段等于没确认。
+    cwd: Option<String>,
+    /// 这条会话能不能被一次性 runner 续写。false 时页面上要说明原因，
+    /// 而不是让用户点了发送才在错误里看到（见 say::explain 的第一条）。
+    can_resume: bool,
+    /// 是谁叫出来的：`main`（桌宠）或 `dashboard`（看板）。
+    /// 决定了输入窗贴在哪扇窗上方——从看板点「说」，窗口却蹦到屏幕角落的猫头上，
+    /// 用户会以为点错了。
+    origin: String,
 }
 
 fn clamp(v: f64, lo: f64, hi: f64) -> f64 {
@@ -149,6 +211,61 @@ fn ensure_dashboard(app: &AppHandle) -> Option<WebviewWindow> {
         .build()
         .map_err(|e| eprintln!("[dashboard] 建窗失败：{e}"))
         .ok()
+}
+
+/// 输入窗。和权限气泡一样是"transparent + 无边框 + 置顶"，但有一处关键不同：
+/// **它要拿键盘**。所以 show 之后必须 set_focus，而且不能设 skip_taskbar 之外的
+/// 那些"不参与激活"的开关——一个收不到焦点的小窗，用户会以为程序卡了。
+fn ensure_compose(app: &AppHandle) -> Option<WebviewWindow> {
+    if let Some(w) = app.get_webview_window("compose") {
+        return Some(w);
+    }
+    WebviewWindowBuilder::new(app, "compose", WebviewUrl::App("compose.html".into()))
+        .title("clawd · 说句话")
+        .inner_size(COMPOSE_W, COMPOSE_H)
+        .transparent(true)
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .resizable(false)
+        .shadow(false)
+        .visible(false)
+        .build()
+        .map_err(|e| eprintln!("[compose] 建窗失败：{e}"))
+        .ok()
+}
+
+/// 输入窗贴在**叫它出来的那扇窗**上方（和权限气泡同一套算法，只是尺寸与锚点不同）。
+///
+/// 锚点必须跟着来源走：从看板点「说」，窗口却蹦到桌面角上的猫头前，
+/// 用户会以为点错了；反过来从猫身上点，窗口蹦到屏幕中间的看板上，同理。
+fn position_compose(app: &AppHandle, origin: &str) {
+    let anchor = app
+        .get_webview_window(origin)
+        .or_else(|| app.get_webview_window("main"));
+    let (Some(anchor), Some(w)) = (anchor, app.get_webview_window("compose")) else {
+        return;
+    };
+    let (ax, ay, aw, ah) = sys::work_area();
+    let (Ok(ap), Ok(ws)) = (anchor.outer_position(), w.outer_size()) else {
+        return;
+    };
+    let asz = anchor.outer_size().unwrap_or(tauri::PhysicalSize::new(0, 0));
+    let (ww, wh) = (ws.width as i32, ws.height as i32);
+
+    // 水平居中于来源窗；竖直优先放上方，上方不够就放下方，都不够就贴工作区顶。
+    let x = ap.x + (asz.width as i32) / 2 - ww / 2;
+    let above = ap.y - wh - 12;
+    let below = ap.y + asz.height as i32 + 12;
+    let y = if above >= ay {
+        above
+    } else if below + wh <= ay + ah {
+        below
+    } else {
+        ay + 8
+    };
+    let x = clamp(x as f64, (ax + 8) as f64, (ax + aw - ww - 8) as f64) as i32;
+    let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
 }
 
 fn position_bubble(app: &AppHandle) {
@@ -346,6 +463,11 @@ fn toggle_dashboard(app: &AppHandle) {
 const W_MAIN: &[&str] = &["main"];
 const W_BUBBLE: &[&str] = &["bubble"];
 const W_DASH: &[&str] = &["dashboard"];
+const W_COMPOSE: &[&str] = &["compose"];
+/// 「说一句话」的入口有四个，但能力只有一份：猫本体（右键菜单）、输入窗自己
+/// （按 Enter / Esc / 重发）、看板（对着某条会话说）。
+/// 权限气泡不在名单里——它是一个"拦住你"的窗口，不该同时是一个"替你发话"的窗口。
+const W_SAY: &[&str] = &["main", "compose", "dashboard"];
 
 /// 每窗口白名单：不在名单里的调用一律拒绝，并且**要留痕**——
 /// 静默返回 Err 的话，将来真出问题时会分不清"没调"和"被拒了"。
@@ -520,10 +642,17 @@ fn pet_menu(window: WebviewWindow, app: AppHandle) -> Result<(), String> {
     let dash = MenuItemBuilder::with_id("dashboard", "会话看板")
         .build(&app)
         .map_err(|e| e.to_string())?;
+    // 「说句话」放在第一项：这是桌宠上**唯一**一个能让它替你做点什么的入口，
+    // 其余两项（看板 / 退出）都是"看"和"关"。
+    let speak = MenuItemBuilder::with_id("say", "说句话…")
+        .build(&app)
+        .map_err(|e| e.to_string())?;
     let quit = MenuItemBuilder::with_id("quit", "退出")
         .build(&app)
         .map_err(|e| e.to_string())?;
     let menu = MenuBuilder::new(&app)
+        .item(&speak)
+        .separator()
         .item(&dash)
         .separator()
         .item(&quit)
@@ -568,6 +697,333 @@ fn dashboard_copy_path(
         Some(p) => sys::set_clipboard_text(&p),
         None => false,
     })
+}
+
+/// 看板的**内容**来源：投影里那些"这条会话到底在干什么"的字段。
+///
+/// 为什么和 `dashboard_snapshot` 分成两个命令，而不是塞进同一个快照：
+///   · 数据源不同——那个来自状态机（250ms 一拍，知道"猫在演什么"），
+///     这个来自 DSH 探测线程（1s 一拍，知道"会话里发生了什么"）。
+///   · 生命周期不同——`Snapshot` 还会被 HTTP `/state` 和 emit 复用，
+///     往里加字段等于让所有消费方一起变；这个只服务看板。
+/// 前端按 session id join 起来，两边各给一半事实。
+#[tauri::command]
+fn dsh_sessions(
+    window: WebviewWindow,
+    st: tauri::State<'_, AppState>,
+) -> Result<Vec<dsh::RichSession>, String> {
+    only(&window, W_DASH)?;
+    let v = st.dsh.lock().unwrap();
+    let notes = st.say_reply.lock().unwrap();
+    let default_model = st.headless_model.lock().unwrap().clone();
+    Ok(v.sessions
+        .iter()
+        .map(|o| {
+            let mut r = o.rich();
+            // 投影里没有这一轮问答（headless 建的会话就是这样）时，用我们自己
+            // 手上那一段补上——否则用户从桌宠发完消息，看板上永远只有标题。
+            if let Some(note) = notes.get(&r.id) {
+                if r.last_reply.is_none() {
+                    r.last_reply = Some(note.reply.clone());
+                    r.reply_from_say = true;
+                }
+                if r.last_prompt.is_none() {
+                    r.last_prompt = Some(note.prompt.clone());
+                }
+            }
+            // 同理：headless 会话不写 modelSelection，用 profile 的默认模型补。
+            // 必须带 `model_default` 标记出门——"它就是这么配的"和"这条会话
+            // 实际用的是它"是两句话，看板上要把这个差别说出来。
+            if r.model.is_none() {
+                if let Some((p, m)) = default_model.as_ref() {
+                    r.provider = Some(p.clone());
+                    r.model = Some(m.clone());
+                    r.model_default = true;
+                }
+            }
+            r
+        })
+        .collect())
+}
+
+// ------------------------------------------------------------
+// 「说一句话」：桌宠 → DSH
+//
+// 整条链路只有一件事需要判断对：**这句话落到哪个目录、哪条会话上**。
+// 两种可能：
+//   · 接着某条会话说（`--session-id`）—— 目录必须是它自己的，错了 dsh 直接拒；
+//   · 新起一条 —— 目录取"最近干过活的那个"，而不是家目录。
+// 两者都由宿主从状态机里查，**不接受渲染层传来的路径**：一个能传路径的接口，
+// 就是一个能把 agent 起在任意目录的接口。
+// ------------------------------------------------------------
+
+/// 新会话落在哪个目录。第一次算出来就钉在 `new_session_cwd` 上。
+///
+/// 唯一的判据是"最近真的干过活的那个目录"（`latest_cwd`），但**只算一次**：
+/// 输入窗打开时算出的值，就是等下真正 spawn 时用的值。之前是两处各算一次，
+/// 于是"窗里写着 A 目录、消息落进 B 目录"——而这不是显示错误，是这条会话
+/// 真的起在了另一个项目里。
+fn pinned_new_cwd(st: &AppState) -> String {
+    let mut pin = st.new_session_cwd.lock().unwrap();
+    if let Some(c) = pin.as_ref() {
+        return c.clone();
+    }
+    let c = st
+        .store
+        .lock()
+        .unwrap()
+        .latest_cwd()
+        .or_else(|| std::env::var("USERPROFILE").ok())
+        .unwrap_or_else(|| ".".to_string());
+    *pin = Some(c.clone());
+    c
+}
+
+/// 组装"这一次发给谁"，顺便把能不能续判掉。
+///
+/// 为什么不在点发送的时候才判：`can_resume` 要在窗口打开的那一刻就显示出来。
+/// 用户打了半屏字、按回车、然后才知道"这条会话不能续"，那是设计问题不是提示问题。
+fn compose_target_of(
+    st: &AppState,
+    id: Option<String>,
+    origin: &str,
+) -> Result<ComposeTarget, String> {
+    // DSH 侧"这条会话记过 agentPreset 吗"——记过就不能被一次性 runner 续。
+    // 判据见 say.rs 文件头第 3 条（`assertAdoptable`）。
+    let resumable: std::collections::HashSet<String> = st
+        .dsh
+        .lock()
+        .unwrap()
+        .sessions
+        .iter()
+        .filter(|o| o.agent_preset.is_none())
+        .map(|o| o.id.clone())
+        .collect();
+
+    match id {
+        Some(id) => {
+            let (cwd, title) = {
+                let store = st.store.lock().unwrap();
+                let cwd = store.full_cwd(&id).map(|s| s.to_string());
+                let title = store
+                    .snapshot()
+                    .sessions
+                    .into_iter()
+                    .find(|s| s.id == id)
+                    .and_then(|s| s.title);
+                (cwd, title)
+            };
+            Ok(ComposeTarget {
+                can_resume: resumable.contains(&id),
+                cwd: state::tail_cwd(&cwd),
+                id: Some(id),
+                title,
+                origin: origin.to_string(),
+            })
+        }
+        None => Ok(ComposeTarget {
+            id: None,
+            title: None,
+            cwd: state::tail_cwd(&Some(pinned_new_cwd(st))),
+            // 新会话没有 preset，天然可以（也就是等下一条消息还能接着它）。
+            can_resume: true,
+            origin: origin.to_string(),
+        }),
+    }
+}
+
+/// 打开输入窗。`id` 为空 = 新起一条。
+///
+/// 抽成自由函数是因为它有两个调用方：命令（渲染层点泡泡里的 ✎）和
+/// **右键菜单**（用户从猫身上直接发起）。后者没有调用方窗口可注入，
+/// 只能走这条路。
+fn open_compose(app: &AppHandle, id: Option<String>, origin: &str) -> Result<ComposeTarget, String> {
+    let target = {
+        let st = app.state::<AppState>();
+        let t = compose_target_of(&st, id.filter(|s| !s.is_empty()), origin)?;
+        *st.compose_target.lock().unwrap() = Some(t.clone());
+        t
+    };
+    // 建窗必须离开命令线程（理由见 dashboard_toggle）：菜单事件跑在主线程上，
+    // 直接 build() 会卡在 WebView2 的创建回调里，而消息循环正停在处理这一帧。
+    let app = app.clone();
+    let t = target.clone();
+    let origin = origin.to_string();
+    std::thread::spawn(move || {
+        let Some(w) = ensure_compose(&app) else { return };
+        // 先把这一次的目标告诉页面，再显示——反过来会有一帧显示的是上一次的目标。
+        let _ = w.emit("compose:open", t);
+        position_compose(&app, &origin);
+        let _ = w.show();
+        // 必须抢焦点：这个窗存在的意义就是"接下你要打的字"。
+        let _ = w.set_focus();
+    });
+    Ok(target)
+}
+
+#[tauri::command]
+fn compose_open(
+    window: WebviewWindow,
+    app: AppHandle,
+    id: Option<String>,
+) -> Result<ComposeTarget, String> {
+    // 两扇窗都能叫它：桌宠（右键菜单 / 泡泡）和看板（每条会话的「说」）。
+    only(&window, &["main", "dashboard"])?;
+    open_compose(&app, id, window.label())
+}
+
+/// 页面加载完自己来要一次目标（第一次打开时 emit 会赶在页面就绪之前）。
+#[tauri::command]
+fn compose_context(
+    window: WebviewWindow,
+    st: tauri::State<'_, AppState>,
+) -> Result<Option<ComposeTarget>, String> {
+    only(&window, W_COMPOSE)?;
+    Ok(st.compose_target.lock().unwrap().clone())
+}
+
+#[tauri::command]
+fn compose_close(window: WebviewWindow, app: AppHandle) -> Result<(), String> {
+    only(&window, W_COMPOSE)?;
+    if let Some(w) = app.get_webview_window("compose") {
+        let _ = w.hide();
+    }
+    Ok(())
+}
+
+/// 真正把话送出去。立即返回（不阻塞 UI），结局通过 `say:done` 事件回传。
+#[tauri::command]
+fn say_send(
+    window: WebviewWindow,
+    app: AppHandle,
+    st: tauri::State<'_, AppState>,
+    id: Option<String>,
+    text: String,
+) -> Result<serde_json::Value, String> {
+    only(&window, W_SAY)?;
+
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err("还没写要说什么".to_string());
+    }
+    if text.chars().count() > say::MAX_TEXT_CHARS {
+        return Err(format!("太长了（最多 {} 字）", say::MAX_TEXT_CHARS));
+    }
+
+    // 目标与目录一律从状态机里查（见本节开头）。
+    // 新会话走 `pinned_new_cwd`：和输入窗上显示的是同一个值——不然用户看到的
+    // 目录和实际落地的目录会分叉（那段注释在 pinned_new_cwd 上）。
+    let (id, cwd) = match id.filter(|s| !s.is_empty()) {
+        Some(id) => {
+            let cwd = st
+                .store
+                .lock()
+                .unwrap()
+                .full_cwd(&id)
+                .ok_or_else(|| "这条会话已经不在了".to_string())?
+                .to_string();
+            (Some(id), cwd)
+        }
+        None => (None, pinned_new_cwd(&st)),
+    };
+    if !std::path::Path::new(&cwd).is_dir() {
+        return Err(format!("目录不在了：{cwd}"));
+    }
+
+    let Some(l) = say::locate() else {
+        return Err("找不到 dsh（PATH 里没有 @deepseek-ai/dsh）".to_string());
+    };
+
+    // 同一目标只允许一条在飞：
+    //   · 两个进程同时写一条会话，后来的那个会被独占写句柄直接拒（实测 8 抢 1），
+    //     也就是"点了没反应还得等报错"；
+    //   · 连点两下 = 起两个 node 各跑一遍同一条指令，用户看到的是"发了两遍"。
+    let key = id.clone().unwrap_or_else(|| "(new)".to_string());
+    let cancel = {
+        let mut jobs = st.say_jobs.lock().unwrap();
+        if jobs.contains_key(&key) {
+            return Err("还在回上一条，等它说完".to_string());
+        }
+        let c = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        jobs.insert(key.clone(), c.clone());
+        c
+    };
+
+    let (child, captured) = match say::start(&l, id.as_deref(), &cwd, &text) {
+        Ok(c) => c,
+        Err(e) => {
+            st.say_jobs.lock().unwrap().remove(&key);
+            return Err(e);
+        }
+    };
+
+    let emit_id = id.clone();
+    let job_key = key.clone();
+    let said = text.clone();
+    std::thread::spawn(move || {
+        let verdict = say::wait(child, &cancel);
+        // 先取快照再收尾：`captured` 里的 id 是**新会话真正的那一个**，
+        // 前端只有拿到它，看板才能把这次的回答挂到正确的卡片上。
+        let (sid, reply) = {
+            let c = captured.lock().unwrap();
+            (c.session_id.clone(), c.reply())
+        };
+        let final_id = sid.clone().or(emit_id);
+        if let (Some(sid), Some(reply)) = (sid.as_ref(), reply.as_ref()) {
+            if let Some(st) = app.try_state::<AppState>() {
+                let mut m = st.say_reply.lock().unwrap();
+                m.insert(
+                    sid.clone(),
+                    SayNote {
+                        prompt: said.clone(),
+                        reply: reply.clone(),
+                    },
+                );
+                // 只留最近 40 条：这是"补充说明"，不是第二份会话数据库。
+                if m.len() > 40 {
+                    let drop: Vec<String> = m.keys().take(m.len() - 40).cloned().collect();
+                    for k in drop {
+                        m.remove(&k);
+                    }
+                }
+            }
+        }
+        if let Some(st) = app.try_state::<AppState>() {
+            st.say_jobs.lock().unwrap().remove(&job_key);
+        }
+        let (ok, message) = match verdict {
+            say::Verdict::Ok => (true, String::new()),
+            say::Verdict::Cancelled => (false, "已停止".to_string()),
+            say::Verdict::Failed(m) => (false, m),
+        };
+        let _ = app.emit(
+            "say:done",
+            serde_json::json!({
+                "id": final_id, "ok": ok, "message": message,
+                "reply": reply,
+                // 原话带回去：失败时输入窗要把它放回输入框，用户改一改就能重发。
+                "prompt": said,
+            }),
+        );
+        // 这扇窗在"送出"那一刻就自己藏了（420ms 的即时反馈），而失败是几十秒后才知道的
+        // （模型 401 / 网络断 / 45 分钟超时）。不把它重新亮出来，用户就永远看不到——
+        // **这是唯一一处"发送之后还有话说"的场合**，所以宁可打扰一次。
+        if !ok {
+            if let Some(w) = app.get_webview_window("compose") {
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }
+        // 一条诊断：用户说"发了没反应"时，先看这一行有没有出现。
+        // 它同时回答了三个问题：进程结束了没有、有没有拿到 id、有没有抓到答案。
+        eprintln!(
+            "[say] 收工 ok={ok} id={:?} reply={}",
+            final_id,
+            reply.as_ref().map(|r| r.lines().next().unwrap_or("").chars().take(24).collect::<String>()).unwrap_or_default()
+        );
+    });
+
+    Ok(serde_json::json!({ "ok": true, "target": key, "cwd": state::public_cwd(&Some(cwd)) }))
 }
 
 #[tauri::command]
@@ -911,6 +1367,16 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             "tray-dashboard" => toggle_dashboard(app),
             "tray-autostart" => toggle_autostart(app, &auto_for_event),
             "tray-quit" => app.exit(0),
+            // 猫身上那个弹出菜单（pet_menu）。它没有 per-menu 回调，
+            // 走的就是这条全局事件——所以在写「说句话」这一项时顺手把
+            // 原来那两项也接上：它们此前只存在于模板里，没人处理。
+            "say" => {
+                if let Err(e) = open_compose(app, None, "main") {
+                    eprintln!("[compose] 打不开发消息窗口：{e}");
+                }
+            }
+            "dashboard" => toggle_dashboard(app),
+            "quit" => app.exit(0),
             _ => {}
         })
         .build(app)?;
@@ -990,7 +1456,27 @@ fn main() {
                 gaze_ticks: AtomicU64::new(0),
                 gaze_pushes: AtomicU64::new(0),
                 dsh: Mutex::new(dsh::ProbeView::default()),
+                say_jobs: Mutex::new(std::collections::HashMap::new()),
+                say_reply: Mutex::new(std::collections::HashMap::new()),
+                compose_target: Mutex::new(None),
+                new_session_cwd: Mutex::new(None),
+                headless_model: Mutex::new(None),
             });
+
+            // ---- headless 的默认模型 ----
+            // 看板上这些会话的「用哪个模型」只能这样拿：`dsh headless` 建的会话
+            // 在投影里不写 `modelSelection`（那一行是桌面/网页端写的）。
+            // `--dump-config` 是配置的权威展开（0.2 秒），查一次就够——
+            // 它由用户的 profile 决定，改了 profile 本来就要重启应用。
+            {
+                let h = handle.clone();
+                std::thread::spawn(move || {
+                    let Some(l) = say::locate() else { return };
+                    let Some(pm) = say::default_model(&l) else { return };
+                    let st = h.state::<AppState>();
+                    *st.headless_model.lock().unwrap() = Some(pm);
+                });
+            }
 
             // ---- 单实例的另一半：等第二份进程来捅 ----
             // 锁在 main() 开头已经抢过了，这里只开那个命名事件。
@@ -1055,6 +1541,11 @@ fn main() {
             dashboard_toggle,
             dashboard_snapshot,
             dashboard_copy_path,
+            dsh_sessions,
+            compose_open,
+            compose_context,
+            compose_close,
+            say_send,
             theme_get,
             theme_list,
             theme_set,

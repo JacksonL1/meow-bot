@@ -76,6 +76,34 @@ function writeDshFixture(phase, promptAt) {
         sessionListMetadata: { ver: 1, seq: 9, val: { blank: false, lastPromptAt: promptAt } },
         plan: { ver: 2, seq: 9, val: { active: false } },
         permissions: { ver: 1, seq: 9, val: { preset: "read-only" } },
+        // 2026-11-05：看板开始显示"这条会话在干什么"，夹具要带上这些行，
+        // 否则"卡片里有最后一轮对话"这条断言永远只能靠真机碰运气。
+        modelSelection: {
+          ver: 1,
+          seq: 9,
+          val: { lastUsed: { provider: "fixture-provider", model: "fixture-model" }, pending: null },
+        },
+        tokenUsage: {
+          ver: 2,
+          seq: 9,
+          val: {
+            totals: { uncachedInputTokens: 1200, outputTokens: 340, cacheReadTokens: 0, cacheWriteTokens: 0 },
+            last: null,
+          },
+        },
+        contextPressure: {
+          ver: 5,
+          seq: 9,
+          val: { surfaceTokens: 230, contextWindow: 200000, pressureTokens: 1200 },
+        },
+        turnOutline: {
+          ver: 2,
+          seq: 9,
+          val: {
+            turns: [{ turn: 1, seq: 8, prompt: "验证看板的最后一轮", response: "这一行来自夹具的 turnOutline" }],
+            draft: "",
+          },
+        },
       },
     },
   };
@@ -337,9 +365,9 @@ async function main() {
     ok("页面加载完成", (await R.eval("document.readyState")) === "complete");
     ok("宿主标记为 tauri（桥真的装了，不是空转）", (await R.eval("window.__CLAWD_HOST__")) === "tauri");
     ok(
-      "window.clawd 15 个动作齐全",
+      "window.clawd 20 个动作齐全",
       (await R.eval(
-        "['onState','onCast','onGaze','dragStart','dragEnd','setIgnoreMouse','setHitRects','hitState','dshState','wake','quit','petMenu','toggleDashboard','getTheme','onTheme'].every(k=>typeof (window.clawd||{})[k]==='function')"
+        "['onState','onCast','onGaze','dragStart','dragEnd','setIgnoreMouse','setHitRects','hitState','dshState','wake','quit','petMenu','toggleDashboard','getTheme','onTheme','openCompose','saySend','onSayDone','composeContext','composeClose'].every(k=>typeof (window.clawd||{})[k]==='function')"
       )) === true
     );
     ok(
@@ -347,9 +375,9 @@ async function main() {
       (await R.eval("['onRequest','decide','setHeight','ready'].every(k=>typeof (window.bubble||{})[k]==='function')")) === true
     );
     ok(
-      "window.dashboard 5 个动作齐全",
+      "window.dashboard 8 个动作齐全",
       (await R.eval(
-        "['getSnapshot','copyPath','listThemes','setTheme','onTheme'].every(k=>typeof (window.dashboard||{})[k]==='function')"
+        "['getSnapshot','copyPath','listThemes','setTheme','onTheme','dshSessions','saySend','onSayDone'].every(k=>typeof (window.dashboard||{})[k]==='function')"
       )) === true
     );
     // 和 preload 同一条原则：只暴露具体动作，绝不把 ipc 本身漏出去。
@@ -613,6 +641,85 @@ async function main() {
     const bubEmpty = JSON.parse((await R.eval("JSON.stringify(window.petDebug.bubble())")) || "{}");
     ok("没有任务了泡泡就收起（不留空壳）", bubEmpty.visible === false && (bubEmpty.rows || []).length === 0, JSON.stringify(bubEmpty));
 
+    // ---------- 6.5 说一句话：从桌宠发消息的入口（2026-11-05） ----------
+    //
+    // 这一节只钉**入口和边界**，不真的发一条消息出去：
+    // 真发一次 = 起一个 node + 一次真实的模型调用（约 8 秒、要花钱），
+    // 而"发得出去"这件事是 dsh 自己的责任，我们的责任是"把话交对地方"。
+    //
+    // 三个入口都在这里测：泡泡底部的「说一句」（新会话）、行右侧的 ✎（对着这条说）、
+    // 以及——最要紧的——**输入窗自己有没有资格调别的窗口的命令**。
+    await post("/state", { session_id: "s-say", event: "UserPromptSubmit", title: "对着这条说" }, ep.token);
+    await sleep(1200);
+
+    ok("点泡泡底部「说一句」→ 交给宿主", (await R.eval("window.petDebug.clickSayNew()")) === true);
+    let composeTarget = null;
+    for (let i = 0; i < 40 && !composeTarget; i++) {
+      composeTarget = await waitTarget((u) => u.includes("compose"), 800);
+    }
+    ok("输入窗被建出来了", !!composeTarget);
+    if (composeTarget) {
+      const W = await Cdp.connect(composeTarget.webSocketDebuggerUrl);
+      await W.send("Runtime.enable");
+      await sleep(500);
+      const st = JSON.parse((await W.eval("JSON.stringify(window.composeDebug.state())")) || "{}");
+      ok("新会话时目标写的是「新会话」+ 会落在哪个目录", /新会话/.test(st.to || "") && /·/.test(st.to || ""), JSON.stringify(st.to));
+      ok("输入框已聚焦（打开就能打字）", (await W.eval("document.activeElement && document.activeElement.id")) === "text");
+
+      // 行右侧的 ✎：换成"接着这一条说"，目标行要跟着换
+      await R.eval("window.petDebug.clickSay('s-say'), 1");
+      // 900ms 留给两条路都走完：compose:open 事件（路 A）和页面自己每 500ms 问一次
+      // （路 B，见 compose-renderer.js 的 startPolling）。两条都在是刻意的——
+      // 路 A 一度因为输入窗没进 capabilities 而整条被 ACL 拒掉，
+      // 而当时只有路 A，"目标不刷新"看起来像时序问题（见本文件下面那条 ACL 断言）。
+      await sleep(900);
+      const st2 = JSON.parse((await W.eval("JSON.stringify(window.composeDebug.state())")) || "{}");
+      ok("点某一行的 ✎ → 目标变成那条会话", /对着这条说/.test(st2.to || ""), JSON.stringify(st2.to));
+      ok("目标行同时报出了它属于哪个目录", /·/.test(st2.to || ""), JSON.stringify(st2.to));
+
+      // 空文字不许发出去（也不该起进程）
+      const empty = String(
+        await W.eval("window.clawd.saySend(null,'   ').then(()=>'ALLOWED').catch(e=>'ERR:'+String(e))")
+      );
+      ok("空的一句话发不出去（在宿主侧就被拦住）", /ERR:.*还没写/.test(empty), empty.slice(0, 60));
+
+      // 窗口白名单又扩了一扇窗，必须钉住：输入窗只能"说话"，不能顺走别人的命令。
+      const cross = String(
+        await W.eval(
+          "window.__TAURI_INTERNALS__.invoke('theme_get',{}).then(()=>'ALLOWED').catch(e=>'ERR:'+String(e))"
+        )
+      );
+      ok("输入窗调别的窗口的命令 → 被拒", /ERR:.*forbidden/.test(cross), cross.slice(0, 60));
+
+      // 这扇窗是**新加的**（S12），而 Tauri 的 ACL 是"没列进 capabilities 的窗口
+      // 一条 core 权限都没有"。漏掉它的表现极其安静：`invoke('plugin:event|listen')`
+      // 直接被拒，页面收不到 compose:open / say:done，界面上只是"目标不刷新、发完没回音"。
+      // 第一版就漏了——当时把这现象误判成"emit 赶在窗口 show 的那一帧丢了"，
+      // 于是加了 500ms 轮询兜底，把 bug 盖住了（轮询走的是普通命令，不受 ACL 管）。
+      const listen = String(
+        await W.eval(
+          "window.__TAURI_INTERNALS__.invoke('plugin:event|listen',{event:'verify-probe',target:{kind:'Any'},handler:1}).then(r=>'OK:'+String(r)).catch(e=>'ERR:'+String(e))"
+        )
+      );
+      ok("输入窗拿到事件权限（capabilities/compose.json 真生效了）", /^OK:/.test(listen), listen.slice(0, 70));
+
+      // 给了事件权限不等于把窗口能力也给了：compose 那份 capability 只有 core:event:default。
+      const winCall = String(
+        await W.eval(
+          "window.__TAURI_INTERNALS__.invoke('plugin:window|set_position',{label:'compose',value:{x:0,y:0}}).then(()=>'ALLOWED').catch(e=>'ERR:'+String(e))"
+        )
+      );
+      ok("输入窗没有窗口能力（最小面：它不该能挪自己）", /ERR:/.test(winCall), winCall.slice(0, 70));
+
+      // 关闭是 hide 而不是 destroy：下次点 ✎ 要能立刻复用（重建成 8 秒不值）
+      await W.eval("window.clawd.composeClose(), 1");
+      await sleep(300);
+      const again = JSON.parse((await W.eval("window.clawd.composeContext().then(t=>JSON.stringify(t))")) || "null");
+      ok("关掉之后窗口还在、目标还在（下次打开不用重建）", !!(again && again.id === "s-say"), JSON.stringify(again));
+      W.close();
+    }
+    await post("/state", { session_id: "s-say", event: "SessionEnd" }, ep.token);
+
     // ---------- 7. gaze：Rust 侧的光标线程 ----------
     //
     // Electron 版主进程用 screen.getCursorScreenPoint()，Rust 版用 GetCursorPos。
@@ -855,6 +962,52 @@ async function main() {
       ok("看板经 IPC 拿到快照", (await D.eval("typeof window.dashboard.getSnapshot === 'function'")) === true);
       const snap = JSON.parse((await D.eval("window.dashboard.getSnapshot().then(s=>JSON.stringify(s))")) || "null");
       ok("快照有会话列表字段", !!(snap && Array.isArray(snap.sessions)));
+
+      // ---- 9.1 看板的内容：从"谁在发呆"变成"这条会话在干什么" ----
+      // 用户 2026-11-05 的原话是「现在的看板没有任何有效信息」。
+      // 这两条断言钉的就是"有效"这两个字：
+      //   dshSessions 得真的把投影里那些字段带出来；
+      //   卡片 DOM 里得真的把它们写出来（不是"函数被调用了"）。
+      //
+      // 夹具在 7.5 那节末尾被删掉了（当时要还原成干净状态），这里补回来——
+      // 否则这节测的是"没有会话时的看板"，那恰好是最没有信息量的一屏。
+      writeDshFixture("idle", Date.now());
+      await sleep(1800);
+      const rich = JSON.parse((await D.eval("window.dashboard.dshSessions().then(r=>JSON.stringify(r))")) || "null");
+      ok("看板拿到了会话内容（dsh_sessions）", Array.isArray(rich), Array.isArray(rich) ? `${rich.length} 条` : "null");
+      const one = (Array.isArray(rich) ? rich : []).find((r) => r.id === DSH_FIXTURE_ID);
+      ok(
+        "内容里有最后一轮问答 / 模型 / token / 上下文",
+        !!one &&
+          one.last_prompt === "验证看板的最后一轮" &&
+          /这一行来自夹具/.test(one.last_reply || "") &&
+          one.model === "fixture-model" &&
+          one.tokens_out === 340 &&
+          one.ctx_window === 200000,
+        one ? JSON.stringify({ p: one.last_prompt, m: one.model, out: one.tokens_out }) : "没有夹具那条"
+      );
+      const cardText = String(await D.eval("document.getElementById('list').textContent"));
+      ok(
+        "卡片上真的写出了对话与用量",
+        /验证看板的最后一轮/.test(cardText) && /这一行来自夹具/.test(cardText) && /fixture-model/.test(cardText),
+        JSON.stringify(cardText.slice(0, 80))
+      );
+      ok("卡片上写出了上下文占比（不是只给一个裸数字）", /上下文\s*[\d.<]+\s*%/.test(cardText), JSON.stringify(cardText.slice(0, 120)));
+      ok("顶部有聚合（几条 / 在跑 / token）", /条/.test(String(await D.eval("document.getElementById('sum').textContent"))), "");
+
+      // 演示模式：光投屏的时候，对话内容比标题更不能露
+      await D.eval("document.getElementById('demo').click(), 1");
+      await sleep(300);
+      const demoText = String(await D.eval("document.getElementById('list').textContent"));
+      ok(
+        "演示模式把对话内容也藏起来（不只是标题）",
+        !/验证看板的最后一轮/.test(demoText) && !/这一行来自夹具/.test(demoText),
+        JSON.stringify(demoText.slice(0, 60))
+      );
+      await D.eval("document.getElementById('demo').click(), 1");
+      // 收摊：夹具用完就撤，后面的章节不该多出一条会话
+      fs.rmSync(DSH_FIXTURE, { recursive: true, force: true });
+      await sleep(600);
       // SEC-09：快照里只出 basename，完整路径不许进渲染层
       const leak = await D.eval("JSON.stringify(window.__lastSnapshot||null) + document.body.textContent");
       ok("快照里没有完整 cwd（SEC-09 分层仍在）", typeof leak === "string" && !/[A-Za-z]:\\\\Users\\\\/.test(leak), "");

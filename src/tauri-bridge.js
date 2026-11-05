@@ -142,6 +142,20 @@
     // 拉（启动时一次）+ 推（看板里切主题）两条，与 Electron 版同构。
     getTheme: () => call("theme_get"),
     onTheme: (cb) => on("theme", cb),
+    // ---- 「说一句话」（2026-11-05）----
+    // 打开输入窗。id 为空 = 新起一条；给了 id = 接着它说（宿主会先判能不能续）。
+    openCompose: (id) => call("compose_open", { id: id || null }),
+    // 真正发出去。**参数只有 id 和文字**：目录由宿主从状态机里查，
+    // 前端传不进来一个路径——这条边界是有意的（见 main.rs 的 say_send）。
+    saySend: (id, text) => call("say_send", { id: id || null, text: String(text) }),
+    // 结局（成功 / 失败原因）从这条回来。不看返回值，是因为它可能在
+    // 几分钟后才到——那时调用它的那行代码早就跑完了。
+    onSayDone: (cb) => on("say:done", cb),
+    // 输入窗自己用：加载完来要一次目标（第一次打开时 compose:open 会赶在
+    // 页面就绪之前发出，收不到），以及关掉自己。
+    composeContext: () => call("compose_context"),
+    composeClose: () => send("compose_close"),
+    onComposeOpen: (cb) => on("compose:open", cb),
   };
 
   // ------------------------------------------------------------
@@ -170,6 +184,12 @@
     listThemes: () => call("theme_list"),
     setTheme: (id) => call("theme_set", { id }),
     onTheme: (cb) => on("theme", cb),
+    // 看板的**内容**：每条会话在干什么（最后一轮对话、模型、token、上下文）。
+    // 和 getSnapshot 分两条：那是"猫在演什么"，这是"会话里发生了什么"。
+    dshSessions: () => call("dsh_sessions"),
+    // 对着某条会话说一句（和桌宠走同一个 say_send）
+    saySend: (id, text) => call("say_send", { id: id || null, text: String(text) }),
+    onSayDone: (cb) => on("say:done", cb),
   };
 
   // 诊断用：回归脚本要靠它判断"现在到底是哪个宿主在跑"。

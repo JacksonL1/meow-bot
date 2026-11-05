@@ -93,6 +93,15 @@ const STEP_STALE_MS: i64 = 30 * 60 * 1000;
 /// 让"关键词从哪来"这件事在本文件里一目了然。
 const KEYWORD_CHARS: usize = 8;
 
+/// 看板要显示"最后说了什么"，但投影里的 `turnOutline` 存的是**全文**——
+/// 一轮动辄几 KB，几十条会话一起读进来就是几十 MB 常驻内存，而且每秒都在克隆。
+/// 所以解析当场就截断：一段话的**开头**足够回答"这条会话在聊什么"。
+///
+/// 提问给 160：用户自己的话通常很短，截太狠反而看不出区别。
+/// 回复给 400：它是"结果长什么样"，多留一点才有信息量。
+const MAX_PROMPT_CHARS: usize = 160;
+const MAX_REPLY_CHARS: usize = 400;
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -182,6 +191,43 @@ pub struct Obs {
     pub turns: u64,
     /// 权限预设（read-only / ask …）。只用于诊断展示。
     pub preset: Option<String>,
+
+    // ---- 2026-11-05：看板要能回答"这条会话到底在干什么" ----
+    //
+    // 此前看板只有 title / cwd / 状态 / 闲置时间。用户的原话是
+    // 「现在的看板没有任何有效信息」——因为那四样加起来只说明"有这么一条会话"。
+    // 下面这些字段全部是投影里**已经存着**的东西，只是以前没解析：
+    // 多读一份同样的 JSON 不会增加任何 I/O，只是把已有字节翻译成人话。
+    /// 最后一轮用户说的话（截断到 MAX_PROMPT_CHARS）。
+    pub last_prompt: Option<String>,
+    /// 最后一轮的回复开头（截断到 MAX_REPLY_CHARS）。空 = 还没答完。
+    pub last_reply: Option<String>,
+    /// 最后一轮是第几轮（`turnOutline.turns[].turn`）。0 = 还没跑过。
+    pub last_turn: u64,
+    /// 这一轮用的是哪个供应商 / 模型。用户自己配过供应商，所以这不能写死。
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    /// 累计 token：进（未命中缓存的输入）/ 出。
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    /// 上下文压力：已用 / 窗口。占比高到一定程度就该提醒用户开新会话了。
+    pub ctx_tokens: u64,
+    pub ctx_window: u64,
+    /// `sessionStats` 里的步数与耗时（LLM / 工具分开记）。
+    pub steps: u64,
+    pub llm_ms: u64,
+    pub tool_ms: u64,
+    /// 这条会话是在**哪套 agent preset 下**建起来的。
+    ///
+    /// 它决定了一件很实际的事：能不能从桌宠里接着它说。
+    /// `dsh headless`（一次性 runner）把这条写成了硬闸——记录过 preset 的会话
+    /// 一律不接受（它组不出那套 preset 的工具/提示词），报错文案是
+    /// `runs under agent preset "…", which the one-shot runner does not compose`。
+    /// 桌面端 / 网页端建的会话都有；headless 自己建的没有（= None = 可续）。
+    ///
+    /// 我们**不去绕**这道闸：绕过它等于拿一套不同的工具集写用户那条会话。
+    /// 只是把它提前告诉界面，别让用户打了一屏字才被拒。
+    pub agent_preset: Option<String>,
 }
 
 impl Obs {
@@ -237,6 +283,110 @@ fn row<'a>(rows: &'a Value, key: &str) -> Option<&'a Value> {
     rows.get(key)?.get("val")
 }
 
+/// 看板能拿到的那一份会话数据。
+///
+/// 为什么不直接把 `Obs` 序列化出去：Obs 里带着**完整 cwd**（SEC-09 的红线——
+/// 快照会进渲染进程、进看板、上屏幕）。这里的 `cwd` 和 `SessionView` 一样
+/// 只留 basename，两者走同一个 `state::public_cwd`，不会有一处忘了截。
+///
+/// 另一个理由是**稳定性**：Obs 是"探测内部长什么样"，会随探测逻辑变；
+/// 这个结构是"看板承诺给你什么"，改它要同时改前端。
+#[derive(Clone, Debug, Serialize)]
+pub struct RichSession {
+    pub id: String,
+    pub title: Option<String>,
+    pub cwd: Option<String>,
+    /// 最后一轮的原话 / 回复开头。
+    pub last_prompt: Option<String>,
+    pub last_reply: Option<String>,
+    pub last_turn: u64,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    pub ctx_tokens: u64,
+    pub ctx_window: u64,
+    pub turns: u64,
+    pub steps: u64,
+    pub llm_ms: u64,
+    pub tool_ms: u64,
+    pub preset: Option<String>,
+    /// 最后一次提问的时刻（ms，epoch）。前端拿它和 Date.now() 比，
+    /// 不拿它做排序——排序用 Store 那边的 idleMs，因为那个才是"猫看到的时间"。
+    pub last_prompt_at: i64,
+    /// 这个会话的状态我们到底看不看得见（false = headless，只有 mtime）。
+    pub has_stats: bool,
+    /// None = 这条会话是 headless 建的，能被桌宠接着写；Some = 桌面端/网页端的，
+    /// 一次性 runner 写不进去（原因见 `Obs::agent_preset`）。
+    pub agent_preset: Option<String>,
+    /// 这条回复不是从投影读来的，而是**桌宠自己那一次发送**从 stdout 捡到的。
+    /// 界面上要区别对待：投影里的回复会随会话更新，这一条只是"那一刻的答案"。
+    pub reply_from_say: bool,
+    /// `provider` / `model` 不是这条会话自己记的，而是从 profile 的
+    /// `agent-default-model` 补来的（headless 会话不在投影里写 `modelSelection`）。
+    /// 界面要标一句"默认"，否则用户会以为这条会话真的被钉在了这个模型上。
+    pub model_default: bool,
+}
+
+impl Obs {
+    pub fn rich(&self) -> RichSession {
+        RichSession {
+            id: self.id.clone(),
+            title: self.title.clone(),
+            cwd: crate::state::public_cwd(&self.cwd),
+            last_prompt: self.last_prompt.clone(),
+            last_reply: self.last_reply.clone(),
+            last_turn: self.last_turn,
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+            tokens_in: self.tokens_in,
+            tokens_out: self.tokens_out,
+            ctx_tokens: self.ctx_tokens,
+            ctx_window: self.ctx_window,
+            turns: self.turns,
+            steps: self.steps,
+            llm_ms: self.llm_ms,
+            tool_ms: self.tool_ms,
+            preset: self.preset.clone(),
+            last_prompt_at: self.last_prompt_at,
+            has_stats: self.has_stats,
+            agent_preset: self.agent_preset.clone(),
+            reply_from_say: false,
+            model_default: false,
+        }
+    }
+}
+
+/// 取一个非负整数。缺失 / 类型不对 / 负数一律当 0——这些都是展示用的计数，
+/// 少一个数字比因为一个脏字段整条会话看不见要好得多。
+fn num(v: Option<&Value>) -> u64 {
+    v.and_then(|x| x.as_i64()).unwrap_or(0).max(0) as u64
+}
+
+/// 从投影里取一段**人能读**的文本：压掉换行和控制字符，截断加省略号。
+///
+/// 为什么必须压换行：投影里的 prompt / response 是 Markdown 原文，一整段带十几个
+/// 换行；看板每行只给一行高度，不压平就会把卡片撑成一堵墙。
+fn snippet(v: Option<&Value>, max: usize) -> Option<String> {
+    let raw = v?.as_str()?;
+    let flat: String = raw
+        .chars()
+        // 控制字符去掉，**但换行/制表留下**——下一步的 split_whitespace 会把它们
+        // 折成空格。先无条件 filter 掉的话，"第一行\n第二行" 会粘成一个词。
+        .filter(|c| !c.is_control() || c.is_whitespace())
+        .map(|c| if c == '\u{00a0}' { ' ' } else { c })
+        .collect();
+    let flat = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.is_empty() {
+        return None;
+    }
+    let mut out: String = flat.chars().take(max).collect();
+    if flat.chars().count() > max {
+        out.push('…');
+    }
+    Some(out)
+}
+
 /// 解析**单个会话**的投影文件。纯函数，不碰文件系统，方便直接拿真实样本做测试。
 ///
 /// `mtime_ms` 是文件自己的修改时刻，只在投影里没有 `lastPromptAt` 时用来兜底。
@@ -278,6 +428,20 @@ pub fn parse_session(id: &str, raw: &str, mtime_ms: i64) -> Option<Obs> {
     let has_prompt_at = real_prompt_at.is_some();
     let last_prompt_at = real_prompt_at.unwrap_or(mtime_ms);
 
+    // ---- 看板要的内容（全部来自同一份投影，不额外读盘） ----
+    //
+    // `turnOutline.turns` 是 DSH 自己维护的"这一轮问了什么、答了什么"。
+    // 它比 title 准得多：title 是 LLM 拟的一句话，而这里是**原话**。
+    // 取最后一项而不是拼接全文——看板一行放不下，而且旧轮次没人看。
+    let last_turn_row = row(rows, "turnOutline")
+        .and_then(|o| o.get("turns"))
+        .and_then(|t| t.as_array())
+        .and_then(|a| a.last());
+    // 供应商/模型：用户自己配过，所以不能写死 deepseek。
+    let used = row(rows, "modelSelection").and_then(|m| m.get("lastUsed"));
+    let totals = row(rows, "tokenUsage").and_then(|t| t.get("totals"));
+    let ctx = row(rows, "contextPressure");
+
     Some(Obs {
         id: id.to_string(),
         title: row(rows, "title")
@@ -303,14 +467,48 @@ pub fn parse_session(id: &str, raw: &str, mtime_ms: i64) -> Option<Obs> {
         last_prompt_at,
         has_prompt_at,
         has_stats: stats.is_some(),
-        turns: stats
-            .and_then(|x| x.get("turns"))
-            .and_then(|x| x.as_i64())
-            .unwrap_or(0)
-            .max(0) as u64,
+        turns: {
+            // 轮数优先取 sessionStats；没有就退到 turnBoundary.lastTurn——
+            // `dsh headless` 建的会话不写 sessionStats，但 turnBoundary 是有的
+            // （实测：只写了 title + turnBoundary + tokenUsage + contextPressure）。
+            // 少了这条兜底，桌宠自己发起的那条会话在看板上会永远显示"0 轮"。
+            let n = stats
+                .and_then(|x| x.get("turns"))
+                .and_then(|x| x.as_i64())
+                .unwrap_or(0)
+                .max(0) as u64;
+            if n > 0 {
+                n
+            } else {
+                num(row(rows, "turnBoundary").and_then(|b| b.get("lastTurn")))
+            }
+        },
         preset: row(rows, "permissions")
             .and_then(|p| p.get("preset"))
             .and_then(|x| x.as_str())
+            .map(|x| x.to_string()),
+
+        last_prompt: snippet(last_turn_row.and_then(|t| t.get("prompt")), MAX_PROMPT_CHARS),
+        last_reply: snippet(last_turn_row.and_then(|t| t.get("response")), MAX_REPLY_CHARS),
+        last_turn: num(last_turn_row.and_then(|t| t.get("turn"))),
+        provider: used
+            .and_then(|u| u.get("provider"))
+            .and_then(|x| x.as_str())
+            .map(|x| x.to_string()),
+        model: used
+            .and_then(|u| u.get("model"))
+            .and_then(|x| x.as_str())
+            .map(|x| x.to_string()),
+        tokens_in: num(totals.and_then(|t| t.get("uncachedInputTokens"))),
+        tokens_out: num(totals.and_then(|t| t.get("outputTokens"))),
+        ctx_tokens: num(ctx.and_then(|c| c.get("pressureTokens"))),
+        ctx_window: num(ctx.and_then(|c| c.get("contextWindow"))),
+        steps: num(stats.and_then(|x| x.get("steps"))),
+        llm_ms: num(stats.and_then(|x| x.get("llmMs"))),
+        tool_ms: num(stats.and_then(|x| x.get("toolMs"))),
+        agent_preset: row(rows, "agentPreset")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
             .map(|x| x.to_string()),
     })
 }
@@ -711,6 +909,19 @@ mod tests {
             has_stats: true,
             turns: 0,
             preset: None,
+            last_prompt: None,
+            last_reply: None,
+            last_turn: 0,
+            provider: None,
+            model: None,
+            tokens_in: 0,
+            tokens_out: 0,
+            ctx_tokens: 0,
+            ctx_window: 0,
+            steps: 0,
+            llm_ms: 0,
+            tool_ms: 0,
+            agent_preset: None,
         }
     }
 
@@ -722,11 +933,23 @@ mod tests {
         "identity": { "createdAt": 1788147578033, "cwd": "E:\\JacksonLee\\project\\DeepseekWorkSpace" },
         "rows": {
           "sessionStats": { "ver": 1, "seq": 216, "val": {
-            "turns": 4, "steps": 4, "lastTurn": 4, "openStep": null, "pendingCalls": {} } },
+            "turns": 4, "steps": 4, "lastTurn": 4, "openStep": null, "pendingCalls": {},
+            "llmMs": 6228, "toolMs": 0 } },
           "title": { "ver": 1, "seq": 216, "val": "Hi Who am i" },
           "sessionListMetadata": { "ver": 1, "seq": 216, "val": { "blank": false, "lastPromptAt": 1788150298325 } },
           "plan": { "ver": 2, "seq": 216, "val": { "active": false } },
-          "permissions": { "ver": 1, "seq": 216, "val": { "preset": "read-only", "sandbox": "read-only", "approval": "ask" } }
+          "permissions": { "ver": 1, "seq": 216, "val": { "preset": "read-only", "sandbox": "read-only", "approval": "ask" } },
+          "agentPreset": { "ver": 1, "seq": 216, "val": "minimal" },
+          "modelSelection": { "ver": 1, "seq": 216, "val": {
+            "lastUsed": { "provider": "deepseek-official", "model": "Qwen", "reasoningEffort": "off" }, "pending": null } },
+          "tokenUsage": { "ver": 2, "seq": 216, "val": {
+            "totals": { "uncachedInputTokens": 1124, "outputTokens": 164, "cacheReadTokens": 0, "cacheWriteTokens": 0 },
+            "last": null } },
+          "contextPressure": { "ver": 5, "seq": 216, "val": { "surfaceTokens": 230, "contextWindow": 1000000, "pressureTokens": 1124 } },
+          "turnOutline": { "ver": 2, "seq": 216, "val": { "turns": [
+            { "turn": 1, "seq": 12, "prompt": "Hi Who am i", "response": "" },
+            { "turn": 4, "seq": 43, "prompt": "Hi Who am i",
+              "response": "Hi there!\n\nI don't actually know who you are…" } ], "draft": "" } }
         }
       }
     }"#;
@@ -755,6 +978,59 @@ mod tests {
         assert!(!o.open_step);
         assert!(o.has_stats);
         assert_eq!(o.phase(), Phase::Idle);
+    }
+
+    // 看板要能回答"这条会话在干什么"。这一条把"从投影里读得出人话"钉住：
+    // 少了任何一个字段，看板就会退回"只有标题和状态"的样子——也就是用户说的
+    // 「没有任何有效信息」。
+    #[test]
+    fn parses_what_the_session_is_actually_about() {
+        let o = parse_session("session-a", SAMPLE, 0).unwrap();
+        // 最后的**原话**，不是 LLM 拟的标题
+        assert_eq!(o.last_prompt.as_deref(), Some("Hi Who am i"));
+        assert_eq!(o.last_turn, 4, "取的是最后一项，不是第一项");
+        // 换行必须被压平：看板每行只有一个行高，带换行的原文会把卡片撑成一堵墙
+        let reply = o.last_reply.as_deref().unwrap();
+        assert!(!reply.contains('\n'), "回复里的换行没压平：{reply:?}");
+        assert!(
+            reply.starts_with("Hi there! I"),
+            "换行要折成空格，不能把两个词粘在一起：{reply:?}"
+        );
+        // 供应商和模型是用户自己配的，不能写死
+        assert_eq!(o.provider.as_deref(), Some("deepseek-official"));
+        assert_eq!(o.model.as_deref(), Some("Qwen"));
+        assert_eq!((o.tokens_in, o.tokens_out), (1124, 164));
+        assert_eq!((o.ctx_tokens, o.ctx_window), (1124, 1_000_000));
+        assert_eq!((o.steps, o.llm_ms), (4, 6228));
+        // 桌面端建的会话记着 preset，因此不能被桌宠续写——这个事实要在
+        // 窗口打开的那一刻就说出来，不能等用户打完字才在报错里看到。
+        assert_eq!(o.agent_preset.as_deref(), Some("minimal"));
+    }
+
+    // headless 自己建的会话没有 agentPreset 行 → 可以被 `--session-id` 续上。
+    // 这一条是整个「从桌宠发消息」功能能不能成立的前提。
+    #[test]
+    fn headless_session_has_no_preset_and_is_therefore_resumable() {
+        let o = parse_session("session-h", SAMPLE_HEADLESS, 1_700_000_000_000).unwrap();
+        assert!(o.agent_preset.is_none(), "headless 会话不该有 preset");
+    }
+
+    // 投影里存的是全文，一轮动辄几 KB；几十条会话每秒克隆一遍就是几十 MB。
+    // 所以解析当场截断——但截断必须留下省略号，否则读者会以为原文就这么短。
+    #[test]
+    fn long_text_is_truncated_with_an_ellipsis() {
+        let long = "字".repeat(MAX_PROMPT_CHARS * 2);
+        let raw = format!(
+            r#"{{"version":7,"record":{{"identity":{{}},"rows":{{
+              "sessionListMetadata":{{"ver":1,"seq":1,"val":{{"blank":false,"lastPromptAt":1}}}},
+              "turnOutline":{{"ver":2,"seq":1,"val":{{"turns":[
+                {{"turn":1,"seq":1,"prompt":"{long}","response":""}}]}}}}}}}}}}"#
+        );
+        let o = parse_session("s", &raw, 0).unwrap();
+        let p = o.last_prompt.unwrap();
+        assert_eq!(p.chars().count(), MAX_PROMPT_CHARS + 1, "截断后应多出一个省略号");
+        assert!(p.ends_with('…'));
+        assert!(o.last_reply.is_none(), "空回复不能变成空字符串");
     }
 
     // 旧版单文件那条路已经废弃了，但"喂错形状"必须安静地什么都不产出，

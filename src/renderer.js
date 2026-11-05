@@ -1498,7 +1498,15 @@ function buildBubbleRow(s) {
   ttl.className = "ttl";
   ttl.textContent = bubbleTitle(s);
 
-  row.append(dot, tag, ttl);
+  // 对着**这一条**说一句。它和底部那个「说一句」不是重复：
+  // 底部是"新起一条"，这个是"接着这条说"。hover 才显形，见 index.html 的注释。
+  const say = document.createElement("span");
+  say.className = "say";
+  say.dataset.say = String(s.id || "");
+  say.textContent = "✎";
+  say.title = "接着这条说一句";
+
+  row.append(dot, tag, ttl, say);
 
   const more = document.createElement("div");
   more.className = "bmore";
@@ -1600,6 +1608,13 @@ function renderBubble(list) {
 // 委托在列表上而不是每行挂一个监听：行是重建的，挂在上面的监听会跟着一起没。
 if (typeof document !== "undefined" && document.getElementById("bubble-list")) {
   document.getElementById("bubble-list").addEventListener("click", (e) => {
+    // ✎ 必须先判：它长在 .brow 里面，不拦住的话这一次点击会顺带把详情展开。
+    const say = e.target && e.target.closest ? e.target.closest(".say") : null;
+    if (say) {
+      e.stopPropagation();
+      openCompose(say.dataset.say || null);
+      return;
+    }
     const row = e.target && e.target.closest ? e.target.closest(".brow") : null;
     if (!row) return;
     const id = row.dataset.sid;
@@ -1614,6 +1629,27 @@ if (typeof document !== "undefined" && document.getElementById("bubble-list")) {
       rec.row.classList.toggle("open", on);
     }
   });
+}
+
+// 打开输入窗。id 为空 = 新起一条会话；给了 id = 接着那条说
+// （能不能续是宿主说了算，见 Rust 侧 say.rs 文件头第 3 条）。
+//
+// 为什么不把输入框直接画在泡泡里：桌宠窗口只有 240 宽、是透明的、
+// 还要维持"只有猫和泡泡接鼠标"的命中区。在那种地方打字，一行只够放五个字，
+// 中文输入法的候选条还会顶到屏幕边上。单独一扇 400px 的小窗，
+// 是"打字"这件事能得到的最低尊重——而这个功能的价值全在打字上。
+function openCompose(id) {
+  if (!window.clawd || typeof window.clawd.openCompose !== "function") return;
+  const p = window.clawd.openCompose(id || null);
+  // 打不开窗（比如 DSH 没装）不该静默：用户点了 ✎ 而什么都没发生，
+  // 只会以为是程序卡了。这里至少留一条控制台记录。
+  if (p && typeof p.catch === "function") p.catch((err) => console.error("[compose]", err));
+}
+
+if (typeof document !== "undefined" && document.getElementById("bubble-say")) {
+  document
+    .getElementById("bubble-say")
+    .addEventListener("click", () => openCompose(null));
 }
 
 // 泡泡贴在哪：按**猫耳尖的真实位置**算，不是按窗口高度写死一个数。
@@ -2064,6 +2100,22 @@ window.petDebug = {
     const rec = bubbleRows.get(String(id));
     if (!rec) return false;
     rec.row.click();
+    return true;
+  },
+  // 点某一行右侧的 ✎（对着那条会话说）。和 clickBubble 一样走真实路径。
+  clickSay: (id) => {
+    const rec = bubbleRows.get(String(id));
+    if (!rec) return false;
+    const btn = rec.row.querySelector(".say");
+    if (!btn) return false;
+    btn.click();
+    return true;
+  },
+  // 点泡泡底部那个「说一句」（新起一条）。
+  clickSayNew: () => {
+    const el = document.getElementById("bubble-say");
+    if (!el) return false;
+    el.click();
     return true;
   },
   // 最近 30 条 agent 事件（主进程记录的）：每个事件叫什么、把会话从什么改成了什么，

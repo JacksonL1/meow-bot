@@ -238,7 +238,10 @@ fn sanitize_cwd(raw: Option<&str>) -> Option<String> {
 // SEC-09：分层处理，不要一刀切。
 //   存储层：保留完整路径——S6 的「复制路径」需要它
 //   快照层：只输出最后一段目录名——快照会进渲染进程、进看板、上屏幕
-fn public_cwd(full: &Option<String>) -> Option<String> {
+//
+// `pub(crate)` 是给 dsh.rs 的看板视图复用的：那条链路同样"内部留全路径、
+// 出门只留 basename"，两处若各写一份，迟早会有一处忘了截。
+pub(crate) fn public_cwd(full: &Option<String>) -> Option<String> {
     let full = full.as_ref()?;
     let base = full
         .split(['\\', '/'])
@@ -247,6 +250,40 @@ fn public_cwd(full: &Option<String>) -> Option<String> {
         .unwrap_or("");
     let b: String = base.chars().take(MAX_CWD_PUBLIC).collect();
     if b.is_empty() { None } else { Some(b) }
+}
+
+/// 给输入窗用的目录显示：**最后两段**，前面用 `…` 省略。
+///
+/// 为什么不沿用 `public_cwd` 的 basename：那句话要落到哪个目录，是这个窗里
+/// 唯一需要用户确认的事（DSH 按目录分桶存会话，起错目录等于起在空工作区），
+/// 而 `…\project\a` 和 `…\work\a` 的 basename 一模一样——只看一段等于没看。
+/// 为什么也不给全路径：`C:\Users\<名字>\Documents\...\...` 会把这个 400px 的
+/// 小窗撑破，而前缀那几段里没有任何决策信息。
+pub(crate) fn tail_cwd(full: &Option<String>) -> Option<String> {
+    const TAIL_SEGMENTS: usize = 2;
+    let full = full.as_ref()?;
+    let parts: Vec<&str> = full
+        .split(['\\', '/'])
+        .filter(|s| !s.is_empty())
+        .collect();
+    let n = parts.len();
+    if n == 0 {
+        return None;
+    }
+    let take = TAIL_SEGMENTS.min(n);
+    let mut s = String::new();
+    if n > take {
+        s.push('…');
+        s.push('\\');
+    }
+    s.push_str(&parts[n - take..].join("\\"));
+    // 极端长的单段目录名（中文项目名 + 一堆后缀）仍然要收，不然 `.to` 那行会溢出。
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() > MAX_CWD_PUBLIC {
+        let cut = chars.len() - MAX_CWD_PUBLIC;
+        return Some(format!("…{}", chars[cut..].iter().collect::<String>()));
+    }
+    Some(s)
 }
 
 fn now_ms() -> u64 {
@@ -566,6 +603,20 @@ impl Store {
         self.sessions.get(id).and_then(|s| s.cwd.as_deref())
     }
 
+    /// 最近有动静的那条会话在哪个目录。
+    ///
+    /// 用途只有一个：用户从桌宠里**新起**一条会话时，它得落在某个目录里，
+    /// 而"上一次干活的地方"是最不容易猜错的答案——比回家目录好，比让用户
+    /// 先从下拉框里挑一个目录好。cwd 对 DSH 不是小事：会话按目录分桶存，
+    /// 选错目录等于起在一个空工作区里。
+    pub fn latest_cwd(&self) -> Option<String> {
+        self.sessions
+            .values()
+            .filter(|s| s.cwd.is_some())
+            .max_by_key(|s| s.last_at)
+            .and_then(|s| s.cwd.clone())
+    }
+
     // 超出上限时淘汰最久没动静的那条，保证内存有界
     fn evict_oldest(&mut self) {
         let oldest = self
@@ -692,5 +743,35 @@ mod tests {
         let snap = st.snapshot();
         assert_eq!(snap.visual, Some(Visual::Working), "Meta 不许改状态");
         assert_eq!(snap.sessions[0].title.as_deref(), Some("重构状态机"));
+    }
+
+    // 输入窗那句「新会话 · …\project\DeepseekWorkSpace」就是它。
+    // 钉住的是"能区分两个同名末段目录"，而不是某种具体写法——省略号用几个、
+    // 分隔符用哪种反斜杠，都是外观，不是契约。
+    #[test]
+    fn tail_cwd_keeps_the_last_two_segments() {
+        let full = Some("E:\\JacksonLee\\project\\DeepseekWorkSpace".to_string());
+        assert_eq!(tail_cwd(&full).as_deref(), Some("…\\project\\DeepseekWorkSpace"));
+        let full = Some("E:\\work\\DeepseekWorkSpace".to_string());
+        assert_eq!(tail_cwd(&full).as_deref(), Some("…\\work\\DeepseekWorkSpace"));
+        assert_ne!(tail_cwd(&full), tail_cwd(&Some(
+            "E:\\JacksonLee\\project\\DeepseekWorkSpace".to_string()
+        )), "末段同名时，前一段必须能把两个目录区分开");
+    }
+
+    #[test]
+    fn tail_cwd_handles_short_and_empty_paths() {
+        assert_eq!(tail_cwd(&Some("C:\\".to_string())).as_deref(), Some("C:"));
+        assert_eq!(tail_cwd(&Some("C:\\Users\\Think".to_string())).as_deref(), Some("…\\Users\\Think"));
+        assert_eq!(tail_cwd(&None), None);
+        assert_eq!(tail_cwd(&Some("\\\\/\\\\".to_string())), None, "只有分隔符 = 没有目录可说");
+    }
+
+    #[test]
+    fn tail_cwd_caps_runaway_directory_names() {
+        let long = "E:\\x\\".to_string() + &"很长".repeat(60);
+        let out = tail_cwd(&Some(long)).unwrap();
+        assert!(out.chars().count() <= MAX_CWD_PUBLIC + 1, "超长目录名必须收在 {} 字内：{}", MAX_CWD_PUBLIC, out);
+        assert!(out.starts_with('…'), "截断要从左边截，末段才是有信息的那一半");
     }
 }
