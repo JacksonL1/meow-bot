@@ -4,7 +4,7 @@
 
 | 项 | 内容 |
 |---|---|
-| 状态 | ACTIVE（S1–S10 完成；S10-5 容器换成 Rust；S10-9 删掉 Electron + 接上签名） |
+| 状态 | ACTIVE（S1–S12 完成；S10-5 容器换成 Rust；S10-9 删掉 Electron + 接上签名；S11 接上 DSH 只做「看」；S12 从桌宠直接发消息 + 看板重做） |
 | 路径 | `E:\JacksonLee\project\clawd-starter` |
 | 技术栈 | **Tauri 2.12.5 + WebView2**（Rust `tiny_http` + `regex` + `windows-sys`，**不用任何 `tauri-plugin-*`**）。渲染层纯手写 SVG 无框架、无构建工具。`package.json` 的 `dependencies` / `devDependencies` 均为空 |
 | 入口 | Tauri：`src-tauri/src/main.rs`；渲染层：`src/index.html` |
@@ -13,7 +13,7 @@
 | 端点文件 | `%APPDATA%\clawd-starter\clawd-starter.port`，内容 `{port, token}`，权限 0600 |
 | 依赖服务 | 无。不连任何外部服务，只在本机开一个 HTTP 端口接收事件；签名时才会连一次时间戳服务（`timestamp.digicert.com`） |
 | 版本控制 | git，远端 `github.com/JacksonL1/meow-bot`，分支 `main`，与 origin 同步。**这一格不写提交总数**：写下一个数字的那个提交本身会让数字 +1，改一次错一次。要看数就 `git log --oneline \| wc -l`。**台账里凡是带计数的字段都有这个毛病**（体积那年改了七次，六次是在改数法），要么连口径和实测时间一起写，要么不写 |
-| 体积 | **34 个源文件，12402 行**（`src/` 9 个 = 6 js 3122 + 3 html 795、`src-tauri/` 13 个 = 9 rs 5297 + `build.rs` 3 + `Cargo.toml` 56 + `tauri.conf.json` 37 + `capabilities/default.json` 13、`hooks/` 2 个 644、`scripts/` 10 个 2435；`Cargo.lock` 是生成物不计），另有 `themes/` 下 22 个 SVG 资产。**2026-11-04 16:55 复核**（S11 全部落盘之后；同日早些时候加上 `dsh.rs` 的第一次是 34 个 / 11684 行，再早删掉 Electron 后是 33 个 / 10369 行——文件数没再变，涨的 718 行按目录拆得开：`src/` 6 js +224（泡泡改造）、3 html +174、`src-tauri/` 9 rs +249（`dsh.rs` 两轮修复）、`scripts/` +71，四者相加正好 718）。上一轮 11-03 首记写的 34 个 / 10361 有两处**加法错**，不是代码变了：`src-tauri/` 逐项只有 12 个（写成 13），`scripts/` 逐文件 `wc -l` 求和是 2168（写成 2160）——已按上表口径逐项复算。这条被反复改过多次，多数不是代码变了、是**数法或加法**变了（漏 html、漏 `src-tauri`、把 JSON 不算源文件、生成物混进来、逐项加错）。写体积时必须**连文件数、口径、实测时间一起写**，只写总数没法被复查 |上一轮 11-03 首记写的 34 个 / 10361 有两处**加法错**，不是代码变了：`src-tauri/` 逐项只有 12 个（写成 13），`scripts/` 逐文件 `wc -l` 求和是 2168（写成 2160）——已按上表口径逐项复算。这条被反复改过多次，多数不是代码变了、是**数法或加法**变了（漏 html、漏 `src-tauri`、把 JSON 不算源文件、生成物混进来、逐项加错）。写体积时必须**连文件数、口径、实测时间一起写**，只写总数没法被复查 |
+| 体积 | **38 个源文件，14778 行**（`src/` 11 个 = 7 js 3595 + 4 html 1028、`src-tauri/` 15 个 = 10 rs 6807 + `build.rs` 3 + `Cargo.toml` 56 + `tauri.conf.json` 37 + `capabilities/default.json` 13 + `capabilities/compose.json` 7、`hooks/` 2 个 644、`scripts/` 10 个 2588；`Cargo.lock` 是生成物不计），另有 `themes/` 下 22 个 SVG 资产。**2026-11-05 16:55 逐项 `wc -l` 复算**（S12 全部落盘之后；相对 11-04 记的 34 个 / 12402 行：**+4 个 / +2376 行**，其中新增文件 4 个合计 1033 行（`say.rs` 662 / `compose-renderer.js` 232 / `compose.html` 132 / `capabilities/compose.json` 7），其余 1343 行是既有文件的改动，按目录拆得开：`src/` 7 js +473、4 html +233、`src-tauri/` 10 rs +1510、`capabilities/compose.json` +7、`scripts/` +153，相加正好 2376）。上一轮 11-03 首记写的 34 个 / 10361 有两处**加法错**，不是代码变了：`src-tauri/` 逐项只有 12 个（写成 13），`scripts/` 逐文件 `wc -l` 求和是 2168（写成 2160）——已按上表口径逐项复算。这条被反复改过多次，多数不是代码变了、是**数法或加法**变了（漏 html、漏 `src-tauri`、把 JSON 不算源文件、生成物混进来、逐项加错）。写体积时必须**连文件数、口径、实测时间一起写**，只写总数没法被复查 |
 
 ## 它解决什么问题
 
@@ -66,7 +66,7 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 | 进程间桥 | 在 `window` 上装出与旧 `preload.js` 形状相同的 `clawd` / `bubble` / `dashboard`，只暴露动作 | `src/tauri-bridge.js` |
 | 端点约定 | 端点文件路径规则（纯 Node 也能算）+ `DEFAULT_PORT`，hook 与回归都用它 | `src/port-file.js` |
 | 调试 | 假数据源，三种用法（完整剧本 / 单事件 / 保持某状态）；形象对照截图；主题打包 | `scripts/fake-feed.js`、`preview-shot.js`、`build-preview-bundle.js` |
-| 回归闸门 | WebView2 CDP（`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=`），**121 条断言；当前 121 PASS / 0 FAIL**。开跑前比对源码与 exe 的 mtime，旧了直接拒跑 | `scripts/verify-tauri.js` + 共用的 `scripts/cdp.js` |
+| 回归闸门 | WebView2 CDP（`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=`），**124 条断言；最近一次真机跑 123 PASS / 0 FAIL（1 条 SKIP，环境调不动系统光标时响亮跳过、不冒充 PASS）**。开跑前比对源码与 exe 的 mtime，旧了直接拒跑 | `scripts/verify-tauri.js` + 共用的 `scripts/cdp.js` |
 | 打包闸门 | NSIS 安装包，**25 条断言；当前 25 PASS / 0 FAIL**（10 条只读 + 15 条真装/真跑/真卸） | `scripts/verify-bundle.js` + `src-tauri/tauri.conf.json` 的 `bundle` 段 |
 | 签名 | 由 `bundle.windows.signCommand` 调用；接 PFX 或证书库指纹，强制带 RFC3161 时间戳；也支持手工 `--verify` | `scripts/sign-release.js` |
 
