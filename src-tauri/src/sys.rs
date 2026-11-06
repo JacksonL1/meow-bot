@@ -16,7 +16,7 @@
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
-use windows_sys::Win32::Foundation::{BOOL, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
 };
@@ -32,7 +32,7 @@ use windows_sys::Win32::System::RemoteDesktop::{
 };
 use windows_sys::Win32::System::StationsAndDesktops::{CloseDesktop, OpenInputDesktop};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, GetMessageW, PostMessageW,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, GetMessageW,
     RegisterClassW, SystemParametersInfoW, TranslateMessage, DestroyWindow, HWND_MESSAGE, MSG,
     SPI_GETWORKAREA, WNDCLASSW, WM_WTSSESSION_CHANGE, WTS_SESSION_LOCK, WTS_SESSION_UNLOCK,
 };
@@ -299,10 +299,6 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-pub fn bool_ok(v: BOOL) -> bool {
-    v != 0
-}
-
 #[cfg(test)]
 mod autostart_tests {
     use super::*;
@@ -335,6 +331,8 @@ mod autostart_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 只在测试里用：往消息专用窗口模拟一次锁屏 / 解锁消息。
+    use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
 
     // 这条测的是**消息通路**，不是锁屏本身：往自己的消息专用窗口投 WM_WTSSESSION_CHANGE，
     // 看回调有没有按 wParam 收到 true / false。

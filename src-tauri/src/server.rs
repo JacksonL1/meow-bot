@@ -34,11 +34,6 @@ pub type OnChange = Arc<dyn Fn(&Snapshot) + Send + Sync>;
 pub const MAX_BODY_BYTES: u64 = 256 * 1024;
 pub const DEFAULT_PORT: u16 = 23333;
 
-pub struct ServerHandle {
-    pub port: u16,
-    pub token: String,
-}
-
 fn json_header() -> Header {
     Header::from_bytes(&b"Content-Type"[..], &b"application/json; charset=utf-8"[..]).expect("头写错了")
 }
@@ -206,14 +201,15 @@ fn handle(
     respond_json(req, 404, r#"{"error":"not found"}"#);
 }
 
-/// 起服务。返回实际端口（固定端口被占时回退随机端口，并明确报警）。
+/// 起服务。固定端口被占时回退随机端口，并明确报警；
+/// 实际端口写进 port 文件（write_port_file），调用方不需要再拿一遍。
 pub fn start(
     store: Arc<Mutex<Store>>,
     center: Arc<Center>,
     port_file: PathBuf,
     token: String,
     on_change: OnChange,
-) -> ServerHandle {
+) {
     let server = match Server::http(("127.0.0.1", DEFAULT_PORT)) {
         Ok(s) => s,
         Err(_) => {
@@ -256,7 +252,6 @@ pub fn start(
         eprintln!("[clawd] 注意：不是默认端口 {DEFAULT_PORT}，已装的 HTTP hook 需要更新");
     }
 
-    ServerHandle { port: actual_port, token }
 }
 
 fn write_port_file(file: &PathBuf, port: u16, token: &str) {

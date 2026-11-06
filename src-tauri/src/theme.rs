@@ -6,9 +6,9 @@
 //
 // 与 src/theme.js 等价（配置项、钳制区间、warnings 文案都对齐）。
 // ============================================================
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const SCHEMA_VERSION: i64 = 1;
 const STATE_NAMES: [&str; 7] = [
@@ -535,9 +535,3 @@ pub fn resolve_theme(candidates: &[String], default_id: &str) -> (Option<Theme>,
         }
     }
 }
-
-pub fn themes_root_display() -> String {
-    themes_dir().display().to_string()
-}
-
-pub fn _unused(_: &Path) {}

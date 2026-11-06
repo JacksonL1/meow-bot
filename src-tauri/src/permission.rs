@@ -115,6 +115,8 @@ impl Center {
         }
     }
 
+    /// 挂着的请求数。只有单测用——生产路径上没有"排队几条"这个展示位。
+    #[cfg(test)]
     pub fn size(&self) -> usize {
         self.pending.lock().map(|p| p.len()).unwrap_or(0)
     }

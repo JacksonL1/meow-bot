@@ -318,11 +318,6 @@ impl Store {
         self.timings = t;
     }
 
-    // oneshot 播放时长：主题可以改，但**只能改本来就属于 oneshot 的那三个**。
-    fn oneshot_ms(&self, v: Visual) -> Option<u64> {
-        oneshot_ms_with(&self.timings, v)
-    }
-
     fn log(&mut self, event: &str, sid: &str, from: &str, to: &str, how: &str) {
         self.recent.push_back(EventLog {
             t: now_ms(),

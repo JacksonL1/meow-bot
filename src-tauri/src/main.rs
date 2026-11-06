@@ -24,7 +24,7 @@ use permission::{Center, Notify, PendingView};
 use state::{Snapshot, Store, Timings};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::menu::{CheckMenuItem, CheckMenuItemBuilder, ContextMenu, MenuBuilder, MenuItemBuilder};
+use tauri::menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
@@ -1501,7 +1501,7 @@ fn main() {
             let on_change: server::OnChange = Arc::new(move |snap: &state::Snapshot| {
                 let _ = state_handle.emit("state", snap);
             });
-            let _srv = server::start(store, center, port_file, token, on_change);
+            server::start(store, center, port_file, token, on_change);
 
             // ---- 窗口 ----
             let win = build_main_window(&handle)?;

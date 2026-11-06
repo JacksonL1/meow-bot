@@ -409,12 +409,6 @@ fn is_delete_without_where(cmd: &str) -> bool {
     false
 }
 
-struct Rule {
-    code: &'static str,
-    level: Level,
-    text: &'static str,
-}
-
 fn push(hits: &mut Vec<Reason>, code: &str, level: Level, text: &str) {
     hits.push(Reason { code: code.to_string(), text: text.to_string(), level });
 }
