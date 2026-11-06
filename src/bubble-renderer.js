@@ -19,7 +19,16 @@ const el = {
   card: document.getElementById("card"),
   risk: document.getElementById("risk"),
   why: document.getElementById("why"),
+  note: document.getElementById("note"),
 };
+
+// 这行提示是卡片的一部分，每次 render 都要还原——否则上一轮的错误信息
+// 会一直挂在下一轮的卡片上，看着像这条请求也出错了。
+const NOTE = el.note.textContent;
+
+function setNote(text) {
+  el.note.textContent = text || NOTE;
+}
 
 // 命令是 agent 送过来的不可信字符串。风险理由是我们自己写的固定文案，
 // 但两条规矩一起守：一律 textContent、一律 createElement，不要 innerHTML。
@@ -47,6 +56,7 @@ function render(req) {
   // 否则第二个及以后的权限请求全都点不动，只能等到超时回落。
   el.allow.disabled = false;
   el.deny.disabled = false;
+  setNote("");
   el.tool.textContent = req.toolName || "Unknown";
   // textContent 而不是 innerHTML —— 命令是 agent 给的字符串，绝不能当 HTML 解析
   el.cmd.textContent = req.command || "(没有可显示的参数)";
@@ -71,14 +81,47 @@ function render(req) {
   });
 }
 
-function decide(decision) {
-  if (currentId === null) return;
+// 页面刚加载时 HTML 里那张卡片就是可见的，但还没有任何请求进来。
+// 这时按钮必须**点不动**：否则点下去会撞上下面 `currentId === null` 的分支，
+// 用户看到的是一张有内容、有按钮、点完却什么也不发生的卡片——
+// "我点了允许，没有任何返回"就是这么来的。只有 render() 拿到真请求才放开。
+el.allow.disabled = true;
+el.deny.disabled = true;
+
+async function decide(decision) {
+  if (currentId === null) {
+    setNote("这条请求已经结束了，等下一个请求吧");
+    window.bubble.close(null);
+    return;
+  }
   const id = currentId;
-  currentId = null;
-  // 立刻置灰，避免网络/主进程回写慢一拍时用户连点两次
+  // 立刻置灰，避免主进程回写慢一拍时用户连点两次
   el.allow.disabled = true;
   el.deny.disabled = true;
-  window.bubble.decide(id, decision);
+  try {
+    // 用等回执的那条通道（不是 send）：主进程会告诉我们"这条请求还在不在"。
+    // 返回 false 意味着它已经过期了——那就要把窗收掉，否则留下的是
+    // 一张永远点不动的卡片。
+    const ok = await window.bubble.decide(id, decision);
+    // 这一行**必须**先比对 id 再清：等回执的这几毫秒里，下一条请求可能已经
+    // 到了（render 刚把它的 id 写进 currentId）。无条件清空会把那张刚显示出来
+    // 的卡片变成"没有当前请求"——用户点「允许」，一个字节都不发出去，
+    // 请求一直挂到超时回落。（2026-11-06 实测复现：第二条卡片显示 Read、
+    // 按钮是亮的、点下去页面却回答"这条请求已经结束了"，120 秒后 204。）
+    if (currentId !== id) return;
+    currentId = null;
+    if (!ok) {
+      setNote("这条请求已经结束了（可能已经超时），交给 agent 自己决定");
+      window.bubble.close(id);
+    }
+  } catch (err) {
+    // 决定没送到主进程：按钮必须能再点一次，否则这扇窗就废了。
+    // 同理，已经在显示下一条时不要去动它的按钮和文案。
+    if (currentId !== id) return;
+    setNote(`没能把决定送回桌宠：${(err && err.message) || err}`);
+    el.allow.disabled = false;
+    el.deny.disabled = false;
+  }
 }
 
 el.allow.addEventListener("click", () => decide("allow"));
@@ -86,7 +129,7 @@ el.deny.addEventListener("click", () => decide("deny"));
 
 // Esc = 我不表态，交还给 Claude Code 原生提示（不是拒绝）
 window.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") decide("no-decision");
+  if (e.key === "Escape" && currentId !== null) decide("no-decision");
 });
 
 window.bubble.onRequest(render);

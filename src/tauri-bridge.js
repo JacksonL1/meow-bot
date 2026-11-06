@@ -163,7 +163,11 @@
   // ------------------------------------------------------------
   window.bubble = {
     onRequest: (cb) => on("permission:request", cb),
-    decide: (id, decision) => send("permission_decide", { id, decision }),
+    // 用 call 而不是 send：渲染层必须知道"这条请求还在不在账上"。
+    // 用 send 的话失败会被吞掉，气泡就会停在一张点不动的卡片上。
+    decide: (id, decision) => call("permission_decide", { id, decision }),
+    // 卡片对应的请求已经结束（超时 / 已被结掉）时收窗，不产生任何裁决。
+    close: (id) => send("bubble_close", { id: id === null ? null : id }),
     setHeight: (h) => send("bubble_height", { h }),
     // 握手：只有监听器真的挂上了才通知主进程放行。
     // 这里调 channel() 而不是依赖调用方先调过 onRequest——少一个隐含顺序。

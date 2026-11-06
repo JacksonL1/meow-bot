@@ -935,6 +935,47 @@ async function main() {
     const r2 = await p2;
     ok("点允许 → 200 且回包是 allow", r2.code === 200 && r2.body.includes('"behavior":"allow"'), r2.body.slice(0, 60));
 
+    // ---- 8.1 「点了允许，没有任何返回」（2026-11-06 用户报障）----
+    //
+    // 旧实现有两处静默死路，两条都长成"卡片在、按钮在、点完什么也不发生"：
+    //   ① `decide()` 先把 currentId 清空再 fire-and-forget 发出去。主进程说
+    //      "这条请求已经不在账上"（超时回落 / 已被结掉）时没人接这个 false。
+    //   ② 请求早就结束了，页面手上还拿着它的 id，点下去同样无声无息。
+    // 现在：回执照收（call 而不是 send），卡片会写明"已经结束"，窗口自己收掉。
+    const bt4 = await waitTarget((u) => u.includes("bubble"));
+    if (bt4) {
+      const B4 = await Cdp.connect(bt4.webSocketDebuggerUrl);
+      await B4.send("Runtime.enable");
+      await sleep(300);
+
+      const stale = String(
+        await B4.eval("window.bubble.decide(999999,'allow').then(r=>'R:'+r).catch(e=>'ERR:'+e)")
+      );
+      ok("对不存在的请求做决定 → 回执 false（不再被 send 静默吞掉）", stale === "R:false", stale);
+
+      // 复刻用户真正撞上的那一刻：卡片还亮着，但请求刚刚超时回落。
+      // 页面手上还拿着它的 id，按钮是亮的——这时点「允许」，
+      // 旧实现会静默冻住，现在必须给一句说明并把窗收掉。
+      const p4 = post("/permission", { session_id: "perm4", tool_name: "Read", tool_input: { file_path: "b.txt" } }, null, { timeout: 25000 });
+      await sleep(700);
+      ok("第四条卡片确实显示出来了", (await B4.eval("document.getElementById('tool').textContent")) === "Read");
+      // 等它超时回落（回归里把超时压到 6s，见 CLAWD_PERMISSION_TIMEOUT_MS）
+      const r4 = await p4;
+      ok("第四条没人点 → 超时回落 204", r4.code === 204, `code=${r4.code}`);
+      await B4.eval("document.getElementById('btnAllow').click(), 1");
+      await sleep(500);
+      const note2 = String(await B4.eval("document.getElementById('note').textContent"));
+      ok("超时后点「允许」→ 卡片说明情况（不是静默无事发生）", /已经结束/.test(note2), note2.slice(0, 48));
+
+      const crossClose = String(
+        await R.eval("window.__TAURI_INTERNALS__.invoke('bubble_close',{id:null}).then(()=>'ALLOWED').catch(e=>'ERR:'+e)")
+      );
+      ok("主窗口调气泡的收窗命令 → 被拒（白名单没松）", /ERR:.*forbidden/.test(crossClose), crossClose.slice(0, 60));
+      B4.close();
+    } else {
+      ok("气泡窗口还活着（后续断言需要一个 CDP 目标）", false);
+    }
+
     // 第三条：什么都不点 → 超时回落 204
     //
     // 这是「评级不改变默认行为」的兑现点：即使是 critical，超时也仍然是 204。

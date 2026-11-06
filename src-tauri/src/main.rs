@@ -331,6 +331,27 @@ fn show_bubble(app: &AppHandle, entry: PendingView) {
     }
 }
 
+/// 收掉"当前这一条"：清掉 current、藏窗、把队列里的下一条顶上来。
+///
+/// 两个入口共用它：用户点了决定（Notify::Resolved），以及**点了一条已经结束的
+/// 请求**（超时回落 / 已被结掉 / 进程启动前留下的残影）。
+/// 第二条以前是漏的——那种情况下窗口会亮着、按钮已经置灰、点什么都不再发生，
+/// 用户看到的就是"我点了允许，没有任何返回"。窗口必须自己收掉。
+fn resolve_current(app: &AppHandle) {
+    let st = app.state::<AppState>();
+    *st.bubble_current.lock().unwrap() = None;
+    if let Some(b) = app.get_webview_window("bubble") {
+        let _ = b.hide();
+    }
+    let next = st.bubble_queue.lock().unwrap().pop_front();
+    if let Some(id) = next {
+        // 从中心取回这条请求的展示信息
+        if let Some(view) = st.center.view_of(id) {
+            show_bubble(app, view);
+        }
+    }
+}
+
 fn handle_notify(app: &AppHandle, n: Notify) {
     let st = app.state::<AppState>();
     match n {
@@ -343,19 +364,7 @@ fn handle_notify(app: &AppHandle, n: Notify) {
                 show_bubble(app, view);
             }
         }
-        Notify::Resolved => {
-            *st.bubble_current.lock().unwrap() = None;
-            if let Some(b) = app.get_webview_window("bubble") {
-                let _ = b.hide();
-            }
-            let next = st.bubble_queue.lock().unwrap().pop_front();
-            if let Some(id) = next {
-                // 从中心取回这条请求的展示信息
-                if let Some(view) = st.center.view_of(id) {
-                    show_bubble(app, view);
-                }
-            }
-        }
+        Notify::Resolved => resolve_current(app),
     }
 }
 
@@ -1061,12 +1070,54 @@ fn theme_set(
 #[tauri::command]
 fn permission_decide(
     window: WebviewWindow,
+    app: AppHandle,
     st: tauri::State<'_, AppState>,
     id: u64,
     decision: String,
 ) -> Result<bool, String> {
     only(&window, W_BUBBLE)?;
-    Ok(st.center.decide(id, &decision))
+    let ok = st.center.decide(id, &decision);
+    if !ok {
+        // 这条请求已经不在账上了：2 分钟超时回落过、被别处结掉、或者页面显示的
+        // 是上一轮的残影。绝不能只回一个 false 就完事——渲染层那边按钮已经置灰，
+        // 窗口会变成一扇点什么都点不动的窗。这里顺手把它收掉。
+        let stale = {
+            let cur = *st.bubble_current.lock().unwrap();
+            // current 已经是别人（队列顶上来的新请求）时不要误收
+            cur == Some(id) || cur.is_none()
+        };
+        eprintln!("[bubble] 决定落空 id={id} decision={decision}（这条请求已经结束了）");
+        if stale {
+            resolve_current(&app);
+        }
+    }
+    Ok(ok)
+}
+
+/// 渲染层发现"我这张卡片对应的请求已经没了"时调它收窗。
+///
+/// 和 bubble_dismiss 的区别：那个是**用户主动不表态**（走 204，让 agent 回落到
+/// 自己的提示）；这个是**已经没有可表态的对象**，只做界面收尾，不碰裁决。
+#[tauri::command]
+fn bubble_close(
+    window: WebviewWindow,
+    app: AppHandle,
+    st: tauri::State<'_, AppState>,
+    id: Option<u64>,
+) -> Result<(), String> {
+    only(&window, W_BUBBLE)?;
+    let stale = {
+        let cur = *st.bubble_current.lock().unwrap();
+        match id {
+            Some(id) => cur == Some(id) || cur.is_none(),
+            // 没给 id = 页面自己都说不清是哪条（比如 currentId 已经是 null）
+            None => cur.is_none(),
+        }
+    };
+    if stale {
+        resolve_current(&app);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1553,6 +1604,7 @@ fn main() {
             bubble_ready,
             bubble_height,
             bubble_dismiss,
+            bubble_close,
         ])
         .build(tauri::generate_context!())
         .expect("tauri 启动失败");
