@@ -326,7 +326,8 @@ node hooks/install.js --agent claude --file <path>   # 指向别的 settings 文
 Windows 上 `node` 冷启动实测 ~200ms，观察型不加 `async` 就是每次工具调用都慢 200ms；
 而权限那条加了 `async` 等于立刻返回空响应，永远问不到用户。
 
-**端口这件事**：服务优先用 23333（与主仓库一致），端口和 token 一起写进
+**端口这件事**：服务优先用 **27333**（2026-11-06 起专用，不再与主仓库的 23333 共用——
+那个数还和本机 Claude Code 的 `ANTHROPIC_BASE_URL` 重合过），端口和 token 一起写进
 `%APPDATA%\clawd-starter\clawd-starter.port`；hook URL 是**安装时**写死进配置的。
 所以端口变了必须重跑 `npm run install:hooks`，否则请求还打向旧端口。
 
@@ -455,7 +456,7 @@ git 破坏性操作      FORCE_PUSH_MAIN · FORCE_PUSH · GIT_HARD_RESET · GIT_
 手动打一发（**少一个头就是 401，这是故意的**）：
 
 ```bash
-PORT=23333
+PORT=27333
 TOKEN=$(node -e "console.log(require('./src/port-file').readPortFile().token)")
 curl -i -X POST http://127.0.0.1:$PORT/state \
   -H 'content-type: application/json' \
@@ -661,7 +662,8 @@ WebView2 那 6 个子进程是系统共享的渲染引擎——**换容器换不
 - **新会话落在哪个目录是猜的**（"上一次真正干活的目录"），第一次算出来就钉住；
   想在别的目录起，得先去那儿跑一条会话
 - **主题只支持 SVG**，不支持 GIF/APNG/WebP；也不能用 CSS 动画（白名单拒了 `<style>` 和 SMIL）
-- **一个实例、优先固定端口 23333**，与主仓库 `clawd-on-desk` 不能同时跑
+- **一个实例、优先固定端口 27333**。与主仓库 `clawd-on-desk`（23333）现在可以同时跑了——
+  但两边的 hook 是**各自独立安装**的，别混装
 - **权限请求只在内存里**，不落盘：重启就没了，也没有决策历史
 - **气泡只支持鼠标 + Esc**，没有键盘决定、没有远程审批
 - **云签名没接**：只支持 PFX 与证书库指纹

@@ -1454,7 +1454,7 @@ fn toggle_autostart(app: &AppHandle, item: &CheckMenuItem<tauri::Wry>) {
 fn main() {
     // ---- 单实例锁：必须在**一切之前** ----
     // 端口、端点文件、托盘图标全是"每个进程一份"的东西。第二份进程一旦走到
-    // setup，就会 bind 23333 失败 → 退回随机端口 → 覆盖端点文件，
+    // setup，就会 bind 27333 失败 → 退回随机端口 → 覆盖端点文件，
     // 于是 hook 把事件送进第二份，而用户看的是第一份那只猫：画面永远不动。
     //
     // （历史上 Electron 版靠 main.js 的 requestSingleInstanceLock 干这件事，

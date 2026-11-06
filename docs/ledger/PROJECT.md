@@ -9,7 +9,7 @@
 | 技术栈 | **Tauri 2.12.5 + WebView2**（Rust `tiny_http` + `regex` + `windows-sys`，**不用任何 `tauri-plugin-*`**）。渲染层纯手写 SVG 无框架、无构建工具。`package.json` 的 `dependencies` / `devDependencies` 均为空 |
 | 入口 | Tauri：`src-tauri/src/main.rs`；渲染层：`src/index.html` |
 | 启动 | `npm run build` → `npm run start`（`cargo run --release`）；打包 `npm run bundle`（含签名，见 README） |
-| 端口 | **固定 23333**（与主仓库一致），只绑 `127.0.0.1`。为什么不能随机：权限 HTTP hook 的 url 是安装时写死进 `settings.json` 的，端口漂移就等于 hook 指向死端口。被占用时退回随机端口并显式 warn，但必须重跑 `install:hooks` |
+| 端口 | **固定 27333**（2026-11-06 起，见下方"为什么挪"），只绑 `127.0.0.1`。为什么不能随机：权限 HTTP hook 的 url 是安装时写死进 `settings.json` 的，端口漂移就等于 hook 指向死端口。被占用时退回随机端口并显式 warn，但必须重跑 `install:hooks`。**为什么从 23333 挪走**：那个数与主仓库 clawd-on-desk 相同（不能同时跑），2026-11-06 又实测发现它和用户本机 Claude Code 的 `ANTHROPIC_BASE_URL` 完全重合——桌宠先启动就占住人家模型网关的端口，Claude Code 的请求打到我们这里吃 401，表现是"发出去没有任何返回"。挪动前查过：这台机器上没有任何已装的 HTTP hook 指向旧端口 |
 | 端点文件 | `%APPDATA%\clawd-starter\clawd-starter.port`，内容 `{port, token}`，权限 0600 |
 | 依赖服务 | 无。不连任何外部服务，只在本机开一个 HTTP 端口接收事件；签名时才会连一次时间戳服务（`timestamp.digicert.com`） |
 | 版本控制 | git，远端 `github.com/JacksonL1/meow-bot`，分支 `main`，与 origin 同步。**这一格不写提交总数**：写下一个数字的那个提交本身会让数字 +1，改一次错一次。要看数就 `git log --oneline \| wc -l`。**台账里凡是带计数的字段都有这个毛病**（体积那年改了七次，六次是在改数法），要么连口径和实测时间一起写，要么不写 |
@@ -104,7 +104,8 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
   另一条限制：`webviewInstallMode` 是默认的 `downloadBootstrapper`，**没有 WebView2 的离线机器装不上**
 - **`cargo tauri build` 结束后裸 exe 不带签名**（S10-9 实测）：打包器在签名之后又覆写了
   `target/release/clawd-starter.exe`。安装包不受影响；`npm run bundle` 已串了一次补签，单独发裸 exe 时别忘了这一刀
-- **不能和主仓库 `clawd-on-desk` 同时运行**：都用 23333，且 hook URL 是安装时写死的
+- ~~**不能和主仓库 `clawd-on-desk` 同时运行**：都用 23333，且 hook URL 是安装时写死的~~
+  → **2026-11-06 已解**：桌宠挪到 27333，两边的 hook 各自独立安装，互不相干（但别混装）
 - 命中判定用 `#pet` 的 176×176 包围盒，不是真实 alpha 遮罩——四个角上的透明区会误判为「可点击」
 - 看板的「复制路径」在回归里验的是返回值 + 剪贴板内容（实测能拿到完整路径）；但**环境不具备时**（某些会话读不到剪贴板）会降级成一条警告，不做假断言
 - 看板不能跳转终端——`fullCwd()` 已经留好了，只是没做动作按钮

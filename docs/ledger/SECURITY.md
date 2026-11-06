@@ -282,6 +282,7 @@
 
 ```json
 { "matcher": "", "hook": { "type": "http", "url": "http://127.0.0.1:23333/permission", "timeout": 600 } }
+（端口照抄主仓库原文；**本仓库 2026-11-06 起已挪到 27333**，见 PROJECT.md 的端口行）
 ```
 
 **Claude Code 直接 POST 我们的端点，HTTP 响应就是决定。没有中间进程，也没有 stdin。**

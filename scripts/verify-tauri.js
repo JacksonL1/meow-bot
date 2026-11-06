@@ -35,7 +35,7 @@ const BUBBLE_TIMEOUT_MS = 6000;
 // ---------- 测试隔离 ----------
 // 端点文件测试隔离的理由（原先与 Electron 版同一套，一行都不用改）：
 //   1. 端点文件必须隔离，否则会覆盖用户正在用的那份（端口 + token 全变，hook 立刻失效）
-//   2. 端口 23333 被占时服务会回退随机端口，这里照样能从临时文件读到真实端口
+//   2. 端口 27333 被占时服务会回退随机端口，这里照样能从临时文件读到真实端口
 const TMP_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-verify-tauri-"));
 const PORT_FILE = path.join(TMP_ROOT, "clawd-starter.port");
 process.env.CLAWD_PORT_FILE = PORT_FILE;
@@ -251,6 +251,21 @@ function nudgeCursor(px = NUDGE_PX) {
     `[System.Windows.Forms.Cursor]::Position=New-Object System.Drawing.Point(($p.X+${px}),($p.Y+${px}));`,
     "Start-Sleep -Milliseconds 120;",
     "[System.Windows.Forms.Cursor]::Position=New-Object System.Drawing.Point($p.X,$p.Y)",
+  ].join(" ");
+  const r = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", ps], {
+    stdio: "ignore",
+    timeout: 8000,
+  });
+  return r.status === 0;
+}
+
+// 把光标**传送**到绝对坐标（nudge 只会相对挪 8px，光标在远处时钳制让它无效）。
+// 给 gaze 断言用：先传送到桌宠窗口内，nudge 才造得出"变化"。
+function moveCursorTo(x, y) {
+  if (process.platform !== "win32") return false;
+  const ps = [
+    "Add-Type -AssemblyName System.Windows.Forms;",
+    `[System.Windows.Forms.Cursor]::Position=New-Object System.Drawing.Point(${x},${y})`,
   ].join(" ");
   const r = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", ps], {
     stdio: "ignore",
@@ -748,6 +763,18 @@ async function main() {
     let gazeNow = gazeN;
     if (gazeNow < 1) {
       // 造一次"光标动了"的变化：被动等别人碰鼠标，这条断言就成了看运气。
+      //
+      // **只挪 8px 还不够**（2026-11-06 实测：两次连续 FAIL，"累计 0 次"）。
+      // gaze 的变化检测是对**钳制后**的归一化坐标做的（clamp(±1)，见 main.rs
+      // 的 gaze 线程）：光标离桌宠超过约 260px 时 nx/ny 恒为 ±1，挪 8px
+      // 不会有任何变化。这条断言以前全靠"跑测试的人恰好把光标放在桌宠旁边"，
+      // 是一道看运气的闸门。修法：先把光标**传送**到桌宠窗口内（宿主的
+      // hitState 正好带窗口物理坐标和 scale），等一拍存下位置，再挪 8px。
+      const hsC = await R.eval("window.clawd.hitState()");
+      const winPos = (hsC && Array.isArray(hsC.window) && hsC.window) || [100, 100];
+      const scale = Number((hsC && hsC.scale) || 1);
+      moveCursorTo(Math.round(winPos[0] + 120 * scale), Math.round(winPos[1] + 120 * scale));
+      await sleep(300); // 等 gaze 线程把传送后的位置存进基准值
       const nudged = nudgeCursor();
       await sleep(400);
       gazeNow = Number(await R.eval("window.petDebug.gazePushes()"));

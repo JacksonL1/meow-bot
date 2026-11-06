@@ -24,8 +24,12 @@ const FILE_NAME = "clawd-starter.port";
 // 默认端口。放在这里而不是 server.js：2026-11-03 删掉 Electron 容器后
 // server.js 整份没了，但这个数字还有人要——`hooks/install.js` 装 hook 时
 // 要把端点 URL 写进 agent 的配置，用的是它。
-// 与主仓库一致，不要改：改了之后**已装好的 hook 会全部指向旧端口**。
-const DEFAULT_PORT = 23333;
+// 2026-11-06 从 23333 挪到 27333：23333 与主仓库 clawd-on-desk 相同，
+// 且与用户本机 Claude Code 的 ANTHROPIC_BASE_URL 重合（桌宠先启动就占住
+// 人家模型网关的端口）。**这台机器上没有任何已装的 HTTP hook 指向旧端口**
+// （三条 agent 配置都查过），所以挪是安全的；以后再改这个数之前，
+// 必须先重跑 `npm run install:hooks` 把已装 hook 的 URL 一起搬走。
+const DEFAULT_PORT = 27333;
 
 function userDataDir() {
   if (process.platform === "win32") {
@@ -41,7 +45,7 @@ function userDataDir() {
 
 function portFilePath() {
   // 测试 / 多实例隔离：回归脚本要在「用户自己正开着桌宠」的情况下也能跑。
-  // 不能隔离的话，单实例锁和固定端口 23333 都被占用，
+  // 不能隔离的话，单实例锁和固定端口 27333 都被占用，
   // 表现是"主进程起来了、渲染进程永远不出现"，很容易误判成代码坏了。
   if (process.env.CLAWD_PORT_FILE) return path.resolve(process.env.CLAWD_PORT_FILE);
   return path.join(userDataDir(), FILE_NAME);

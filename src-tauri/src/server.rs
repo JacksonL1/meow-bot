@@ -13,8 +13,13 @@
 // 它不知道我们的 token，也带不上。这是 HTTP hook 架构的固有属性，只能靠
 // "拒绝浏览器发起的请求"来收敛；详见 SECURITY.md 的 S5 小节。
 //
-// 端口固定（23333）：HTTP hook 的 url 写在 settings.json 里，是静态的。
+// 端口固定（27333）：HTTP hook 的 url 写在 settings.json 里，是静态的。
 // 端口每次启动都变的话，上次装好的 hook 就指向了一个死端口。
+//
+// 为什么不是 23333：那个数与主仓库 clawd-on-desk 相同（共存时谁后起谁挂），
+// 2026-11-06 又发现它和用户本机 Claude Code 的 ANTHROPIC_BASE_URL 完全重合——
+// 桌宠先启动就把人家模型网关的端口占住，Claude Code 的请求打到我们这里吃 401，
+// 表现是"发出去没有任何返回"。挪到 27333 之后两不相干。
 // ============================================================
 use crate::permission::{decision_body, Center, Outcome};
 use crate::state::{Snapshot, Store};
@@ -32,7 +37,7 @@ use tiny_http::{Header, Request, Response, Server, StatusCode};
 pub type OnChange = Arc<dyn Fn(&Snapshot) + Send + Sync>;
 
 pub const MAX_BODY_BYTES: u64 = 256 * 1024;
-pub const DEFAULT_PORT: u16 = 23333;
+pub const DEFAULT_PORT: u16 = 27333;
 
 fn json_header() -> Header {
     Header::from_bytes(&b"Content-Type"[..], &b"application/json; charset=utf-8"[..]).expect("头写错了")
