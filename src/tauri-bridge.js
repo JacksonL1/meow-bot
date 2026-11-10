@@ -155,6 +155,8 @@
     // 页面就绪之前发出，收不到），以及关掉自己。
     composeContext: () => call("compose_context"),
     composeClose: () => send("compose_close"),
+    // 答案落地后把窗口长到刚好放得下（h=0 恢复基准高度）。
+    composeHeight: (h) => send("compose_height", { h: Number(h) || 0 }),
     onComposeOpen: (cb) => on("compose:open", cb),
   };
 

@@ -900,6 +900,34 @@ fn compose_close(window: WebviewWindow, app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// 把输入窗长到刚好放得下一段答案（`h <= 0` = 恢复基准高度）。
+///
+/// 为什么需要：答案回来时这扇窗还开着（2026-11-10 改掉了"发完即关"），
+/// 固定 128px 的窗口放不下几行字，而用户报的正是"看不到回复"。
+/// 上限 420 是"别把猫挡住"的界线——再长就让人滚轮看，不占满屏。
+#[tauri::command]
+fn compose_height(
+    window: WebviewWindow,
+    app: AppHandle,
+    st: tauri::State<'_, AppState>,
+    h: f64,
+) -> Result<(), String> {
+    only(&window, W_COMPOSE)?;
+    let want = if h <= 0.0 { COMPOSE_H } else { clamp(h.round(), COMPOSE_H, 420.0) };
+    let Some(w) = app.get_webview_window("compose") else { return Ok(()) };
+    let _ = w.set_size(tauri::LogicalSize::new(COMPOSE_W, want));
+    // 高度变了要重新贴回猫身边：窗口是按左上角定位的，长高会往下压到猫头上。
+    let origin = st
+        .compose_target
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|t| t.origin.clone())
+        .unwrap_or_else(|| "main".to_string());
+    position_compose(&app, &origin);
+    Ok(())
+}
+
 /// 真正把话送出去。立即返回（不阻塞 UI），结局通过 `say:done` 事件回传。
 #[tauri::command]
 fn say_send(
@@ -1596,6 +1624,7 @@ fn main() {
             compose_open,
             compose_context,
             compose_close,
+            compose_height,
             say_send,
             theme_get,
             theme_list,

@@ -9,11 +9,11 @@
 | 技术栈 | **Tauri 2.12.5 + WebView2**（Rust `tiny_http` + `regex` + `windows-sys`，**不用任何 `tauri-plugin-*`**）。渲染层纯手写 SVG 无框架、无构建工具。`package.json` 的 `dependencies` / `devDependencies` 均为空 |
 | 入口 | Tauri：`src-tauri/src/main.rs`；渲染层：`src/index.html` |
 | 启动 | `npm run build` → `npm run start`（`cargo run --release`）；打包 `npm run bundle`（含签名，见 README） |
-| 端口 | **固定 27333**（2026-11-06 起，见下方"为什么挪"），只绑 `127.0.0.1`。为什么不能随机：权限 HTTP hook 的 url 是安装时写死进 `settings.json` 的，端口漂移就等于 hook 指向死端口。被占用时退回随机端口并显式 warn，但必须重跑 `install:hooks`。**为什么从 23333 挪走**：那个数与主仓库 clawd-on-desk 相同（不能同时跑），2026-11-06 又实测发现它和用户本机 Claude Code 的 `ANTHROPIC_BASE_URL` 完全重合——桌宠先启动就占住人家模型网关的端口，Claude Code 的请求打到我们这里吃 401，表现是"发出去没有任何返回"。挪动前查过：这台机器上没有任何已装的 HTTP hook 指向旧端口 |
+| 端口 | **固定 27333**（2026-11-06 起，见下方"为什么挪"），只绑 `127.0.0.1`。为什么不能随机：权限 HTTP hook 的 url 是安装时写死进 `settings.json` 的，端口漂移就等于 hook 指向死端口。被占用时退回随机端口并显式 warn，但必须重跑 `install:hooks`。**为什么从 23333 挪走**：2026-11-06 实测发现它与本机 Claude Code 的 `ANTHROPIC_BASE_URL` 完全重合——桌宠先启动就占住人家模型网关的端口，Claude Code 的请求打到我们这里吃 401，表现是"发出去没有任何返回"。挪动前查过：这台机器上没有任何已装的 HTTP hook 指向旧端口 |
 | 端点文件 | `%APPDATA%\clawd-starter\clawd-starter.port`，内容 `{port, token}`，权限 0600 |
 | 依赖服务 | 无。不连任何外部服务，只在本机开一个 HTTP 端口接收事件；签名时才会连一次时间戳服务（`timestamp.digicert.com`） |
 | 版本控制 | git，远端 `github.com/JacksonL1/meow-bot`，分支 `main`，与 origin 同步。**这一格不写提交总数**：写下一个数字的那个提交本身会让数字 +1，改一次错一次。要看数就 `git log --oneline \| wc -l`。**台账里凡是带计数的字段都有这个毛病**（体积那年改了七次，六次是在改数法），要么连口径和实测时间一起写，要么不写 |
-| 体积 | **38 个源文件，14778 行**（`src/` 11 个 = 7 js 3595 + 4 html 1028、`src-tauri/` 15 个 = 10 rs 6807 + `build.rs` 3 + `Cargo.toml` 56 + `tauri.conf.json` 37 + `capabilities/default.json` 13 + `capabilities/compose.json` 7、`hooks/` 2 个 644、`scripts/` 10 个 2588；`Cargo.lock` 是生成物不计），另有 `themes/` 下 22 个 SVG 资产。**2026-11-05 16:55 逐项 `wc -l` 复算**（S12 全部落盘之后；相对 11-04 记的 34 个 / 12402 行：**+4 个 / +2376 行**，其中新增文件 4 个合计 1033 行（`say.rs` 662 / `compose-renderer.js` 232 / `compose.html` 132 / `capabilities/compose.json` 7），其余 1343 行是既有文件的改动，按目录拆得开：`src/` 7 js +473、4 html +233、`src-tauri/` 10 rs +1510、`capabilities/compose.json` +7、`scripts/` +153，相加正好 2376）。上一轮 11-03 首记写的 34 个 / 10361 有两处**加法错**，不是代码变了：`src-tauri/` 逐项只有 12 个（写成 13），`scripts/` 逐文件 `wc -l` 求和是 2168（写成 2160）——已按上表口径逐项复算。这条被反复改过多次，多数不是代码变了、是**数法或加法**变了（漏 html、漏 `src-tauri`、把 JSON 不算源文件、生成物混进来、逐项加错）。写体积时必须**连文件数、口径、实测时间一起写**，只写总数没法被复查 |
+| 体积 | **38 个源文件，14932 行**（`src/` 11 个 = 7 js 3646 + 4 html 1028、`src-tauri/` 15 个 = 10 rs 6842 + `build.rs` 3 + `Cargo.toml` 56 + `tauri.conf.json` 37 + `capabilities/default.json` 13 + `capabilities/compose.json` 7、`hooks/` 2 个 644、`scripts/` 10 个 2656；`Cargo.lock` 是生成物不计），另有 `themes/` 下 22 个 SVG 资产。**2026-11-06 16:55 逐项 `wc -l` 复算**（11-06 三次提交之后；相对 11-05 记的 38 个 / 14778 行：**文件数不变、+154 行**，按目录拆得开：`src/` 7 js +51、`src-tauri/` 10 rs +35、`scripts/` +68，`src/*.html` / `hooks/` / `src-tauri/` 的 JSON 与 `build.rs` 变化为 0。11-06 那天 `rs` 的净增很小、内部挪动很大：`0119af0` 清编译警告净 −22（`server.rs` 删 `ServerHandle` 并改 `start` 返回 `()`、`risk.rs` 删 `Rule`、`theme.rs` 删三个死件），`b2b1369` 的 `main.rs` +80（`bubble_close` 与 `permission_decide` 回执），`6402d86` 又改了两处常量。**`rs` 的增长不能只看行数**：同一天里既删了 35 行死代码、又加了回执与端口相关的几十行，净额只有 +35。11-05 记的 38 个 / 14778 行是 S12 全部落盘后的值，其相对 11-04 记的 34 个 / 12402 行：**+4 个 / +2376 行**，其中新增文件 4 个合计 1033 行（`say.rs` 662 / `compose-renderer.js` 232 / `compose.html` 132 / `capabilities/compose.json` 7），其余 1343 行是既有文件的改动，按目录拆得开：`src/` 7 js +473、4 html +233、`src-tauri/` 10 rs +1510、`capabilities/compose.json` +7、`scripts/` +153，相加正好 2376）。上一轮 11-03 首记写的 34 个 / 10361 有两处**加法错**，不是代码变了：`src-tauri/` 逐项只有 12 个（写成 13），`scripts/` 逐文件 `wc -l` 求和是 2168（写成 2160）——已按上表口径逐项复算。这条被反复改过多次，多数不是代码变了、是**数法或加法**变了（漏 html、漏 `src-tauri`、把 JSON 不算源文件、生成物混进来、逐项加错）。写体积时必须**连文件数、口径、实测时间一起写**，只写总数没法被复查 |
 
 ## 它解决什么问题
 
@@ -66,7 +66,7 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 | 进程间桥 | 在 `window` 上装出与旧 `preload.js` 形状相同的 `clawd` / `bubble` / `dashboard`，只暴露动作 | `src/tauri-bridge.js` |
 | 端点约定 | 端点文件路径规则（纯 Node 也能算）+ `DEFAULT_PORT`，hook 与回归都用它 | `src/port-file.js` |
 | 调试 | 假数据源，三种用法（完整剧本 / 单事件 / 保持某状态）；形象对照截图；主题打包 | `scripts/fake-feed.js`、`preview-shot.js`、`build-preview-bundle.js` |
-| 回归闸门 | WebView2 CDP（`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=`），**124 条断言；最近一次真机跑 123 PASS / 0 FAIL（1 条 SKIP，环境调不动系统光标时响亮跳过、不冒充 PASS）**。开跑前比对源码与 exe 的 mtime，旧了直接拒跑 | `scripts/verify-tauri.js` + 共用的 `scripts/cdp.js` |
+| 回归闸门 | WebView2 CDP（`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=`），**128 条断言；最近一次真机跑 128 PASS / 0 FAIL**（S12-1 从 123 加到 128，新增 5 条都关于回执：不存在的 id 必须回 `false`、超时后点「允许」要能说明情况、`bubble_close` 跨窗被拒等；光标调不动时仍会响亮 SKIP、不冒充 PASS）。开跑前比对源码与 exe 的 mtime，旧了直接拒跑 | `scripts/verify-tauri.js` + 共用的 `scripts/cdp.js` |
 | 打包闸门 | NSIS 安装包，**25 条断言；当前 25 PASS / 0 FAIL**（10 条只读 + 15 条真装/真跑/真卸） | `scripts/verify-bundle.js` + `src-tauri/tauri.conf.json` 的 `bundle` 段 |
 | 签名 | 由 `bundle.windows.signCommand` 调用；接 PFX 或证书库指纹，强制带 RFC3161 时间戳；也支持手工 `--verify` | `scripts/sign-release.js` |
 
@@ -104,8 +104,6 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
   另一条限制：`webviewInstallMode` 是默认的 `downloadBootstrapper`，**没有 WebView2 的离线机器装不上**
 - **`cargo tauri build` 结束后裸 exe 不带签名**（S10-9 实测）：打包器在签名之后又覆写了
   `target/release/clawd-starter.exe`。安装包不受影响；`npm run bundle` 已串了一次补签，单独发裸 exe 时别忘了这一刀
-- ~~**不能和主仓库 `clawd-on-desk` 同时运行**：都用 23333，且 hook URL 是安装时写死的~~
-  → **2026-11-06 已解**：桌宠挪到 27333，两边的 hook 各自独立安装，互不相干（但别混装）
 - 命中判定用 `#pet` 的 176×176 包围盒，不是真实 alpha 遮罩——四个角上的透明区会误判为「可点击」
 - 看板的「复制路径」在回归里验的是返回值 + 剪贴板内容（实测能拿到完整路径）；但**环境不具备时**（某些会话读不到剪贴板）会降级成一条警告，不做假断言
 - 看板不能跳转终端——`fullCwd()` 已经留好了，只是没做动作按钮
@@ -171,4 +169,5 @@ S7 把形象从代码里搬了出来：`themes/<id>/` 下放 `theme.json` 和一
 49. **验收脚本自己也会撒谎，它撒的谎最像产品 bug**。S12：`if (!done) done = await eval("JSON.stringify(window.__done||null)")`——第一次拿回字符串 `"null"`（truthy），从此不再轮询。后端日志明明白白写着"收工 ok=true，reply=收到"，脚本坚持说事件没到，我差点去查管道死锁。**`JSON.stringify` 是把"没有"变成"有"的编码器**：跨进程传值要先解码再判空（`=== null`），不要在序列化后的文本上判。排查顺序的一般规则：**同一个输入在 A 处通、B 处不通，先怀疑 A 与 B 之间那层"测量"**。
 50. **新增窗口要做两件事：命令白名单 + capability 登记，缺一不可**。Tauri v2 的 ACL 是白名单——**没列进任何 `capabilities/*.json` 的窗口一条 core 权限都没有**，包括 `core:event` 的 `listen`。少登记的表现极其安静：页面收不到任何事件，界面上只是"目标不刷新、发完没回音"，看起来像时序问题（S12 第一版就误判成"emit 赶在 show 那一帧丢了"，还加了轮询兜底把 bug 盖住）。**兜底能救功能，救不了诊断**：一个"反正有兜底"的假设，会让真正的失效活到下一轮。给新窗口的 capability 要**按最小面写**（`compose.json` 只有 `core:event:default`），不要图省事塞进 `default.json`——那会顺手给它窗口移动权限。
 51. **凡用户能点的东西，必须能回答两件事：这一下发给谁、对方收没收到**。S12-1 的「点了允许没有任何返回」就是这条的缺席：按钮可点但 `currentId` 是 null（静默 return）、决定用 `send()` 发出去（失败被吞）、请求已经结束却没人告诉界面（卡片永久冻住）。三条修法对应三句话——**没对象时按钮要禁用；发出去要收下回执（`call` 而不是 `send`）；回执说"没有这条"就把窗收掉**。附带一条：异步回来写状态前先比对身份（`if (currentId !== id) return;`），否则你修 bug 的那一行就是下一个 bug——实测中它把刚渲染上来的下一条请求的 id 擦掉了，卡片亮着、点下去照样没反应。
+52. **动作的产出就是用户目的时，产出没落地之前不许收摊**。S12-3 的「发完消息任何地方都看不到返回」：发送成功 → 窗 420ms 关掉 → 回复只发给看板（默认是关的）。链路上的每一项都对，用户体验是"发进黑洞"。"说完就走"是个想当然的默认——它成立的前提是"用户不关心结果"，而发消息这个动作的目的**就是**结果。所以：**验收要按用户的视线走一遍**，别只断言 payload 里有 `reply`；那证明的是链路，不是可见性。同理，异步结局回来时要**对号**（比对自己发出去的那句原文），否则窗被复用时，上一句的答案会写进下一句下面。
 

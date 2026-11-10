@@ -21,7 +21,7 @@ S12 补上「说」（从桌宠直接发消息，走 `dsh headless --session-id`
 
 | 闸门 | 脚本 | 结果 | 断言数 |
 |---|---|---|---|
-| Tauri 2.12.5 + WebView2 | `npm run verify:tauri` | **128 PASS / 0 FAIL** | 128 |
+| Tauri 2.12.5 + WebView2 | `npm run verify:tauri` | **134 PASS / 0 FAIL** | 134 |
 | Rust 单测 | `cd src-tauri && cargo test` | **68 passed / 0 failed** | 68 |
 | 打包（NSIS 安装包） | `npm run verify:bundle:install` | **25 PASS / 0 FAIL** | 25 |
 | 状态回放（真实事件序列） | `npm run verify:diag` | **10 步全中期望** | 10 |
@@ -87,7 +87,7 @@ S8 的「跟桌宠说话」**2026-10-30 整套删掉了**（理由见下方被�
 
 ## 进行中
 
-- 无。S12 的三件事（供应商 / 看板 / 说）都已真机验过，闸门 128 + 68 全绿。
+- 无。S12 的三件事（供应商 / 看板 / 说）都已真机验过，闸门 134 + 68 全绿。
   下一步取决于用户：是把「说」的接力棒交给**多轮对话 UI**（现在一次一窗，发完就关），
   还是先把「桌面端会话续不了」这件事在界面上讲得更醒目。
 - **待用户决策**：桌宠默认端口 23333 与用户 Claude Code 的 `ANTHROPIC_BASE_URL` 冲突
@@ -119,6 +119,28 @@ S8 的「跟桌宠说话」**2026-10-30 整套删掉了**（理由见下方被�
 
 ## 已完成
 
+### S12-3 发完消息，答案必须有落点（2026-11-10）
+
+用户报「通过桌宠发送了一条消息，但任何地方都看不到返回内容」。查下来不是发送链路坏了，
+是**答案没有落点**：发送成功 → 输入窗 420ms 后自己关掉 → 回复只走 `say:done` 发给看板，
+而看板多半没开。数据是好的（`reply` 一直在），界面没有一处显示它。
+
+修法把输入窗的后半场用起来：
+
+- **发完不关窗**。送出去之后停在「已送出 · 等它回话」，`say:done` 到达时把答案写进
+  卡片下半部分（`#ans`），窗口自己长高（新命令 `compose_height`，128 → 上限 420，
+  长高后重新贴回猫身边）。
+- **迟到的结局不许串台**。窗会被复用：用户可能按 Esc 藏起来、半分钟后又打开写另一句话，
+  这时上一发的结局才到。渲染层记着"我正在等哪一句原文"，`prompt` 对不上的一律丢掉
+  （`resetAnswer()` 也会作废等待）。
+- **空答案不编**。"它跑完了，但没有文字回答（记录在看板里）"——不拿"任务完成"糊过去。
+- 提示文案不写"通常 10 秒"：实测同一条命令有 9s / 35s / **90s+** 三种，偏乐观的数字
+  只会让用户在第 20 秒开始怀疑程序坏了。
+
+**闸门**：`cargo test` **68 / 0**；`verify:tauri` **134 PASS / 0 FAIL**（+6：送出后不关窗、
+对不上的结局被丢弃、答案写进 DOM、窗口长高、提示改成「说完了」、重开后清空）。
+真机 e2e（一次真实模型调用）：答案 `收到` 落在卡上、窗口 128 → 152。
+
 ### S12-2 桌宠端口挪到专用 27333（2026-11-06）
 
 S12-1 收尾时发现的地雷：桌宠默认端口 `23333` 与用户 `~/.claude/settings.json` 的
@@ -130,7 +152,7 @@ S12-1 收尾时发现的地雷：桌宠默认端口 `23333` 与用户 `~/.claude
 （`~/.claude` / `~/.codebuddy` / `~/.workbuddy`）里**没有任何已装的 HTTP hook 指向 23333**，
 所以不需要重装 hook；观察型 hook 全部运行时读端点文件，自动跟上。
 
-顺带解开一条旧限制：与主仓库 `clawd-on-desk`（23333）**可以同时跑了**。
+顺带解开一条旧限制：23333 空出来了，本机其它占用该端口的工具（模型网关）不再被桌宠挤掉。
 
 **闸门**：`cargo test` **68 / 0**；`verify:tauri` **128 PASS / 0 FAIL**；
 真机确认监听的就是 27333、端点文件同步更新。
@@ -1364,6 +1386,8 @@ spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"]);
 | S10-10 修整窗穿透 | 0 | 0 | 0 | 0 | **无新增 SEC 编号**。它把一条安全假设换了位置：可点区域从"页面自己判定"改成"宿主每 60ms 按渲染层上报的矩形判定"。命中矩形只决定 `set_ignore_cursor_events` 的开关，**不构成权限边界**——渲染层把矩形报大报小最坏是"一片空气挡住桌面"或"猫点不到"，属可用性不是越权；真正被收紧的是**拖动中强制不穿透**（否则 `pointerup` 被吃掉会让窗口卡在跟鼠标走的状态）。诊断出口 `hitState()` 只读本地状态、不新增对外通道，数据仍在 `src-tauri` 进程内 |
 | S11 DSH 接入 | 0 | 0 | 0 | **1** | **新增一条 P3：SEC-17，会话标题多了一条绕过 SEC-16 过滤的来路**（核对全节见 SECURITY.md「S11 DSH 接入」）。`dsh.rs` 从 `$DSH_HOME/storages/session_projcache/sessions/<id>.json` 直接读 `title`，截前几个字当泡泡兜底词，**全程无密钥正则**——`TITLE_SECRET_RE` 只在 hook 侧对 `UserPromptSubmit` 的派生词生效，对这条新数据源不生效。**凭据侧是干净的**：`dsh.rs` 只读 `DSH_HOME` / `USERPROFILE` 两个环境变量，完全不碰 key（`~/.dsh/.credentials.yaml` 里的明文 key 属第三方工具的落盘，不在本项目读取面内）；`cwd` 仍过 `sanitize_cwd`/`public_cwd`，SEC-09 未破 |
 | S12 「说」 | 0 | 0 | 0 | 0 | **无新增 SEC 编号**（核对全节见 SECURITY.md「S12『说』」）。本项目第一次**主动 fork 一个会调用模型的外部进程**，面的大小由三条设计决定：① 用户的文字**一个字都不进 argv**，全走 stdin（argv 有语法，`--help` / `-1` 会被当 flag；Windows 转义还要同时对 `cmd` 与 node 两个解析器正确）；`--session-id` 是唯一可变参数位，且只从宿主状态机取，**不接受页面传的字符串**；② `say_send` 的签名里**没有 cwd**（硬约束 46），目录只来自「这条会话自己的桶」或「用户上次干活的地方」——一旦 cwd 可传，`sandboxMode: workspace-write` 就成了相对错目录的沙箱，比路径泄露严重得多；③ 新开的两扇窗各配一条白名单（`W_COMPOSE` 只给自己那点事、`W_SAY` 开给主窗/输入窗/看板），输入窗沿用 `default-src 'none'` 且**只登记一份最小 capability**（`core:event:default`）——Tauri 的 ACL 是白名单，漏登记的表现是"一条事件都收不到"，S12 第一版正是被 500ms 轮询兜底把这个静默失效盖住了（硬约束 51：命令白名单与 capability 登记是两件事）。**凭据面没有扩大**：没有把 key 塞进子进程 environ（那会让它出现在每一个子进程里），而是让 `dsh` 自己读 `~/.dsh/.credentials.yaml`（仓库外），本项目一行没碰。**一条明说的边界**：`locate()` 取 `PATH` 上第一个含 `@deepseek-ai/dsh/lib/bin.js` 的目录，所以**能改 `PATH` 的人能让桌宠跑任意 `bin.js`**——与"能改 `PATH` 也能换掉桌宠 exe"同一权限级，故不另加白名单，但结论的边界就在这儿 |
+| S12-1 权限气泡三条死路 | 0 | 0 | 0 | 0 | **无新增 SEC 编号**（设计核对见 SECURITY.md「八、`bubble_close`：收窗不是裁决」）。这次改的是"界面有按钮、宿主没有账"，**不需要任何新权限**：`bubble_close` 只给气泡窗（`W_BUBBLE`），**不产生裁决**（不调 `settle()`、不回 HTTP；"不表态"仍走 `bubble_dismiss` 的 204），且**只收"当前这一条"**（带 id 时比对 `bubble_current`，不带 id 时只在 `bubble_current.is_none()` 才动手）——防止一张过期卡片把别人刚弹出来的请求收掉。收窗与 `Notify::Resolved` 共用 `resolve_current()`，队列里的下一条照常顶上。**顺带一条可观测性收益**：`permission_decide` 改收回执（`call` 而非 `send`），`send()` 会吞掉所有异常、让"决定没送到宿主"在日志里也不存在——这不是漏洞，但它是"用户说点了、宿主说没收到"扯皮的土壤。硬约束 51：凡用户能点的东西，必须能回答"这一下发给了谁、对方收没收到" |
+| S12-2 端口挪到 27333 | 0 | 0 | 0 | 0 | **无新增 SEC 编号**。这是**端口混淆（可用性 + 错觉风险），不是越权**：旧默认端口 `23333` 与用户 `~/.claude/settings.json` 的 `ANTHROPIC_BASE_URL` 重合，桌宠先启动就占住 Claude Code 的模型网关——Claude Code 的请求打到我们的 HTTP 服务上吃 401。边界没被击穿的原因是既有的两道：服务**只绑 `127.0.0.1`**，且除 `/permission` 外的端点仍校 token（`/permission` 不校 token 是 HTTP hook 架构的固有属性，风险收敛在 Host/Origin/Content-Type + UI 不盲批，见 S5 行）。挪动前做过安全检查：`~/.claude` / `~/.codebuddy` / `~/.workbuddy` 三条配置里**没有任何已装的 HTTP hook 指向旧端口**，所以不存在"改了端口但 hook 仍指向 23333、请求落到别人服务上"的窗口。**遗留的判断**：端口仍是固定的（权限 hook 的 url 是安装时写死进 `settings.json` 的，随机端口等于 hook 指向死端口），所以这类撞车以后还会以别的服务名出现——判据是装 hook 时报出的端口，而不是记在文档里的数字 |
 
 下一阶段开工前，先看 [SECURITY.md](./SECURITY.md) 里该阶段的预判小节。
 
@@ -1371,6 +1395,9 @@ spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"]);
 
 | 日期 | 类型 | 内容 |
 |---|---|---|
+| 2026-11-06 | 决策 | **桌宠默认端口 23333 → 27333**（S12-2，`6402d86`，见上方「已完成」）。S12-1 收尾时发现的雷：`23333` 与用户本机 `~/.claude/settings.json` 的 `ANTHROPIC_BASE_URL` 完全重合——桌宠先启动就占住 Claude Code 的模型网关，Claude Code 的请求打到我们的 HTTP 服务上吃 401，现象是"发出去没有任何返回"。改动只有两处常量（`server.rs` / `port-file.js` 的 `DEFAULT_PORT`），其余全部读端点文件或常量、没有第二个写死数字。**挪之前先查了三条 agent 配置**（`~/.claude` / `~/.codebuddy` / `~/.workbuddy`）里没有任何已装的 HTTP hook 指向旧端口，所以不用重装；观察型 hook 运行时读端点文件，自动跟上。顺带解开一条旧限制：与主仓库 `clawd-on-desk`（23333）现在可以同时跑。**顺手修掉一道假闸门**：「gaze 至少推过一次」在光标离桌宠超过约 260px 时必挂——变化检测是对**钳制后**的归一化坐标做的，光标在远处时挪 8px 没有任何变化，这条断言以前全靠"跑测试的人恰好把光标放在猫旁边"。修法是先 `moveCursorTo` 把光标传送进桌宠窗口内（坐标取自 `hitState().window` + scale）存基准，再 nudge 造变化。闸门 `cargo test` 68/0、`verify:tauri` 128 PASS / 0 FAIL |
+| 2026-11-06 | 修复 | **「点了允许却什么都没发生」= 三条静默死路**（S12-1，`b2b1369`，见上方「已完成」与 SECURITY「八」）。用户报「确认操作，没有任何返回」，用 CDP 复刻出的真实时序是：卡片亮着、按钮亮着，点下去一个字节都没发出去，请求挂满 120 秒才回落 204。三个入口同一类病——**界面有按钮，宿主那边没有账**：① 卡片加载即可见、按钮初始可点，`permission:request` 还没到（首次请求 / 页面重载 / 事件没投递）时点下去撞上 `currentId === null` 的静默 return → 按钮**初始禁用**，只有 `render()` 拿到真请求才放开；② `decide()` 先清 `currentId`、置灰，再 fire-and-forget，主进程回 `false`（已超时 / 已被结掉）时没人接，卡片留着、按钮永久灰、这扇窗从此废掉 → 改走 `call` **收下回执**，`false` 就写明「已经结束」并收窗；③ 修 ①② 时自己引入的竞态：`await` 回执后无条件清 `currentId`，把这几毫秒里刚渲染上来的下一条请求的 id 擦掉（卡片显示 Read、点下去走"没有当前请求"）→ `if (currentId !== id) return;`，写状态前先比对身份。宿主侧 `permission_decide` 返回 `false` 且当前窗显示的正是这条时，复用 `resolve_current()` 收窗（与 `Notify::Resolved` 同一条路径），不留废窗；新增 `bubble_close`（只给气泡窗、只做界面收尾、**不产生任何裁决**、只收当前这一条）。契约变化：`permission_decide` 的回执不再被 `send()` 吞掉——"决定没送到宿主"从"日志里都不存在"变成"能看见"。`verify:tauri` 123 → **128**（+5：不存在的 id 回执 false、超时后点允许能说明情况、`bubble_close` 跨窗被拒等），`cargo test` 68/0；真机复现脚本实测修前 204 @120s、修后同一条 200 带 allow 回包。硬约束 51 由这条落地 |
+| 2026-11-06 | 重构 | **清掉全部 10 条编译警告**（`0119af0`，7 个 `.rs`，+13 / −35）。全是 S12 那批代码留下的尾巴，逐条按"谁还在用"清：`sys.rs` 的 `HANDLE` / `BOOL` / `PostMessageW` 三个导入（前两个随 `bool_ok` 一起删，`BOOL` 只有它在用；`PostMessageW` 只在测试里模拟锁屏消息，**挪进 `tests` 模块自己导入**）；`sys.rs::bool_ok` 写完没接上，`BOOL` 判空各处都是内联 `!= 0`，删；`theme.rs` 的 `Deserialize` 没用上、`themes_root_display` 没人调、`_unused(&Path)` 是当年为留住 `Path` 导入写的占位——三个一起清，导入收窄成 `{ Serialize, PathBuf }`；`main.rs` 的 `ContextMenu` 与 `risk.rs` 的 `Rule`（`push` 直接构造 `Reason`，它是重构残留）删；`permission.rs::size()` 只有单测在数排队数，**标 `#[cfg(test)]` 而不是删**；`state.rs::oneshot_ms` 包装方法没人调（调用方都直接用 `oneshot_ms_with`）删；`server.rs::ServerHandle` 的 `port` / `token` 没有任何读者（port 文件在 `start` 内部写完，调用方拿到 handle 只会丢弃）——结构体删掉、`start` 返回 `()`。`cargo build` **0 警告（dev + release）**、`cargo test` 68/68、`verify:tauri` 123/0 |
 | 2026-11-05 | 功能 | **看板重做 + 从桌宠发消息**（S12，见上方「已完成」）。三件事一起来：用户自己配的供应商（照抄，不写默认值）、看板要"有有效信息"、桌宠要能直接说话。看板改成四问一卡：你在问什么 / 它答了什么 / 用哪个模型 / 花了多少，数据按 id 把状态机（250ms）与投影（1s）join 起来。**投影里没有的东西不编**：`turnOutline` 缺失用我们发消息时接住的回复补并标 `reply_from_say`；`modelSelection` 缺失用 `dsh --dump-config` 的 `agent-default-model` 补并标 `model_default`；`sessionStats` 缺失只退回 `turnBoundary.lastTurn`，其余不显示。发消息走 `dsh headless [--session-id] -`（产品自带的一等公民入口），三条硬规矩：任务走 stdin、cwd 必须是这条会话自己的目录、**记录过 `agentPreset` 的会话一律续不了**——第三条是设计不是 bug，所以不绕，改成在输入窗打开时就显示「只能看」。四个坑：① `--json` 不是可选项（headless 会话投影里没有 `turnOutline`，stdout 是唯一能拿到答案的地方）；② **输入窗显示的目录和实际落地的目录会分叉**（两处各查一次"最近有活干的目录"，几百毫秒内换了人 → 会话真的起在了另一个项目里），改成第一次就钉住；③ headless 会话没有 `modelSelection`；④ **验收脚本自己骗自己**（`if (!done)` 把字符串 `"null"` 当成"已拿到"，于是通了的链路显示成没通）——闸门脚本的 bug 会伪装成产品的 bug；⑤ **新窗口不会自己获得权限**（Tauri 的 ACL 是白名单，`compose` 没登记进 capabilities → 一次事件都没收到过，而表现像时序问题，被 500ms 轮询兜底盖住）。`cargo test` 62 → **68**，`verify:tauri` 106 → **123 / 0**，真机端到端验过发新会话与续会话两条路 |
 | 2026-11-04 | 修复 | **「运行 exe 后拖不动、点不了，双击右键全哑」= 整窗永久穿透**（S10-10，`6d5a0a7`，见上方「已完成」）。迁移时照抄了 Electron 的「启动先整窗穿透 → 页面收到 mousemove 命中猫再关掉」：Electron 在 Windows 上装了低级鼠标钩子转发（`forward: true`），这套写法成立；而 tao 0.37.2 只设 `WS_EX_TRANSPARENT` ＋ `WS_EX_LAYERED`——不参与命中测试，页面**一条 mousemove 都收不到**，"收到就关掉穿透"永远等不到触发条件，自我死锁。修法是把判定搬到还在转的那一侧：渲染层每 200ms 上报 `hit_rects`（分身时每只 `.cat` 一个，**不合并**——合并会让猫之间的空隙变成挡板），宿主每 60ms 读 `GetCursorPos`，落进矩形 → `set_ignore_cursor_events(false)`、离开 → `true`；**拖动中强制不穿透**（窗口追光标慢半拍的那一拍会吃掉 `pointerup`，`dragging` 卡死）。诊断出口 `clawd.hitState()` 一次看清 `ignore`/`inside`/`local` 与宿主侧 gaze 计数。**四道闸门 75 条全绿时它还在**：CDP 的 `Input.dispatchMouseEvent` 直接注入渲染进程、绕过 OS 命中测试，合成事件照常触发 DOM 监听——闸门因此加了 `SKIP`（环境调不动系统光标时响亮跳过、不冒充 PASS），并写下硬约束 41/42：靠"页面收到输入"再解除输入屏蔽一律是死锁；合成事件不能当"输入链路通"的证据。回归 75 → **80**，README 踩坑第一条同步记入 |
 | 2026-11-04 | 修复 | **「没有任何任务却一直 thinking」**（S11，见上方「已完成」）。四步自我循环：headless 的投影没有 `lastPromptAt` → 退到文件 mtime → mtime 每写一次盘就前进 → 被当成"用户又提了一轮"发 `UserPromptSubmit` → 但这类会话不写 `sessionStats`，phase 永远是 Idle，Idle 分支的 `saw_active` 闸永不放行 Stop，于是**一句话把会话关进 thinking、再没人放它出来**。触发者是当天两条测试命令留下的死会话。修两层：源头加 `Obs.has_prompt_at`（只有真 `lastPromptAt` 才算新一轮，mtime 只判活跃窗口）+ 把我们自己发的 UserPromptSubmit 也置 `saw_active`；兜底加 `THINKING_MAX_MS` 10 分钟（thinking 是唯一"没有任何后续事件也能存在"的状态，必须自己会死）。`cargo test` 43 → 46 |

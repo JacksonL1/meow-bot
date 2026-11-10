@@ -18,10 +18,18 @@ const el = {
   text: document.getElementById("text"),
   foot: document.getElementById("foot"),
   msg: document.getElementById("msg"),
+  ans: document.getElementById("ans"),
 };
 
 const HINT_IDLE = "Enter 发送 · Shift+Enter 换行";
 const HINT_BUSY = "正在交给 dsh…";
+// 别写"通常 10 秒"：实测同一条命令有 9s / 35s / 90s+ 三种（模型冷启动 + 网络），
+// 报一个偏乐观的数，用户等到第 20 秒就开始怀疑是不是坏了。
+const HINT_SENT = "已送出 · 等它回话（慢的时候要一两分钟）";
+const HINT_ANSWER = "它说完了 · Esc 关闭";
+// 窗口基准高度由宿主定义（`COMPOSE_H`）。传 0 = 恢复基准，别在这里抄一个 128 出来。
+const H_BASE = 0;
+const H_MAX = 420;
 
 /** 当前目标。由 compose_context / compose:open 注入。 */
 let target = null;
@@ -29,6 +37,8 @@ let target = null;
 let targetSig = "";
 /** 发送中就不要重复发。同一目标宿主那边也只允许一条在飞。 */
 let busy = false;
+/** 正在等回话的那一句原文。用来把"迟到的结局"和"这一发"对上号。 */
+let sentPrompt = "";
 /** 有焦点时的定时器：保证"目标变了"这件事一定收敛（理由见 startPolling）。 */
 let pollTimer = null;
 
@@ -75,6 +85,66 @@ function setFoot(text, bad) {
   el.foot.classList.toggle("bad", Boolean(bad));
 }
 
+// ---- 答案区：这张卡的"下半场"（2026-11-10）----
+
+/** 把一段回复写进卡片，并把窗口长到刚好放得下。 */
+function showAnswer(text) {
+  const body = (text || "").trim();
+  if (!body) {
+    // 空答案不是错误，是事实：它跑完了但没说话。不编一句"任务完成"糊过去。
+    setFoot("它跑完了，但没有文字回答（记录在看板里）", false);
+    return;
+  }
+  el.ans.hidden = false;
+  el.ans.textContent = body;
+  setFoot(HINT_ANSWER, false);
+  growToFit();
+}
+
+/**
+ * 卡片是 `height:100%` 撑满窗口的，所以量它自己的高度只会得到"当前窗口多高"。
+ * 先把它临时改成 auto 量内容，再还原——一次性测量，不改变最终布局。
+ */
+function growToFit() {
+  requestAnimationFrame(() => {
+    const prev = el.card.style.height;
+    el.card.style.height = "auto";
+    const h = Math.ceil(el.card.getBoundingClientRect().height) + 12; // body 上下各 6px
+    el.card.style.height = prev;
+    window.clawd.composeHeight(Math.min(H_MAX, h));
+  });
+}
+
+function resetAnswer() {
+  // 换了目标/重新打开 = 上一次的等待作废，迟到的 say:done 一律不认。
+  sentPrompt = "";
+  el.ans.hidden = true;
+  el.ans.textContent = "";
+  window.clawd.composeHeight(H_BASE);
+}
+
+/** 一句话的结局（成功 / 失败）都从这里进，界面上只有一处状态机。 */
+function handleDone(d) {
+  if (!d) return;
+  // 只认自己这一发。窗会被复用：用户可能在等答案时按 Esc 藏起来，
+  // 过了半分钟又打开它写另一句话——这时上一发的 say:done 才到。
+  // 不比对原文的话，旧答案会直接写进新那句话的卡片下面（看着像它答错了）。
+  if (!sentPrompt || d.prompt !== sentPrompt) return;
+  sentPrompt = "";
+  busy = false;
+  el.card.classList.remove("busy");
+  if (d.ok) {
+    showAnswer(d.reply);
+    return;
+  }
+  // 失败发生在"窗已经藏起来"之后——送出是立即返回的，成不成几十秒后才知道
+  // （模型 401 / 网络断 / 45 分钟超时）。宿主会把窗重新亮出来（见 say_send 的注释），
+  // 这里负责把原话放回输入框：用户改一改就能重发，不用从头再打一遍。
+  if (d.prompt && !el.text.value) el.text.value = d.prompt;
+  setFoot(d.message || "dsh 退出了", true);
+  el.text.focus();
+}
+
 function adopt(t) {
   const sig = sigOf(t);
   // 同一个目标就不要重复 adopt：轮询每 500ms 调一次，每次重置提示行的话，
@@ -87,6 +157,7 @@ function adopt(t) {
   el.text.value = "";
   busy = false;
   el.card.classList.remove("busy");
+  resetAnswer();
   renderTarget();
   if (target && target.can_resume === false) return; // 已经写了原因
   setFoot(HINT_IDLE, false);
@@ -108,6 +179,7 @@ async function submit() {
   // 比发出去然后弹一个用户没法处理的错误要好。用户要的就是"让它动起来"。
   const id = target && target.id && target.can_resume !== false ? target.id : null;
 
+  sentPrompt = text;
   let r = null;
   let errMsg = "";
   try {
@@ -117,9 +189,11 @@ async function submit() {
     errMsg = typeof err === "string" ? err : String((err && err.message) || err);
   }
   if (r && r.ok) {
-    // 立刻给一个"收到了"的反馈再关窗：关得太快，用户会怀疑到底发出去没有。
-    setFoot(`已送出 · ${r.cwd || ""}`.trim(), false);
-    setTimeout(() => window.clawd.composeClose(), 420);
+    // **不关窗**（2026-11-10 改）。原来这里 420ms 后 composeClose()：
+    // 用户只看到"已送出"一闪，答案回来时窗早就没了，而回复只发给看板——
+    // 看板没开就等于"发进黑洞"。现在窗口留着，等 say:done 把答案填进来。
+    el.text.value = "";
+    setFoot(HINT_SENT, false);
     return;
   }
   // 失败：留在窗里，把原因显示出来，文字不丢（用户可以直接改了再发）
@@ -163,6 +237,7 @@ window.clawd.onComposeOpen((t) => {
   el.text.value = "";
   busy = false;
   el.card.classList.remove("busy");
+  resetAnswer();
   setFoot(HINT_IDLE, false);
   adopt(t);
   el.text.focus();
@@ -204,29 +279,23 @@ window.clawd
   .catch(() => {});
 if (document.hasFocus()) startPolling();
 
-// 发送失败的**另一种**失败：进程起来了但 dsh 报错（凭据、目录、独占锁…）。
-// 这条从 say:done 回来，那时窗口可能还开着（失败时我们特意不关）。
-window.clawd.onSayDone((d) => {
-  if (!d || d.ok) return;
-  busy = false;
-  el.card.classList.remove("busy");
-  // 失败发生在"窗已经藏起来"之后——送出是立即返回的，成不成几十秒后才知道
-  // （模型 401 / 网络断 / 45 分钟超时）。宿主会把窗重新亮出来（见 say_send 的注释），
-  // 这里负责把原话放回输入框：用户改一改就能重发，不用从头再打一遍。
-  if (d.prompt && !el.text.value) el.text.value = d.prompt;
-  setFoot(d.message || "dsh 退出了", true);
-  el.text.focus();
-});
+// 一句话的结局：成功时把答案写进这张卡，失败时把原因和原话留下。
+// 两条路都走 handleDone，界面只有一处状态机。
+window.clawd.onSayDone(handleDone);
 
-// 调试入口：回归脚本用它灌一份目标 / 读回当前状态
+// 调试入口：回归脚本用它灌一份目标 / 读回当前状态 / 模拟一次结局
 window.composeDebug = {
   adopt,
+  // 回归里不真的调模型（一次 8 秒 + 花钱），但"答案要落在卡上"必须钉住，
+  // 所以把结局入口也露出来——它和 say:done 走的是同一个函数，不是复制品。
+  sayDone: (d) => handleDone(d),
   state: () => ({
     target,
     busy,
     text: el.text.value,
     to: el.to.textContent,
     msg: el.msg.textContent,
+    ans: el.ans.hidden ? "" : el.ans.textContent,
     bad: el.foot.classList.contains("bad"),
   }),
 };

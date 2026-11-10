@@ -108,6 +108,27 @@
       .foot.bad .msg {
         color: var(--bad);
       }
+      /* 答案区（2026-11-10）：发送成功之后，这句话的回复就落在这里。
+         之前这扇窗在"已送出"之后 420ms 自己关掉，回复只发给看板——
+         而看板多半没开，于是用户看到的是一句话发进黑洞里。
+         现在发完**不关**，这扇窗顺手变成一张答案卡。 */
+      .ans {
+        max-height: 240px;
+        overflow-y: auto;
+        padding: 7px 9px;
+        border-left: 2px solid var(--accent);
+        background: #fff8f1;
+        border-radius: 6px;
+        font-size: 12px;
+        line-height: 1.55;
+        white-space: pre-wrap;
+        word-break: break-word;
+        overflow-wrap: anywhere;
+        flex: none;
+      }
+      .ans[hidden] {
+        display: none;
+      }
       /* 送出去之后用户其实不需要再做什么，所以整张卡片淡下去表示"这话不归你管了" */
       .card.busy {
         opacity: 0.72;
@@ -124,6 +145,7 @@
         <span class="esc">Esc</span>
       </div>
       <textarea id="text" rows="2" placeholder="跟它说点什么…" spellcheck="false"></textarea>
+      <div class="ans" id="ans" hidden></div>
       <div class="foot" id="foot"><span class="msg" id="msg">Enter 发送 · Shift+Enter 换行</span></div>
     </div>
     <script src="./tauri-bridge.js"></script>

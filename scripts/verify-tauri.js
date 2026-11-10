@@ -698,6 +698,53 @@ async function main() {
       );
       ok("空的一句话发不出去（在宿主侧就被拦住）", /ERR:.*还没写/.test(empty), empty.slice(0, 60));
 
+      // ---- 答案必须落在卡上（2026-11-10 用户报「发完消息任何地方都看不到返回」）----
+      //
+      // 旧行为：发送成功 → 420ms 后自动关窗 → 答案回来时只发给看板；
+      // 看板没开就等于发进黑洞。现在窗口留着，`say:done` 把答案写进这张卡。
+      //
+      // 不真的调模型（一次 8 秒起、有时一分半，还花钱）：把 saySend 换成桩，
+      // 其余全走真实路径——submit() 自己会记下发出去的那句原文，handleDone
+      // 靠它判断"这个结局是不是我这一发的"。桩换掉的是"网络那头"，不是逻辑。
+      await W.eval(
+        "window.__realSay = window.clawd.saySend; window.clawd.saySend = () => Promise.resolve({ok:true,cwd:'…\\\\Users\\\\Think'}); 1"
+      );
+      const beforeH = Number(await W.eval("window.outerHeight"));
+      await W.eval(
+        "(()=>{const t=document.getElementById('text');t.value='测试一句';t.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));return 1})()"
+      );
+      await sleep(400);
+      const sentSt = JSON.parse((await W.eval("JSON.stringify(window.composeDebug.state())")) || "{}");
+      ok("送出之后窗口不关、提示改成等回话", sentSt.busy === true && /等它回话/.test(sentSt.msg || ""), sentSt.msg);
+
+      // 迟到的结局不能串台：原文对不上就当没这回事
+      await W.eval("window.composeDebug.sayDone({ok:true, reply:'别人的答案', prompt:'另一句话'}), 1");
+      await sleep(250);
+      const crossed = JSON.parse((await W.eval("JSON.stringify(window.composeDebug.state())")) || "{}");
+      ok("对不上的结局被丢掉（关窗重开不会串台）", !crossed.ans, JSON.stringify(crossed.ans).slice(0, 40));
+
+      await W.eval("window.composeDebug.sayDone({ok:true, reply:'第一行答案\\n第二行答案', prompt:'测试一句'}), 1");
+      await sleep(600);
+      const answered = JSON.parse((await W.eval("JSON.stringify(window.composeDebug.state())")) || "{}");
+      ok(
+        "答案真的写进了输入窗（不再是发完就没下文）",
+        /第一行答案/.test(answered.ans || "") && /第二行答案/.test(answered.ans || ""),
+        JSON.stringify(answered.ans).slice(0, 60)
+      );
+      ok("答案落地后提示行改成「说完了」", /说完了/.test(answered.msg || ""), answered.msg);
+      const afterH = Number(await W.eval("window.outerHeight"));
+      ok("窗口跟着答案长高（固定 128px 放不下几行字）", afterH > beforeH, `${beforeH} → ${afterH}`);
+      await W.eval("window.clawd.saySend = window.__realSay; 1");
+
+      // 重新叫出来时必须清干净：上一轮的答案不能挂在下一句话下面
+      await R.eval("window.petDebug.clickSayNew()");
+      await sleep(700);
+      const fresh = JSON.parse((await W.eval("JSON.stringify(window.composeDebug.state())")) || "{}");
+      ok("重新打开输入窗 → 上一轮的答案已清空", !fresh.ans, JSON.stringify(fresh.ans).slice(0, 40));
+      // 还原目标，下面"关掉之后目标还在"那条要的是 s-say
+      await R.eval("window.petDebug.clickSay('s-say'), 1");
+      await sleep(900);
+
       // 窗口白名单又扩了一扇窗，必须钉住：输入窗只能"说话"，不能顺走别人的命令。
       const cross = String(
         await W.eval(
