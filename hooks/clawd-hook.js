@@ -200,6 +200,13 @@ function field(v, max = MAX_FIELD) {
   return typeof v === "string" && v ? v.slice(0, max) : undefined;
 }
 
+// 取命令行里 `--flag value` 的 value。只认出现在 `--flag` **之后**的那一个词：
+// argv[2] 是事件名（可能是任意字符串），不能按位置猜。
+function argValue(flag) {
+  const i = process.argv.indexOf(flag);
+  return i > 0 ? process.argv[i + 1] : undefined;
+}
+
 function readStdin(timeoutMs) {
   return new Promise((resolve) => {
     let settled = false;
@@ -262,6 +269,17 @@ async function main() {
   const event = field(payload.hook_event_name) || field(process.argv[2]);
   if (!event) return;
 
+  // 是**哪家** agent 在说话。
+  //
+  // 以前这里写死 `"claude-code"`，于是接上 WorkBuddy 之后，看板会把两边的事件
+  // 算到同一个平台上（用户报「会话太乱了」的一半原因）。
+  // 这个值由 `install.js` 在安装时烘进命令行（`--from workbuddy`）——
+  // 安装那一刻是我们唯一确知"这条 hook 属于谁"的时刻，运行时去猜都是碰运气。
+  //
+  // 老装法（没有 `--from`）退回 claude-code：那是这个项目最早只接 Claude 时的行为，
+  // 保持不变比猜一个新值安全——猜错会让会话跑到别的平台分组里。
+  const from = field(argValue("--from")) || "claude-code";
+
 
   // 2) 再探端口：桌宠没开就到此为止，不重试、不打印、退 0
   let endpoint;
@@ -312,7 +330,7 @@ async function main() {
   const title = deriveTitle(event, payload);
   const keyword = deriveKeyword(event, payload);
   const body = JSON.stringify({
-    agent: "claude-code",
+    agent: from,
     session_id: sid,
     event,
     cwd: field(payload.cwd, MAX_CWD),

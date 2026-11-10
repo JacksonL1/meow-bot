@@ -101,6 +101,12 @@ const MAX_TOOL: usize = 64;
 const MAX_KEYWORD: usize = 8;
 const MAX_CWD_STORE: usize = 1024;
 const MAX_CWD_PUBLIC: usize = 200;
+/// 平台名的最长长度。`claude-code` / `workbuddy` 都在 12 个字以内，
+/// 32 是给"以后接别家"留的余量，不是猜出来的值。
+const MAX_AGENT: usize = 32;
+/// 报不上来平台名时的值。看板把它显示成「未知来源」——
+/// 这种行只会来自手工 `POST /state`（真 hook 一定带 `agent`）。
+const UNKNOWN_AGENT: &str = "unknown";
 
 /// 主题给的状态时长。`None` = 主题没写，用内置默认。
 /// oneshot 时长查表。做成自由函数是为了能在 `sessions.values_mut()` 里调用——
@@ -140,6 +146,12 @@ fn event_state(event: &str) -> Option<Visual> {
 #[derive(Clone, Debug)]
 pub struct Session {
     pub id: String,
+    /// 哪家 agent 的会话（`workbuddy` / `claude-code` / …）。
+    ///
+    /// 为什么要存它（2026-11-10）：看板改成"平台 → 会话"两级之后，一条会话
+    /// 得先知道自己属于谁。以前这个信息在 hook 里被写死成 `claude-code`，
+    /// 于是接了 WorkBuddy 之后两家的会话被算成同一家——用户看到的就是"太乱了"。
+    pub agent: String,
     pub state: Visual,
     /// 这条会话第一次被看到是什么时候。
     ///
@@ -159,6 +171,8 @@ pub struct Session {
 #[derive(Clone, Serialize, Debug)]
 pub struct SessionView {
     pub id: String,
+    /// 平台 id，原样透传（看板按它分组、按它决定这张卡能做什么）。
+    pub agent: String,
     pub state: Visual,
     pub cwd: Option<String>,
     pub title: Option<String>,
@@ -208,6 +222,26 @@ fn sanitize_tool(raw: Option<&str>) -> Option<String> {
         .collect();
     let t: String = t.trim().chars().take(MAX_TOOL).collect();
     if t.is_empty() { None } else { Some(t) }
+}
+
+/// 平台名只留 `a-z0-9-`：它会被当作看板的分组键，也会进 DOM 的 `data-agent`。
+/// 与其让一个带空格/引号的值一路穿到页面，不如在这里就收敛成"合法就留、不合法就
+/// 当成未知"。
+fn sanitize_agent(raw: Option<&str>) -> String {
+    let Some(raw) = raw else {
+        return UNKNOWN_AGENT.to_string();
+    };
+    let t: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(MAX_AGENT)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if t.is_empty() {
+        UNKNOWN_AGENT.to_string()
+    } else {
+        t
+    }
 }
 
 fn sanitize_keyword(raw: Option<&str>) -> Option<String> {
@@ -340,6 +374,7 @@ impl Store {
             .values()
             .map(|s| SessionView {
                 id: s.id.clone(),
+                agent: s.agent.clone(),
                 state: s.state,
                 cwd: public_cwd(&s.cwd),
                 title: s.title.clone(),
@@ -387,6 +422,7 @@ impl Store {
             .map(|s| s.chars().take(MAX_EVENT_LEN).collect::<String>())
             .unwrap_or_else(|| "Unknown".to_string());
         let cwd = sanitize_cwd(payload.get("cwd").and_then(|v| v.as_str()));
+        let agent = sanitize_agent(payload.get("agent").and_then(|v| v.as_str()));
         let now = Instant::now();
 
         if event == "SessionEnd" {
@@ -407,6 +443,12 @@ impl Store {
                 if cwd.is_some() {
                     existing.cwd = cwd;
                 }
+                // 平台名也"粘"，但**允许被纠正**：老装法的 hook 会一直报
+                // `claude-code`，重装之后才带上真名。不覆盖的话，一条会话在
+                // 第一次出现时就被钉死在错误的分组里，重装也救不回来。
+                if agent != UNKNOWN_AGENT {
+                    existing.agent = agent.clone();
+                }
                 let st = existing.state.as_str();
                 self.log(&event, &id, st, st, "preserved");
                 let changed = self.tick();
@@ -419,6 +461,9 @@ impl Store {
                 id.clone(),
                 Session {
                     id: id.clone(),
+                    // 平台名在第一眼就定下来：看板按它分组，一会儿这家的、一会儿
+                    // 那家的，用户就没法把"这条会话"和"我哪个工具里那条"对上。
+                    agent: agent.clone(),
                     state: Visual::Idle,
                     born: now,
                     state_since: now,
@@ -445,6 +490,11 @@ impl Store {
 
         let s = self.sessions.get_mut(&id).expect("刚插入过");
         s.last_at = now;
+        // 和 SessionStart 那条一样：平台名可以被后续事件纠正（老装法的 hook
+        // 先报了 claude-code，重装之后才带上真名）。
+        if agent != UNKNOWN_AGENT {
+            s.agent = agent;
+        }
         if cwd.is_some() {
             s.cwd = cwd;
         }
@@ -643,6 +693,42 @@ mod tests {
         assert_eq!(snap.visual, Some(Visual::Working));
         let (snap, _) = st.apply(&ev("Stop"));
         assert_eq!(snap.visual, Some(Visual::Attention));
+    }
+
+    // 看板按平台分组，所以"这条会话是哪家 agent 的"必须存下来。
+    // 它来自 hook 安装时烘进命令行的 `--from`，不是一个猜出来的值。
+    #[test]
+    fn the_agent_is_remembered_and_can_be_corrected() {
+        let mut st = Store::new(Timings::default());
+        let (snap, _) = st.apply(&json!({
+            "session_id": "s1", "event": "UserPromptSubmit", "agent": "workbuddy"
+        }));
+        assert_eq!(snap.sessions[0].agent, "workbuddy");
+
+        // 老装法的 hook 会一直报 claude-code；重装之后带上真名，必须能纠正回来——
+        // 否则这条会话在第一次出现时就被钉死在错误的分组里，重装也救不回来。
+        let (snap, _) = st.apply(&json!({
+            "session_id": "s1", "event": "PreToolUse", "agent": "codebuddy"
+        }));
+        assert_eq!(snap.sessions[0].agent, "codebuddy");
+
+        // 报不上来就保持原值，不要被空值抹掉
+        let (snap, _) = st.apply(&ev("PostToolUse"));
+        assert_eq!(snap.sessions[0].agent, "codebuddy");
+    }
+
+    #[test]
+    fn a_missing_or_bogus_agent_is_unknown_not_a_guess() {
+        let mut st = Store::new(Timings::default());
+        let (snap, _) = st.apply(&ev("UserPromptSubmit"));
+        assert_eq!(snap.sessions[0].agent, "unknown", "没报就老实说不知道");
+
+        // 脏值收敛成合法字符（它会被当分组键、也会进 DOM 的 data-agent）
+        let (snap, _) = st.apply(&json!({
+            "session_id": "s2", "event": "UserPromptSubmit", "agent": "Work Buddy\"<script>"
+        }));
+        let s2 = snap.sessions.iter().find(|s| s.id == "s2").unwrap();
+        assert_eq!(s2.agent, "workbuddyscript", "非法字符直接丢掉，不是转义也不是保留");
     }
 
     // 这条是 Class-B bug 的护栏：WorkBuddy 每轮补发的 SessionStart 不能把

@@ -192,7 +192,9 @@
     onTheme: (cb) => on("theme", cb),
     // 看板的**内容**：每条会话在干什么（最后一轮对话、模型、token、上下文）。
     // 和 getSnapshot 分两条：那是"猫在演什么"，这是"会话里发生了什么"。
-    dshSessions: () => call("dsh_sessions"),
+    // 看板的内容来源。2026-11-10 起它不只服务 DSH：WorkBuddy / Claude Code 的
+    // 会话也在里面（磁盘扫描），靠每行的 `agent` 字段区分平台。
+    agentSessions: () => call("agent_sessions"),
     // 对着某条会话说一句（和桌宠走同一个 say_send）
     saySend: (id, text) => call("say_send", { id: id || null, text: String(text) }),
     onSayDone: (cb) => on("say:done", cb),

@@ -1043,7 +1043,7 @@ const W_SAY:     &[&str] = &["main", "compose", "dashboard"]; // 谁能说
 ```
 
 `say_send` 对三扇窗开放（桌宠 / 输入窗 / 看板都能发起），`compose_context` / `compose_close`
-只给输入窗，`dsh_sessions` 仍只给看板。**每加一扇窗，就要单独钉一条"它不能调别人的命令"**——
+只给输入窗，`dsh_sessions`（S13 起改名 `agent_sessions`，白名单不变，仍只给看板）仍只给看板。**每加一扇窗，就要单独钉一条"它不能调别人的命令"**——
 回归里那条 `输入窗调 theme_get → 被拒` 守的就是这个（硬约束 36 的延续）。
 
 **ACL 是白名单，而且失败得非常安静**。Tauri v2 的窗口/插件权限来自 `capabilities/*.json`
@@ -1171,6 +1171,60 @@ dsh 现在只存在于 `AppData\Local\Programs\DeepSeek Harness` 这个桌面版
 "发现外部程序"这件事的风险形态讲清楚了——**判据松的代价不是误报，是执行了别的东西**。
 同一条适用于以后任何"自动发现本机某个程序"的代码：判据要能**排除同类应用**，
 排除不了就提供显式指定，不要让"猜"成为默认路径。
+
+---
+
+## 看板两级分组 + 扫别的 agent 的会话（2026-11-10）
+
+起因是用户说「现在的会话太乱了」：看板把 DSH 与 WorkBuddy 的会话平铺在一起。修法分两半：
+界面改成「平台 → 会话」两级，数据侧新增 `src-tauri/src/agents.rs`——**从磁盘直接读
+`~/.workbuddy/projects` 与 `~/.claude/projects` 下的转录 jsonl**，因为状态机里的会话
+十几分钟就过期，而"我这周用过哪些会话"在文件里。
+
+这不是漏洞报告，是**新数据源带来的三处需要说清的地方**。前两处守住了，第三处没守住，
+记成 SEC-18。
+
+### 守住的：只读、只留摘要、目录按 SEC-09 分层
+
+- **只读**：`Scanner::poll()` 只 `read_dir` + 读文件，没有任何写、复制、落盘路径。这些
+  文件是别的产品的数据，本项目只在自己内存里留摘要。
+- **只留摘要**：一条 `Card` 只有 `agent` / `id` / `title` / `cwd` / `last_prompt` /
+  `last_reply` / 轮数 / 时刻，长度各有上限（`MAX_TEXT` 400、`MAX_TITLE` 80），
+  扫描窗口 `KEEP_DAYS = 7`、每平台 `MAX_PER_AGENT = 20`——**不是档案室，是"最近在哪儿干过活"**。
+- **目录**：`Card.cwd` 里是全路径（留给"复制路径"，那件事只能由宿主做），出门前由调用方过
+  `public_cwd()`，快照里仍只有 basename。SEC-09 的分层没被这条新来路绕开。
+- **平台名**：`sanitize_agent()` 只留 `a-z0-9-_`、截 32 字、小写，非法即 `unknown`。
+  它要进 DOM 的 `data-agent` 分组键，所以在入 `Store` 时就收敛，不指望页面去洗。
+
+### 没守住的：SEC-18 标题与整句原话都不过密钥正则（P3，记录在案）
+
+- **严重度**：P3。触发条件是"原话/标题本身含敏感串"，数据源是本机同用户的第三方工具转录。
+- **位置**：`src-tauri/src/agents.rs` 的 `parse()`（`title = extract_prompt(raw)`、
+  `last_prompt` / `last_reply` 同路）→ `Card` → `SessionRow` → 看板渲染。
+- **现象**：`grep -rn TITLE_SECRET_RE src-tauri/src/*.rs` **结果为空**——那把正则只活在
+  `hooks/clawd-hook.js`，作用于 `UserPromptSubmit` 派生出来的那一行。`agents.rs` 完全不经过
+  hook，`extract_prompt()` 只做「剥 `<system-reminder>` / 剥包裹标签 / 压平空白 / 截断」，
+  没有任何密钥判定。**这是 SEC-17 的同一类问题、第三个数据源**（SEC-17 记的是 `dsh.rs`），
+  单独编号是因为文件、数据源、修法位置都不同，而且这边带出来的是**整句原话**而非 80 字标题。
+- **影响**：屏幕上可能出现一条本该整条丢弃的标题；`last_prompt` / `last_reply` 更直接——
+  用户粘一段带 `sk-` / `ghp_` / `AKIA` 的内容进来，看板就把原话显示出来。看板是常驻可开的窗口，
+  录屏、共享屏幕、旁人一眼都能看到。**不是越权**：能读这些文件的进程本来就能读原文，
+  这里只是把"已经在本机的东西"搬到了更显眼的界面上。
+- **修复建议**：把 SEC-16 的正则下沉成一个 Rust 侧共用函数（`redact::secret_like(&str) -> bool`），
+  在 `agents.rs::parse()`、`dsh.rs::keyword()`、以及 `Store::apply()` 的 meta 分支各调一次，
+  命中即**整条丢弃**（不截断保留、不改写成 `***`——洗一半的密钥仍是密钥）。三处共用一个函数，
+  才是"过滤在源头做"这句话在 Rust 侧真正的落点；三个数据源各写一遍必然再漏第四个。
+- **未受影响的相邻面**：`cwd` 见上（SEC-09 仍在），凭据侧一行没碰——`agents.rs` 只读
+  `USERPROFILE` / `HOME` 与环境里已有的路径，不碰 `~/.dsh/.credentials.yaml`，也不碰
+  WorkBuddy / Claude Code 自己的鉴权文件。
+
+### 一条要同时记住的边界
+
+`can_say` 这个字段是**安全边界的产品化**：DSH 有 `headless --session-id`，WorkBuddy 与
+Claude Code 在本机没有任何 CLI（2026-11-10 查遍 `PATH` 与 `~/.workbuddy/binaries`），
+所以后两家的会话是**只能看**的。这一点必须由界面直说，否则用户会以为是"点了没反应"——
+而"点了没反应"正是 S12-1 花了一整轮才修掉的那类体验。**能写与不能写要在同一屏上说出来，
+不要靠用户试**。
 
 ---
 

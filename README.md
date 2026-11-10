@@ -38,7 +38,7 @@
 ```text
 事件流   agent 事件 → hook（短命进程，async）→ 本地 HTTP → 状态机 → IPC → 弹簧动画
 裁决流   agent 要执行工具 → HTTP hook（阻塞）→ 气泡等你点 → 同一个 socket 回 200 / 204
-看板流   双击桌宠 → 独立窗口 → 1s 轮询（状态机 + DSH 投影，按 id 合）→ 一卡一会话
+看板流   双击桌宠 → 独立窗口 → 1s 轮询（状态机 + 各平台会话，按 id 合）→ 平台 → 会话两级
 说话流   点「说一句」/ ✎ → 输入窗 → 宿主起 dsh → 读它的 --json 流 → 回答回看板
 主题流   启动 → 读 themes/<id>/ → 校验 → IPC → 渲染层换帧数据（白名单在这层之前就生效）
 ```
@@ -427,17 +427,38 @@ git 破坏性操作      FORCE_PUSH_MAIN · FORCE_PUSH · GIT_HARD_RESET · GIT_
 
 **会话看板**
 
+两级：**平台 → 会话**（2026-11-10 改）。一级是平台（DeepSeek Harness / WorkBuddy /
+Claude Code），点组头折叠；二级是那家平台下的会话卡片，每组默认只列最近 8 条，
+剩下的折成一行「还有 N 条（展开）」。
+
+为什么分两级：之前是一个平铺列表，两家的会话混在一起，而它们**能不能说话**都不一样。
+现在平台那一行直接写明这件事——**「只能看」** 表示这家没法从桌宠往里写：
+
+| 平台 | 会话从哪来 | 能对话吗 |
+|---|---|---|
+| DeepSeek Harness | `$DSH_HOME` 的投影缓存 | **能**（`dsh headless --session-id`） |
+| WorkBuddy | `~/.workbuddy/projects/<项目>/<uuid>.jsonl`（只读） | 不能——本机没有可写的 CLI |
+| Claude Code | `~/.claude/projects/<项目>/<uuid>.jsonl`（只读） | 同上 |
+
 一张卡片回答四件事——**这条会话在干什么**：
 
-- `你：` 最后问了什么（投影里的 `turnOutline`，取最后一轮，压平换行、截 400 字）
+- `你：` 最后问了什么（投影里的 `turnOutline`，取最后一轮，压平换行、截 400 字；
+  WorkBuddy 那类转录里真实提问裹在 `<user_query>` 里，会先挖出来再当标题，
+  否则每一行的标题都会是同一段系统提示）
 - `它：` 答了什么（同样截断；headless 会话没有这一段，就用桌宠发消息时接住的那句，标着来源）
 - 目录 · `模型 · 供应商`（headless 会话取 profile 默认值，会写「（默认）」）
 - `1 轮 · 1.2k → 340 · 上下文 0.6% · 模型 6s`——**只显示有的**，缺的不填 0（见硬约束 25/44）
 
 顶栏是聚合：`3 条 · 1 条在跑 · 累计出 23k token`。正在演的那条用左侧色条标出。
+没有活态的历史会话，状态徽标写「记录」——它不是在做什么，它只是存在过。
 底部可以切主题；每张卡片的「说一句」和「复制路径」——后者单独取**完整**路径（见下方 SEC-09）。
 **演示模式**把标题、目录和**对话内容一起藏**（对话比标题更接近"你到底在干什么"），状态与时间照旧。
 数据是 1s 轮询，不是推送——`idleMs` 本来就随时间变，轮询一个本地 IPC 的代价近似为零。
+
+> 平台名是 hook **安装时**烘进命令行的（`node clawd-hook.js <事件> --from workbuddy`）。
+> 所以升级之后要重跑一次 `npm run install:hooks` / `npm run install:hooks:workbuddy`，
+> 老装的 hook 会一直报 `claude-code`（这时看板会把那条会话归到 Claude 组，
+> 等它落盘之后自动纠正回来）。
 
 ## 本地端点（HTTP 协议）
 
@@ -600,7 +621,7 @@ clawd-starter/
 │   ├── index.html             桌宠主窗口（分身 / 消息泡泡 / 拖拽层）
 │   ├── renderer.js            弹簧骨架 + 七种姿势 + 分身 + 泡泡 + SVG 白名单
 │   ├── bubble.html / .js      权限气泡（命令原文 + 风险评级 + 允许/拒绝）
-│   ├── dashboard.html / .js   会话看板（两路数据 join：状态机 + DSH 投影）
+│   ├── dashboard.html / .js   会话看板（平台 → 会话两级；状态机 + 各平台会话 join）
 │   ├── compose.html / .js     输入窗（400×128，说一句话）
 │   ├── theme.js               主题解析与加载（预览构建也用它）
 │   ├── tauri-bridge.js        把 window.clawd 装回渲染层（Electron → Tauri 的桥）

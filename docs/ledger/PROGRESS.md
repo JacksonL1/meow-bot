@@ -87,7 +87,10 @@ S8 的「跟桌宠说话」**2026-10-30 整套删掉了**（理由见下方被�
 
 ## 进行中
 
-- 无。S12 的四件事（供应商 / 看板 / 说 / 找 dsh）都已真机验过，闸门 134 + 75 全绿。
+- 无。S13 的会话看板（平台 → 会话两级）已真机验过，闸门 140 + 87 全绿。
+  **待用户做一件事**：重跑一次 `npm run install:hooks` / `npm run install:hooks:workbuddy`——
+  平台名是安装时烘进命令行的（`--from workbuddy`），老装的 hook 会一直报 `claude-code`。
+  不跑也能用（会话落盘之后看板会自动纠正分组），只是新会话在头几秒会被归到 Claude 组。
   下一步取决于用户：是把「说」的接力棒交给**多轮对话 UI**（现在一次一窗，发完就关），
   还是先把「桌面端会话续不了」这件事在界面上讲得更醒目。
 - **待用户决策**：桌宠默认端口 23333 与用户 Claude Code 的 `ANTHROPIC_BASE_URL` 冲突
@@ -118,6 +121,52 @@ S8 的「跟桌宠说话」**2026-10-30 整套删掉了**（理由见下方被�
 - [x] ~~状态时长（25s 发呆 / 60s 入睡）仍写死在 `state.js`~~ → **已进 `theme.json.timings`**（2026-10-28）。注意原来写的「25s 发呆」是个误会：那个 `IDLE_AFTER_MS` **从头没有消费者**，连配置项都算不上，已删（见 DEVLOG）。搬过去的是 `oneshot` 三个时长 + `sleepAfterMs`
 
 ## 已完成
+
+### S13 会话看板：平台 → 会话（2026-11-10）
+
+用户原话：「现在的 clawd 会话，太乱了。目前接入的是 workbuddy 以及 deep seek harness
+两个。deepseek harness 是有 sessions 概念的，第一级目录只显示是哪个平台的，点开之后，
+显示需要用哪个 sessions，在该 sessions 下进行对话。workbuddy 参考 deepseek harness
+看看能不能找到类似的。」
+
+**先回答那个"看看能不能找到类似的"**：能找到，而且形状几乎一样。
+WorkBuddy（以及 Claude Code）把自己的会话落成
+`<家目录>/<.workbuddy|.claude>/projects/<项目 slug>/<会话 uuid>.jsonl`，一行一个 JSON，
+里面有 `role` / `content[].text` / `cwd` / `timestamp`——和 DSH 的投影是同一个抽象，
+只是我们以前**只用 hook 事件**，而状态机里的会话十几分钟就过期，于是看板上 WorkBuddy
+只有"正在跑的那一条"。**但它不能对话**：本机 `PATH` 与 `~/.workbuddy/binaries` 里
+没有任何 `workbuddy` / `codebuddy` CLI，所以这些会话是只能看的。这一点必须由界面说，
+不能让用户点了才发现（S12-3 的教训）。
+
+改动四块：
+
+- **新 `agents.rs`**：扫三个根（`~/.workbuddy/projects`、`~/.claude/projects`），
+  把每份转录解析成一张卡片（标题 / 最后一轮 / 轮数 / 目录 / mtime）。三件事值得记：
+  ① **缓存键是 `(mtime, size)`**——看板 1s 一问，一份转录几百 KB，不缓存就是"一开风扇就转"；
+  ② **真实提问裹在 `<user_query>` 里**，前面是九千多字符的 `<system-reminder>`，不挖出来
+  每条会话的标题都会是同一段系统提示（这正是"乱"的一半）；③ 工具结果也以 `user` 身份
+  回灌，只数真正的提问才算"轮"。
+- **hook 带上真实平台名**：`clawd-hook.js` 里那个写死的 `agent: "claude-code"` 换成了
+  `--from <agent>`，由 `install.js` 在**安装时**烘进命令行——安装那一刻是唯一确知
+  "这条 hook 属于谁"的时刻，运行时去猜都是碰运气。老装法（没有 `--from`）退回
+  `claude-code` 保持原行为；`state.rs` 里平台名**允许被后续事件纠正**，否则一条会话
+  在第一次出现时就被钉死在错误的分组里，重装也救不回来。
+- **`dsh_sessions` → `agent_sessions`**：一个平台无关的 `SessionRow` + 两个 `From`
+  （`dsh::RichSession` / `agents::Card`）。DSH 之外的平台没有 token / 上下文 / 权限档位，
+  那些字段留空，页面按"没有就不显示"处理。
+- **看板两级**：一级是平台（可折叠，记住展开状态，显示条数 / 在跑数 / 最近动静），
+  二级是会话卡片；平台级的事实「只能看」贴在组头上。**另外发现一个真问题**：
+  分组只解决了"两家混在一起"，没解决"一屏全是历史"——真机上 DSH 那组一开就是
+  **46 条**。所以每组默认只列最近 8 条，剩下的折成一行「还有 N 条（展开）」。
+
+顺带修正的三处：`copy_path` 现在认两种键（裸 id 走状态机、`agent/id` 走磁盘扫描）；
+不能说话的会话「说一句」**真禁用**（以前 DSH 的桌面端会话也只是提示不拦）；
+没有活态的历史会话徽标写「记录」而不是"外部"。
+
+闸门：`cargo test` 75 → **87**（+12：转录解析 10 条、平台标记 2 条），
+`verify:tauri` 134 → **140**（+6：两级分组存在 / 夹具落在 dsh 组 / 另一个平台单独成组 /
+组头写「只能看」/ 按钮禁用 / 别的平台也写出了最后一轮）。真机截图确认两组都在、
+「还有 38 条（展开）」那一行样式正常。
 
 ### S12-4 「找不到 dsh」：桌面版也是 dsh（2026-11-10）
 
@@ -1426,6 +1475,7 @@ spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"]);
 | S12-1 权限气泡三条死路 | 0 | 0 | 0 | 0 | **无新增 SEC 编号**（设计核对见 SECURITY.md「八、`bubble_close`：收窗不是裁决」）。这次改的是"界面有按钮、宿主没有账"，**不需要任何新权限**：`bubble_close` 只给气泡窗（`W_BUBBLE`），**不产生裁决**（不调 `settle()`、不回 HTTP；"不表态"仍走 `bubble_dismiss` 的 204），且**只收"当前这一条"**（带 id 时比对 `bubble_current`，不带 id 时只在 `bubble_current.is_none()` 才动手）——防止一张过期卡片把别人刚弹出来的请求收掉。收窗与 `Notify::Resolved` 共用 `resolve_current()`，队列里的下一条照常顶上。**顺带一条可观测性收益**：`permission_decide` 改收回执（`call` 而非 `send`），`send()` 会吞掉所有异常、让"决定没送到宿主"在日志里也不存在——这不是漏洞，但它是"用户说点了、宿主说没收到"扯皮的土壤。硬约束 51：凡用户能点的东西，必须能回答"这一下发给了谁、对方收没收到" |
 | S12-2 端口挪到 27333 | 0 | 0 | 0 | 0 | **无新增 SEC 编号**。这是**端口混淆（可用性 + 错觉风险），不是越权**：旧默认端口 `23333` 与用户 `~/.claude/settings.json` 的 `ANTHROPIC_BASE_URL` 重合，桌宠先启动就占住 Claude Code 的模型网关——Claude Code 的请求打到我们的 HTTP 服务上吃 401。边界没被击穿的原因是既有的两道：服务**只绑 `127.0.0.1`**，且除 `/permission` 外的端点仍校 token（`/permission` 不校 token 是 HTTP hook 架构的固有属性，风险收敛在 Host/Origin/Content-Type + UI 不盲批，见 S5 行）。挪动前做过安全检查：`~/.claude` / `~/.codebuddy` / `~/.workbuddy` 三条配置里**没有任何已装的 HTTP hook 指向旧端口**，所以不存在"改了端口但 hook 仍指向 23333、请求落到别人服务上"的窗口。**遗留的判断**：端口仍是固定的（权限 hook 的 url 是安装时写死进 `settings.json` 的，随机端口等于 hook 指向死端口），所以这类撞车以后还会以别的服务名出现——判据是装 hook 时报出的端口，而不是记在文档里的数字 |
 | S12-4 认桌面版的 dsh | 0 | 0 | 0 | 0 | **无新增 SEC 编号**（设计核对见 SECURITY.md「十、`locate()` 加认桌面版」）。这一轮**没有新增任何命令、窗口或权限**，但把"发现外部程序"的面讲清楚了：`locate()` 现在有多个入口（`PATH` 上的 npm 布局、三个安装根目录各扫一层、`CLAWD_DSH_ROOT`），**它们的前提是同一个**——已经能在该用户身份下写盘或设环境变量，所以权限级没提高，只是需要检查的位置变多了。**最值得记的不是漏洞而是判据**：第一版用"有 `resources/app.asar` 就算"，临时探针当场选中了同机的 **Cherry Studio**，即"拿一个无关程序去跑 dsh 的脚本"——判据太松的代价不是误报，是**执行了别的东西**。最终判据是"asar 在 **且** exe 名或目录名含 `deepseek`"，名字被改掉的情况用 `CLAWD_DSH_ROOT` 显式指定，不猜。另：桌面版要靠 `ELECTRON_RUN_AS_NODE=1` 才以 node 身份跑，少了它不是报错而是**又启一个 GUI**，所以 `pre`/`env` 进了 `Launcher`，并由 `base()` 统一转手给两条调用路径 |
+| S13 会话看板两级 | 0 | 0 | 0 | 0 | **新增一条 P3：SEC-18**（跨产品读取会话转录，见 SECURITY.md「十一」）。这一轮把读取面从"DSH 自己的投影"扩到了 **WorkBuddy / Claude Code 的转录文件**，性质要说清楚：① **只读**——不写、不复制、不落盘，摘要只活在内存（`Scanner.cache`）；② 出门只给**摘要**（标题 / 最后一轮 / 轮数 / 目录 basename / mtime），完整目录只留在宿主侧给「复制路径」用，SEC-09 的分层没有破；③ 文本一律截断（400 字）+ `textContent` 写入，续 S12 的老规矩；④ **窗口 7 天 / 每平台 20 条**，不做全库索引。**新面**：读的是另一个产品的私密记录，虽然同用户同权限级（能读到文件本来就意味着能读），但它比"读投影"多得多——所以这条记成 P3 而不是 P0。配套：平台名进 DOM 的 `data-agent` 前先收敛成 `[a-z0-9_-]`（`sanitize_agent`），不让 hook 传来的任意字符串直接当属性值。**而 SEC-16 的过滤仍只装在 hook 侧**：`agents.rs` 的 `title` / `last_prompt` / `last_reply` 三样都**不过 `TITLE_SECRET_RE`**（`grep -rn TITLE_SECRET_RE src-tauri/src/*.rs` 为空，那把正则只活在 `hooks/clawd-hook.js`），暴露面因此比 SEC-17 **大一档**——那边是 80 字标题，这边是整句原话，而看板是常驻可开的窗。这是 SEC-16「过滤在源头」在 Rust 侧仍无落点的**第三个数据源** |
 
 下一阶段开工前，先看 [SECURITY.md](./SECURITY.md) 里该阶段的预判小节。
 
@@ -1433,6 +1483,8 @@ spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"]);
 
 | 日期 | 类型 | 内容 |
 |---|---|---|
+| 2026-11-10 | 功能 | **看板从平铺改成「平台 → 会话」两级**（S13，见上方「已完成」与 SECURITY「十一」）。起因是用户原话「现在的会话太乱了」：一个平铺列表里混着 WorkBuddy 和 DSH 的会话，而它们**能不能说话**都不一样。新增 `src-tauri/src/agents.rs`（527 行，10 条单测）：从 `~/.workbuddy/projects` 与 `~/.claude/projects` 读两家的转录 jsonl，只留摘要（标题 / 最后一轮 / 轮数 / 目录），窗口 7 天、每平台 20 条，**只读、不写、不复制、不落盘**；`cwd` 出门前仍过 `public_cwd`（SEC-09 分层）。两家**行形状不同**（WorkBuddy 是 `{type,role,content:[…],cwd}`、Claude 是 `{type,message:{role,content}}`），`message_of()` 归一成 `(role, blocks)` 后再解。**「能不能说」必须由界面说出来**：DSH 有 `headless --session-id` 这个一等公民入口，WorkBuddy / Claude Code 在本机没有任何 CLI（查遍 `PATH` 与 `~/.workbuddy/binaries`），所以这两家的会话只能看。状态机侧 `Session` / `SessionView` 加 `agent` 字段，`sanitize_agent()` 只留 `a-z0-9-_`（它要进 DOM 的 `data-agent`）；老装法的 hook 一直报 `claude-code`，所以平台名**允许被纠正**而不是钉死不覆盖。附带一条：WorkBuddy 会把系统提示整坨塞进同一条 user 消息（实测 9000+ 字符），不挖 `<user_query>` 的话看板每条标题都是同一段系统提示——那正是"乱"的一部分。**分组只解决了一半**：真机上 DSH 那组一开就是 46 条，所以每组默认只列最近 8 条、其余折成「还有 N 条（展开）」。闸门 `cargo test` 75 → **87/0**、`verify:tauri` 134 → **140/0**（+6），真机截图确认两组都在、「只能看」贴在组头、「还有 38 条」那行是虚线边框。**待用户做一件事**：重跑 `npm run install:hooks` / `npm run install:hooks:workbuddy`——平台名是安装时烘进命令行的，老装的 hook 会一直报 `claude-code` |
+| 2026-11-10 | 功能 | **答案必须有落点**（S12-3，`6c4283b`，见上方「已完成」）。用户报「发了一条消息，但任何地方都看不到返回内容」——不是发送链路坏了（日志里 `[say] 收工 ok=true reply=收到` 一直在），是**答案没有落点**：发送成功后输入窗 420ms 自己关掉，回复只走 `say:done` 发给看板，而看板多半没开。改成发完不关窗：停在「已送出 · 等它回话」，`say:done` 到达时把答案写进 `#ans`、窗口自己长高（新命令 `compose_height`，128 → 上限 420，长高后重新贴回猫身边）。两条防错：① 窗会被复用（Esc 藏起来、半分钟后再写另一句），**迟到的结局不许串台**——记着"我正在等哪一句原文"，`prompt` 对不上的一律丢掉；② **空答案不编**，写「它跑完了，但没有文字回答（记录在看板里）」。提示文案刻意不写"通常 10 秒"：实测同一条命令有 9s / 35s / 90s+ 三种。闸门 `cargo test` 68/0、`verify:tauri` 128 → **134 PASS / 0 FAIL**（+6），真机 e2e 答案落在卡上、窗口 128 → 152 |
 | 2026-11-10 | 修复 | **「找不到 dsh」= 只认了 npm 布局**（S12-4，见上方「已完成」与 SECURITY「十」）。用户的报错是「PATH 里没有 `@deepseek-ai/dsh`」，而 `locate()` 确实只会扫 `PATH` 上的 `<dir>/node_modules/@deepseek-ai/dsh/lib/bin.js`。查下来本机那份 npm 安装**随着 `C:\nvm4w` 被清空一起没了**（`ls -la` 只剩 `.`/`..`、`which dsh` 空），dsh 现在只活在桌面版 `AppData\Local\Programs\DeepSeek Harness` 里。桌面版是同一个产品同一套参数（`app.asar/.../dsh-desktop-host/lib/cli.js`，用 `DeepSeek Harness.exe` + `ELECTRON_RUN_AS_NODE=1` 跑），逐条对着 `--help` 核过。改动：`Launcher` 加 `pre`/`env`/`from`，`command()` 与 `default_model()` 共用 `base()`；`locate()` 加第二条来源（三个安装根目录各扫一层），留 `CLAWD_DSH_ROOT` 手动指定。**过程中最值钱的一条是探针抓出来的误判**：第一版判据只认"有 `resources/app.asar`"，当场选中了同机的 **Cherry Studio**——判据松的代价不是"找不到"，而是**拿一个无关程序去跑 dsh 的脚本**；改成"asar 在 **且** 名字含 `deepseek`"，并把误判钉成回归测试。另：报错时把**找过的候选目录打进 stderr**，`Cannot find module` 翻成「桌面版入口和预期不一样」。闸门 `cargo test` 68 → **75**、`verify:tauri` 134/0；真机 e2e 2.0 秒拿到「收到」 |
 | 2026-11-06 | 决策 | **桌宠默认端口 23333 → 27333**（S12-2，`6402d86`，见上方「已完成」）。S12-1 收尾时发现的雷：`23333` 与用户本机 `~/.claude/settings.json` 的 `ANTHROPIC_BASE_URL` 完全重合——桌宠先启动就占住 Claude Code 的模型网关，Claude Code 的请求打到我们的 HTTP 服务上吃 401，现象是"发出去没有任何返回"。改动只有两处常量（`server.rs` / `port-file.js` 的 `DEFAULT_PORT`），其余全部读端点文件或常量、没有第二个写死数字。**挪之前先查了三条 agent 配置**（`~/.claude` / `~/.codebuddy` / `~/.workbuddy`）里没有任何已装的 HTTP hook 指向旧端口，所以不用重装；观察型 hook 运行时读端点文件，自动跟上。顺带解开一条旧限制：与主仓库 `clawd-on-desk`（23333）现在可以同时跑。**顺手修掉一道假闸门**：「gaze 至少推过一次」在光标离桌宠超过约 260px 时必挂——变化检测是对**钳制后**的归一化坐标做的，光标在远处时挪 8px 没有任何变化，这条断言以前全靠"跑测试的人恰好把光标放在猫旁边"。修法是先 `moveCursorTo` 把光标传送进桌宠窗口内（坐标取自 `hitState().window` + scale）存基准，再 nudge 造变化。闸门 `cargo test` 68/0、`verify:tauri` 128 PASS / 0 FAIL |
 | 2026-11-06 | 修复 | **「点了允许却什么都没发生」= 三条静默死路**（S12-1，`b2b1369`，见上方「已完成」与 SECURITY「八」）。用户报「确认操作，没有任何返回」，用 CDP 复刻出的真实时序是：卡片亮着、按钮亮着，点下去一个字节都没发出去，请求挂满 120 秒才回落 204。三个入口同一类病——**界面有按钮，宿主那边没有账**：① 卡片加载即可见、按钮初始可点，`permission:request` 还没到（首次请求 / 页面重载 / 事件没投递）时点下去撞上 `currentId === null` 的静默 return → 按钮**初始禁用**，只有 `render()` 拿到真请求才放开；② `decide()` 先清 `currentId`、置灰，再 fire-and-forget，主进程回 `false`（已超时 / 已被结掉）时没人接，卡片留着、按钮永久灰、这扇窗从此废掉 → 改走 `call` **收下回执**，`false` 就写明「已经结束」并收窗；③ 修 ①② 时自己引入的竞态：`await` 回执后无条件清 `currentId`，把这几毫秒里刚渲染上来的下一条请求的 id 擦掉（卡片显示 Read、点下去走"没有当前请求"）→ `if (currentId !== id) return;`，写状态前先比对身份。宿主侧 `permission_decide` 返回 `false` 且当前窗显示的正是这条时，复用 `resolve_current()` 收窗（与 `Notify::Resolved` 同一条路径），不留废窗；新增 `bubble_close`（只给气泡窗、只做界面收尾、**不产生任何裁决**、只收当前这一条）。契约变化：`permission_decide` 的回执不再被 `send()` 吞掉——"决定没送到宿主"从"日志里都不存在"变成"能看见"。`verify:tauri` 123 → **128**（+5：不存在的 id 回执 false、超时后点允许能说明情况、`bubble_close` 跨窗被拒等），`cargo test` 68/0；真机复现脚本实测修前 204 @120s、修后同一条 200 带 allow 回包。硬约束 51 由这条落地 |

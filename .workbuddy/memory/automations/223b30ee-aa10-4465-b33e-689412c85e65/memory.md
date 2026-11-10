@@ -81,6 +81,13 @@
   3. `FILE_MAP.md`：表头 37/14730 → **38/14778**（`capabilities` 从 1 个算成 2 个，20 行）；删掉错误的「+3/+2328」旧 delta 段；`compose.json` 9→7 行、`compose.html` 128→132、`compose-renderer.js` 193→232、`say.rs` 578/14 测→662/16 测、`verify-tauri.js` 939/121→1109/124；`bubble.html` 94→192、`bubble-renderer.js` 337→94（**这两格是串位**，不是增长）；并加一段注：行内 `**N 行**` 只是快照，`main.rs`/`dsh.rs`/`state.rs`/`renderer.js`/`tauri-bridge.js`/`index.html` 仍偏小，要真值现数。
 - 未动 src/、scripts/，未 commit。**无新安全发现**（SEC-17 仍最大编号）。
 
+## 2026-11-10 16:50
+- daily-check 首跑退出码 2，「有实质变化」：HEAD `9b25ab6`、2 个新提交（`6c4283b` S12-3 答案落回输入窗、`9b25ab6` S12-4 认桌面版 dsh）；工作区 9 个未提交（含新文件 `src-tauri/src/agents.rs` 527 行，看板「平台→会话」两级分组）；audit 0/0/0、依赖 0。二跑只剩「FILE_MAP 漏记 agents.rs」——基线前移老问题。
+- 交叉核实：两个提交**各自都带了台账更新**，S12-4 有独立正文 + 时间线行；**真缺的是 S12-3 的时间线行**（正文在，表里没有）。工作区那批（16:36–16:45）全部晚于台账 mtime（16:18–16:19），属真未入账。
+- 实修 4 个文件：① PROGRESS 时间线补 2 行（S12-3 功能 / 看板两级分组 新增，后者明确标「进行中，工作区未提交」）；② PROGRESS 安全状态表补「看板两级分组（进行中）」P3=1 行；③ SECURITY 新增小节 + **SEC-18（P3）**：`agents.rs` 的 title / `last_prompt` / `last_reply` 都没过 `TITLE_SECRET_RE`（`grep -rn TITLE_SECRET_RE src-tauri/src/*.rs` 为空，正则只在 `hooks/clawd-hook.js`），与 SEC-17 同类但数据源/文件/修法位置不同，且暴露面更大（整句原话 vs 80 字标题）；④ PROJECT 体积行 + FILE_MAP 表头同步 **39 个 / 16546 行**（逐项 wc -l：src 7js 3939 + 4html 1147 + rs 11 个 7935 + other 116 + hooks 668 + scripts 2741；相对 11-06 的 38/14932 是 +1/+1614，拆得开：agents.rs 527 + 既有 1087）。
+- FILE_MAP 加 `agents.rs` 一行；`check-filemap.js` 转 **[ok]（78 实际 / 47 条，原 46）**。未动 src/、scripts/，未 commit。
+- 经验：**"提交自带台账"不等于时间线齐全**——提交只写正文小节、忘了表行的情况已连续出现（S10-5/6/7、S10-10、S12-3），每天要拿 `git log` 的 subject 逐条比时间线，而不是只看有没有 `docs/ledger` 改动。
+
 ## 经验
 - 脚本第一次跑会刷新基线，所以**同一天跑第二轮必然报「无实质变化」**——判断一律以第一轮的输出为准，第二轮只当"确认基线已落地"。
 - `src-tauri/target/**` 永远会以「FILE_MAP 漏记 6000+ 文件」出现，是构建物（已 gitignore），脚本没排除；`check-filemap.js` 报 `[ok]` 才是 FILE_MAP 的真正结论。

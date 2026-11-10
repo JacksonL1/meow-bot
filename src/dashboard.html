@@ -121,6 +121,103 @@
         flex-direction: column;
         gap: 8px;
       }
+      /* ---- 一级：平台 ---- */
+      /* 为什么要有这一层（2026-11-10 用户：「会话太乱了」）：同一个平铺列表里
+         混着 WorkBuddy 和 DSH 的会话，而它们**能不能说话**都不一样。分成
+         "平台 → 会话"之后，用户先认平台，再找会话，扫一眼就知道每条来自哪儿。 */
+      .group {
+        margin-bottom: 10px;
+      }
+      .group + .group {
+        margin-top: 2px;
+      }
+      .gh {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        padding: 6px 4px 6px 2px;
+        cursor: pointer;
+        border-radius: 7px;
+        min-width: 0;
+      }
+      .gh:hover {
+        background: #f4f2eb;
+      }
+      .caret {
+        width: 12px;
+        flex: none;
+        color: var(--faint);
+        font-size: 10px;
+        transition: transform 0.12s ease;
+      }
+      .group.collapsed .caret {
+        transform: rotate(-90deg);
+      }
+      .gname {
+        font-weight: 600;
+        font-size: 12.5px;
+        white-space: nowrap;
+      }
+      /* 平台的"性格"用一个小圆点区分，比给每个平台配一种撞色安静得多。 */
+      .gdot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        flex: none;
+        background: var(--faint);
+      }
+      .a-dsh .gdot {
+        background: #5b8def;
+      }
+      .a-workbuddy .gdot {
+        background: #2f9e6e;
+      }
+      .a-claude-code .gdot {
+        background: #c8794a;
+      }
+      .gmeta {
+        font-size: 11px;
+        color: var(--muted);
+        font-variant-numeric: tabular-nums;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      /* 「只能看」这类结论必须贴在平台那一行上：它是**平台级**的事实
+         （WorkBuddy 没有任何可写的 CLI），不是某条会话的特殊情况。 */
+      .gnote {
+        margin-left: auto;
+        font-size: 10.5px;
+        color: var(--faint);
+        white-space: nowrap;
+        flex: none;
+      }
+      .group.collapsed ul {
+        display: none;
+      }
+      .group > ul {
+        padding-left: 19px;
+      }
+      /* 「还有 N 条」：不是一张卡片，是一条虚线边的"翻页口子"。
+         做成虚线是为了让它看起来像"列表的边界"，而不是又一个会话。 */
+      li.more {
+        background: none;
+        border: 1px dashed var(--line);
+        padding: 2px;
+        align-items: center;
+      }
+      li.more button {
+        border: none;
+        background: none;
+        color: var(--muted);
+        font-size: 11.5px;
+        width: 100%;
+        padding: 3px 6px;
+      }
+      li.more button:hover {
+        color: var(--text);
+        border: none;
+      }
       li {
         background: var(--card);
         border: 1px solid var(--line);
@@ -326,7 +423,7 @@
     </header>
 
     <main>
-      <ul id="list"></ul>
+      <div id="groups"></div>
       <div class="empty" id="empty">
         还没有会话。<br />
         在 agent 里发一条消息，或者点右上角<b>说一句</b>。

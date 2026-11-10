@@ -166,14 +166,20 @@ function stripOurs(groups) {
   return kept;
 }
 
-function ourCommand(event) {
-  // 路径可能带空格，一律加引号；node 用绝对路径避免 PATH 差异
-  return `node "${HOOK_PATH}" ${event}`;
+function ourCommand(event, agentName) {
+  // 路径可能带空格，一律加引号；node 用绝对路径避免 PATH 差异。
+  //
+  // `--from <agent>` 为什么要写进命令里（2026-11-10）：hook 以前把平台名写死成
+  // "claude-code"，于是看板无论接了哪家都会把事件算到 Claude 头上。命令是
+  // **安装时**写进各自的 settings.json 的，所以在哪儿装就写哪儿——这是唯一
+  // 一个"装的时候就确定、运行时不用猜"的位置。
+  const from = agentName ? ` --from ${agentName}` : "";
+  return `node "${HOOK_PATH}" ${event}${from}`;
 }
 
 // 观察型 hook：只是"看一眼"，不 block 工具、不改 tool_input、不给裁决。
 function ourGroup(ev, a) {
-  const hook = { type: "command", command: ourCommand(ev) };
+  const hook = { type: "command", command: ourCommand(ev, a.name) };
   if (a.asyncHooks) {
     hook.async = true;
     // timeout 是宿主侧兜底：异步 hook 正常 240ms 内退出，5s 是防呆不是预期。

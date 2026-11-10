@@ -10,6 +10,7 @@
 //   Menu.popup                        → tauri::menu 的 ContextMenu
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod agents;
 mod dsh;
 mod permission;
 mod risk;
@@ -113,6 +114,14 @@ struct AppState {
     /// 而默认模型是确定可查的：`dsh --profile headless --dump-config`（0.2s）。
     /// 启动时查一次就够——它由用户的 profile 决定，不会在一次运行里变。
     headless_model: Mutex<Option<(String, String)>>,
+    /// 从磁盘扫出来的"别的 agent 的会话"（WorkBuddy / Claude Code）。
+    ///
+    /// 为什么要有这一层：DSH 有会话概念（投影里有 id、有一堆统计），而
+    /// WorkBuddy 我们以前**只看 hook 事件**——那些会话十几分钟就过期了，
+    /// 于是看板上它只有"正在跑的那条"。它们的转录其实就躺在
+    /// `~/.workbuddy/projects/<项目>/<uuid>.jsonl`，读出来才有"我这周用过哪些会话"。
+    /// 里面带缓存（键是 mtime + size），看板 1s 一问也不会每秒重解析几百 KB。
+    agent_sessions: Mutex<agents::Scanner>,
 }
 
 /// 桌宠替用户说的一句话，以及 dsh 的回答。
@@ -698,61 +707,190 @@ fn dashboard_copy_path(
     only(&window, W_DASH)?;
     // id 来自渲染层，但这里只按 Map 精确取，取不到就 false——
     // 不存在"拼一个 id 骗出别的会话路径"的路径。
+    //
+    // 两种来源（2026-11-10）：状态机里活着的会话（按裸 id 查），和磁盘扫出来的
+    // 那几家（按 `agent/id` 查，全路径只存在宿主侧，见 agents::Scanner）。
+    // 两种都试一遍：一个 id 里带 `/` 就先把前缀剥掉再查状态机——页面不需要知道
+    // 这层区别，它只负责把"这一行是谁"照实传回来。
+    let tail = id.split_once('/').map(|(_, t)| t.to_string());
     let full = {
         let s = st.store.lock().unwrap();
-        s.full_cwd(&id).map(|v| v.to_string())
-    };
+        s.full_cwd(&id)
+            .or_else(|| tail.as_deref().and_then(|t| s.full_cwd(t)))
+            .map(|v| v.to_string())
+    }
+    .or_else(|| st.agent_sessions.lock().unwrap().full_cwd(&id));
     Ok(match full {
         Some(p) => sys::set_clipboard_text(&p),
         None => false,
     })
 }
 
-/// 看板的**内容**来源：投影里那些"这条会话到底在干什么"的字段。
+/// 看板的一条会话——**平台无关**。
+///
+/// 为什么要多这一层而不是直接把 `dsh::RichSession` 发到页面（2026-11-10）：
+/// 看板现在是"平台 → 会话"两级，每条会话得先知道自己属于谁；而 DSH 之外那几家
+/// （WorkBuddy / Claude Code）根本没有 token / 上下文 / 权限档位这一套概念，
+/// 那些字段只能是空的。一个统一的行形状 + 各家一个 `From`，比在页面上维护两套
+/// 渲染逻辑清楚——页面只负责"有的就显示，空的就不显示"。
+#[derive(serde::Serialize)]
+struct SessionRow {
+    /// 平台 id：`dsh` / `workbuddy` / `claude-code`。页面拿它做一级分组。
+    agent: String,
+    id: String,
+    title: Option<String>,
+    cwd: Option<String>,
+    last_prompt: Option<String>,
+    last_reply: Option<String>,
+    updated_ms: i64,
+    turns: u64,
+    // ---- 以下只有 DSH 有 ----
+    provider: Option<String>,
+    model: Option<String>,
+    tokens_in: u64,
+    tokens_out: u64,
+    ctx_tokens: u64,
+    ctx_window: u64,
+    steps: u64,
+    llm_ms: u64,
+    tool_ms: u64,
+    preset: Option<String>,
+    has_stats: bool,
+    agent_preset: Option<String>,
+    reply_from_say: bool,
+    model_default: bool,
+    /// 能不能从桌宠往里发消息。
+    ///
+    /// 这是**事实**不是开关：DSH 有 `headless --session-id` 这个一等公民入口，
+    /// 所以能；WorkBuddy / Claude Code 在本机没有任何 CLI（2026-11-10 查遍了
+    /// `PATH` 和 `~/.workbuddy/binaries`），所以不能。这一位交给页面去说清楚，
+    /// 别等用户点了才发现——那和 S12-3 的"发进黑洞"是同一类体验。
+    can_say: bool,
+}
+
+impl From<dsh::RichSession> for SessionRow {
+    fn from(r: dsh::RichSession) -> Self {
+        SessionRow {
+            agent: "dsh".to_string(),
+            id: r.id,
+            title: r.title,
+            cwd: r.cwd,
+            last_prompt: r.last_prompt,
+            last_reply: r.last_reply,
+            updated_ms: r.last_prompt_at,
+            turns: r.turns,
+            provider: r.provider,
+            model: r.model,
+            tokens_in: r.tokens_in,
+            tokens_out: r.tokens_out,
+            ctx_tokens: r.ctx_tokens,
+            ctx_window: r.ctx_window,
+            steps: r.steps,
+            llm_ms: r.llm_ms,
+            tool_ms: r.tool_ms,
+            preset: r.preset,
+            has_stats: r.has_stats,
+            // 桌面端 / 网页端建的会话，一次性 runner 写不进去（见 say.rs）。
+            can_say: r.agent_preset.is_none(),
+            agent_preset: r.agent_preset,
+            reply_from_say: r.reply_from_say,
+            model_default: r.model_default,
+        }
+    }
+}
+
+impl From<agents::Card> for SessionRow {
+    fn from(c: agents::Card) -> Self {
+        SessionRow {
+            agent: c.agent,
+            id: c.id,
+            title: c.title,
+            // SEC-09：出门只给最后一段目录。全路径留在宿主侧，给「复制路径」用。
+            cwd: state::public_cwd(&c.cwd),
+            last_prompt: c.last_prompt,
+            last_reply: c.last_reply,
+            updated_ms: c.updated_ms,
+            turns: c.turns,
+            provider: None,
+            model: None,
+            tokens_in: 0,
+            tokens_out: 0,
+            ctx_tokens: 0,
+            ctx_window: 0,
+            steps: 0,
+            llm_ms: 0,
+            tool_ms: 0,
+            preset: None,
+            has_stats: false,
+            agent_preset: None,
+            reply_from_say: false,
+            model_default: false,
+            can_say: false,
+        }
+    }
+}
+
+/// 看板的**内容**来源：两个平台各给一半事实。
 ///
 /// 为什么和 `dashboard_snapshot` 分成两个命令，而不是塞进同一个快照：
 ///   · 数据源不同——那个来自状态机（250ms 一拍，知道"猫在演什么"），
-///     这个来自 DSH 探测线程（1s 一拍，知道"会话里发生了什么"）。
+///     这个来自 DSH 探测线程（1s 一拍）+ 磁盘扫描（有缓存）。
 ///   · 生命周期不同——`Snapshot` 还会被 HTTP `/state` 和 emit 复用，
 ///     往里加字段等于让所有消费方一起变；这个只服务看板。
-/// 前端按 session id join 起来，两边各给一半事实。
+///
+/// 2026-11-10 起它不再只服务 DSH：WorkBuddy / Claude Code 的会话也在里面，
+/// 靠 `agent` 字段区分。页面按 id 把状态机那一路 join 上来。
 #[tauri::command]
-fn dsh_sessions(
+fn agent_sessions(
     window: WebviewWindow,
     st: tauri::State<'_, AppState>,
-) -> Result<Vec<dsh::RichSession>, String> {
+) -> Result<Vec<SessionRow>, String> {
     only(&window, W_DASH)?;
-    let v = st.dsh.lock().unwrap();
-    let notes = st.say_reply.lock().unwrap();
-    let default_model = st.headless_model.lock().unwrap().clone();
-    Ok(v.sessions
-        .iter()
-        .map(|o| {
-            let mut r = o.rich();
-            // 投影里没有这一轮问答（headless 建的会话就是这样）时，用我们自己
-            // 手上那一段补上——否则用户从桌宠发完消息，看板上永远只有标题。
-            if let Some(note) = notes.get(&r.id) {
-                if r.last_reply.is_none() {
-                    r.last_reply = Some(note.reply.clone());
-                    r.reply_from_say = true;
+    let mut rows: Vec<SessionRow> = {
+        let v = st.dsh.lock().unwrap();
+        let notes = st.say_reply.lock().unwrap();
+        let default_model = st.headless_model.lock().unwrap().clone();
+        v.sessions
+            .iter()
+            .map(|o| {
+                let mut r = o.rich();
+                // 投影里没有这一轮问答（headless 建的会话就是这样）时，用我们自己
+                // 手上那一段补上——否则用户从桌宠发完消息，看板上永远只有标题。
+                if let Some(note) = notes.get(&r.id) {
+                    if r.last_reply.is_none() {
+                        r.last_reply = Some(note.reply.clone());
+                        r.reply_from_say = true;
+                    }
+                    if r.last_prompt.is_none() {
+                        r.last_prompt = Some(note.prompt.clone());
+                    }
                 }
-                if r.last_prompt.is_none() {
-                    r.last_prompt = Some(note.prompt.clone());
+                // 同理：headless 会话不写 modelSelection，用 profile 的默认模型补。
+                // 必须带 `model_default` 标记出门——"它就是这么配的"和"这条会话
+                // 实际用的是它"是两句话，看板上要把这个差别说出来。
+                if r.model.is_none() {
+                    if let Some((p, m)) = default_model.as_ref() {
+                        r.provider = Some(p.clone());
+                        r.model = Some(m.clone());
+                        r.model_default = true;
+                    }
                 }
-            }
-            // 同理：headless 会话不写 modelSelection，用 profile 的默认模型补。
-            // 必须带 `model_default` 标记出门——"它就是这么配的"和"这条会话
-            // 实际用的是它"是两句话，看板上要把这个差别说出来。
-            if r.model.is_none() {
-                if let Some((p, m)) = default_model.as_ref() {
-                    r.provider = Some(p.clone());
-                    r.model = Some(m.clone());
-                    r.model_default = true;
-                }
-            }
-            r
-        })
-        .collect())
+                SessionRow::from(r)
+            })
+            .collect()
+    };
+
+    // 磁盘那一路：WorkBuddy / Claude Code。扫盘有缓存，1s 一问不会变成 IO 风暴。
+    let scanned = {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        st.agent_sessions.lock().unwrap().poll(now)
+    };
+    rows.extend(scanned.into_iter().map(SessionRow::from));
+
+    Ok(rows)
 }
 
 // ------------------------------------------------------------
@@ -1551,6 +1689,7 @@ fn main() {
                 compose_target: Mutex::new(None),
                 new_session_cwd: Mutex::new(None),
                 headless_model: Mutex::new(None),
+                agent_sessions: Mutex::new(agents::Scanner::new()),
             });
 
             // ---- headless 的默认模型 ----
@@ -1631,7 +1770,7 @@ fn main() {
             dashboard_toggle,
             dashboard_snapshot,
             dashboard_copy_path,
-            dsh_sessions,
+            agent_sessions,
             compose_open,
             compose_context,
             compose_close,

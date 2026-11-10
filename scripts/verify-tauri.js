@@ -392,7 +392,7 @@ async function main() {
     ok(
       "window.dashboard 8 个动作齐全",
       (await R.eval(
-        "['getSnapshot','copyPath','listThemes','setTheme','onTheme','dshSessions','saySend','onSayDone'].every(k=>typeof (window.dashboard||{})[k]==='function')"
+        "['getSnapshot','copyPath','listThemes','setTheme','onTheme','agentSessions','saySend','onSayDone'].every(k=>typeof (window.dashboard||{})[k]==='function')"
       )) === true
     );
     // 和 preload 同一条原则：只暴露具体动作，绝不把 ipc 本身漏出去。
@@ -1081,15 +1081,15 @@ async function main() {
       // ---- 9.1 看板的内容：从"谁在发呆"变成"这条会话在干什么" ----
       // 用户 2026-11-05 的原话是「现在的看板没有任何有效信息」。
       // 这两条断言钉的就是"有效"这两个字：
-      //   dshSessions 得真的把投影里那些字段带出来；
+      //   agentSessions 得真的把投影里那些字段带出来（它现在同时服务多个平台）；
       //   卡片 DOM 里得真的把它们写出来（不是"函数被调用了"）。
       //
       // 夹具在 7.5 那节末尾被删掉了（当时要还原成干净状态），这里补回来——
       // 否则这节测的是"没有会话时的看板"，那恰好是最没有信息量的一屏。
       writeDshFixture("idle", Date.now());
       await sleep(1800);
-      const rich = JSON.parse((await D.eval("window.dashboard.dshSessions().then(r=>JSON.stringify(r))")) || "null");
-      ok("看板拿到了会话内容（dsh_sessions）", Array.isArray(rich), Array.isArray(rich) ? `${rich.length} 条` : "null");
+      const rich = JSON.parse((await D.eval("window.dashboard.agentSessions().then(r=>JSON.stringify(r))")) || "null");
+      ok("看板拿到了会话内容（agent_sessions）", Array.isArray(rich), Array.isArray(rich) ? `${rich.length} 条` : "null");
       const one = (Array.isArray(rich) ? rich : []).find((r) => r.id === DSH_FIXTURE_ID);
       ok(
         "内容里有最后一轮问答 / 模型 / token / 上下文",
@@ -1101,7 +1101,7 @@ async function main() {
           one.ctx_window === 200000,
         one ? JSON.stringify({ p: one.last_prompt, m: one.model, out: one.tokens_out }) : "没有夹具那条"
       );
-      const cardText = String(await D.eval("document.getElementById('list').textContent"));
+      const cardText = String(await D.eval("document.getElementById('groups').textContent"));
       ok(
         "卡片上真的写出了对话与用量",
         /验证看板的最后一轮/.test(cardText) && /这一行来自夹具/.test(cardText) && /fixture-model/.test(cardText),
@@ -1113,13 +1113,51 @@ async function main() {
       // 演示模式：光投屏的时候，对话内容比标题更不能露
       await D.eval("document.getElementById('demo').click(), 1");
       await sleep(300);
-      const demoText = String(await D.eval("document.getElementById('list').textContent"));
+      const demoText = String(await D.eval("document.getElementById('groups').textContent"));
       ok(
         "演示模式把对话内容也藏起来（不只是标题）",
         !/验证看板的最后一轮/.test(demoText) && !/这一行来自夹具/.test(demoText),
         JSON.stringify(demoText.slice(0, 60))
       );
       await D.eval("document.getElementById('demo').click(), 1");
+
+      // ---- 9.2 「平台 → 会话」两级（2026-11-10 用户报「会话太乱了」）----
+      //
+      // 三件事必须为真，否则这一版改的是布局、没改到问题：
+      //   ① 一级真的存在，而且认得出是哪一家；
+      //   ② fixture 那条会话确实落在 dsh 组里（不是随便挂在某个组下面）；
+      //   ③ 一个**不能说话**的平台会被标出来，而且按钮真的禁用。
+      //
+      // ③ 不依赖本机装了什么：闸门不能靠"这台机器恰好有 WorkBuddy"成立，
+      // 所以拿 `dashboardDebug.render()` 直接喂一条假会话，一次性在同一段
+      // JS 里读结果（中间隔一拍就会被 1s 轮询用真实数据覆盖掉）。
+      const groupsNow = JSON.parse(
+        (await D.eval(
+          "JSON.stringify([...document.querySelectorAll('#groups .group')].map(g=>({agent:g.dataset.agent,cards:g.querySelectorAll('li').length,name:(g.querySelector('.gname')||{}).textContent})))"
+        )) || "[]"
+      );
+      const dshGroup = groupsNow.find((g) => g.agent === "dsh");
+      ok("一级分组存在，dsh 组认得出名字", !!dshGroup && dshGroup.name === "DeepSeek Harness", JSON.stringify(groupsNow));
+      ok("夹具那条会话落在 dsh 组里", !!dshGroup && dshGroup.cards >= 1, dshGroup ? `${dshGroup.cards} 条` : "没有 dsh 组");
+
+      const wb = JSON.parse(
+        (await D.eval(
+          `(()=>{window.dashboardDebug.render({visual:'idle',sessions:[]},[{agent:'workbuddy',id:'wb-gate-1',title:'另一家的会话',cwd:'proj',last_prompt:'你说的话',last_reply:'它答的话',updated_ms:Date.now()-60000,turns:3,can_say:false}]);
+            const g=document.querySelector('#groups .group.a-workbuddy');
+            if(!g) return 'null';
+            const li=g.querySelector('li');
+            return JSON.stringify({name:g.querySelector('.gname').textContent, note:g.querySelector('.gnote').textContent, cards:g.querySelectorAll('li:not(.more)').length, disabled:li?li.querySelector('button').disabled:null, text:li?li.textContent:''});})()`
+        )) || "null"
+      );
+      ok("另一个平台会单独成组（不混在 dsh 里）", !!wb && wb.name === "WorkBuddy" && wb.cards === 1, JSON.stringify(wb));
+      ok("组头写明这一家「只能看」（平台级的事实）", !!wb && wb.note === "只能看", wb ? wb.note : "null");
+      ok("不能说话的会话，「说一句」是禁用的", !!wb && wb.disabled === true, wb ? String(wb.disabled) : "null");
+      ok(
+        "别的平台的会话也写出了最后一轮（不是只显示一个 id）",
+        !!wb && /你说的话/.test(wb.text || "") && /它答的话/.test(wb.text || ""),
+        JSON.stringify((wb && wb.text || "").slice(0, 60))
+      );
+
       // 收摊：夹具用完就撤，后面的章节不该多出一条会话
       fs.rmSync(DSH_FIXTURE, { recursive: true, force: true });
       await sleep(600);
