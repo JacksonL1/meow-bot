@@ -4,6 +4,60 @@
 
 ---
 
+## 2026-11-10 · 判据松的代价，不是"找不到"，是"找错了"
+
+**场景**：用户报「返回找不到 dsh（PATH 里没有 `@//deepseek-ai/dsh`）」。
+
+报错文案本身是`找不到 dsh（PATH 里没有 @deepseek-ai/dsh）`，用户转述时多打了个斜杠，
+不是拼接 bug。真正的毛病在**定位范围**：`locate()` 只会扫 `PATH` 上每个目录的
+`node_modules/@deepseek-ai/dsh/lib/bin.js`，而本机那份 npm 安装**已经跟着 `C:\nvm4w`
+一起没了**——`ls -la /c/nvm4w` 只剩 `.` 和 `..`，`which dsh` 空。
+
+dsh 并没有消失，它活在桌面版里：`AppData\Local\Programs\DeepSeek Harness`。
+桌面版的 `resources/runtime/cli/bin/dsh.cmd` 指向
+`app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js`，用
+`DeepSeek Harness.exe` + `ELECTRON_RUN_AS_NODE=1` + `--expose-internals` 跑。
+拿 `--help` 逐条核过：`--profile headless`、`--json`、`--session-id`、`-` 全在，
+`--dump-config` 也能吐出 `cmg · DeepSeek-V4.1-Flash-1017`。**同一个产品，同一套参数**，
+只是入口长得不一样。
+
+于是给 `locate()` 加了第二条来源。**然后踩到了这一轮真正值得记的坑：**
+
+第一版判据是"目录里有 `resources/app.asar` 就算桌面版"。写个临时探针跑一下，它选中的是：
+
+```text
+node: "C:\Users\Think\AppData\Local\Programs\Cherry Studio\Cherry Studio.exe"
+```
+
+`%LOCALAPPDATA%\Programs` 下有一堆 Electron 应用，我只用了一条对**所有 Electron 应用**
+都成立的判据，于是"找 dsh"变成了"找一个 Electron 应用"。后果不是找不到——是
+**拿 Cherry Studio 的 exe 去跑 dsh 的脚本**，而它还被设了 `ELECTRON_RUN_AS_NODE=1`，
+真会以 node 身份执行我们拼的那串参数。这种失败有一整套"看起来在工作"的表现，
+比"找不到 dsh"难查一个数量级。
+
+**原因**：判据写的是"像不像一类东西"（Electron 应用），而要问的是"是不是**这一个**东西"。
+前者能覆盖全部候选，也能覆盖全部干扰项。
+
+**解法**：两条同时成立才认——`resources/app.asar` 在，**且** exe 名或目录名含 `deepseek`。
+名字被彻底改掉的情况用 `CLAWD_DSH_ROOT` 显式指定，**不让"猜"成为默认路径**。
+把这次误判钉成回归测试 `does_not_mistake_another_electron_app_for_dsh`。
+
+**教训**：
+
+- **判据的失败有两种，我一直只防了前一种**。「找不到」是显式失败，看得见、能报错；
+  「找错了」是静默的，而且它会**继续往下走**——起进程、拼参数、执行。自动发现本机某个
+  程序时，判据必须能**排除同类应用**，不是"能被它认出来的都是它"。
+- **临时探针的价值就在这里**。单元测试全绿（`desktop_install_yields_a_launcher` 用一个
+  干净的假目录，当然绿），因为假目录里没有 Cherry Studio。**只有拿真实环境跑一次**，
+  才会遇到"干扰项"这个东西。凡是"扫某个系统目录"的代码，验收必须含一次真机扫描。
+- **报错要说"我在哪儿找过"**。`找不到 dsh` 等于让用户去猜；把候选目录打进 stderr，
+  下次遇到会自己说话。
+- 一条附带的产品判断：桌面版的入口是 **asar 内部路径**，磁盘上查不到（只能由 Electron
+  解析），所以这段代码永远没法"先验证再使用"。那就接受它、并且**把它的失败翻译清楚**——
+  `Cannot find module` → 「桌面版里的 dsh 入口和预期不一样（可能刚升级过）」。
+
+---
+
 ## 2026-11-10 · 功能通了，不等于用户看见了
 
 **场景**：用户说「通过桌宠发送了一条消息，但任何地方都看不到返回内容」。

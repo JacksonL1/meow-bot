@@ -967,8 +967,10 @@ fn say_send(
         return Err(format!("目录不在了：{cwd}"));
     }
 
+    // 两句话分开写：这不是"你哪里配错了"，而是"这台机器上没有可用的 dsh"。
+    // 提示要给出两条真正能走的路——npm 装一份，或者装桌面版（`say.rs` 会自己找到它）。
     let Some(l) = say::locate() else {
-        return Err("找不到 dsh（PATH 里没有 @deepseek-ai/dsh）".to_string());
+        return Err("找不到 dsh：PATH 上没有 npm 那份，也没找到桌面版".to_string());
     };
 
     // 同一目标只允许一条在飞：
@@ -985,6 +987,15 @@ fn say_send(
         jobs.insert(key.clone(), c.clone());
         c
     };
+
+    // 一条诊断：用户说"发了没反应"时，先看这一行有没有出现。
+    // 为什么带上 `l.from`：桌面版的"node"其实是 Electron 本体（见 say.rs 的
+    // DESKTOP_BIN），出问题的姿势和 npm 版完全不同，先知道是哪一份省一半时间。
+    eprintln!(
+        "[say] 出发 id={:?} 用 {} 那份 dsh cwd={cwd}",
+        id.as_deref(),
+        l.from
+    );
 
     let (child, captured) = match say::start(&l, id.as_deref(), &cwd, &text) {
         Ok(c) => c,

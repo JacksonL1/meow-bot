@@ -57,10 +57,20 @@ const POLL: Duration = Duration::from_millis(200);
 /// CreateProcess 不执行批处理，Rust 的 Command 也不会替你套一层 `cmd /C`
 /// （套了反而又要重新处理一遍引号）。直接调 node 跑 bin.js 是同一件事，
 /// 但没有任何 shell 参与。
+///
+/// `pre` / `env` 这两项是为桌面版（见 `desktop_at`）加的：那边"node"其实是
+/// Electron 本体，得靠环境变量告诉它"别开 GUI，你现在是 node"。
+/// npm 那份两项都为空，命令行和以前一个字都不差。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Launcher {
     pub node: PathBuf,
     pub bin: PathBuf,
+    /// node 之后、脚本之前的参数。
+    pub pre: &'static [&'static str],
+    /// 要额外设的环境变量。
+    pub env: &'static [(&'static str, &'static str)],
+    /// 这份 dsh 是从哪种安装找来的（"npm" / "desktop"），只用于诊断输出。
+    pub from: &'static str,
 }
 
 fn bin_under(dir: &Path) -> PathBuf {
@@ -71,8 +81,41 @@ fn bin_under(dir: &Path) -> PathBuf {
         .join("bin.js")
 }
 
-/// 从 PATH 里找。找不到就返回 None——**没装 DSH 不是错误**，只是这个功能不可用。
+/// 桌面版（Electron 安装包）里那个 CLI 入口，相对安装根目录。
+///
+/// 和 `dsh.cmd` 指的是同一个东西：
+/// `"%~dp0..\..\..\app.asar\dsh\node_modules\@deepseek-ai\dsh-desktop-host\lib\cli.js"`
+/// 它支持我们用的全部参数（`--profile headless`、`--json`、`--session-id`、`-`），
+/// 2026-11-10 逐条对着 `--help` 核过。
+///
+/// 这是**内部路径**，上游改布局就会变。所以这条路径是"按当前版本的形状拼出来的猜"：
+/// 拼错了 Electron 会在 stderr 上说 `Cannot find module`，由 `explain()` 翻译成人话。
+const DESKTOP_BIN: &str =
+    "resources/app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js";
+
+/// 找 dsh。两条路，按"谁更可能是用户真在用的"排序：
+///
+///   1. `PATH` 上的 npm 全局安装（`node_modules/@deepseek-ai/dsh/lib/bin.js`）；
+///   2. 桌面版 `DeepSeek Harness` 自带的那个。
+///
+/// 为什么要第二条（2026-11-10 用户报「找不到 dsh」）：npm 那份是装在 node 的
+/// 全局目录里的，而 node 一换版本 / nvm 一清理，它就连着目录一起没了——
+/// 本机 `C:\nvm4w` 就是这么空掉的。桌面版则一直躺在一个稳定位置。
+/// 两条都不在就返回 None——**没装 DSH 不是错误**，只是这个功能不可用。
 pub fn locate() -> Option<Launcher> {
+    let found = npm_installed().or_else(desktop);
+    if found.is_none() {
+        // 报错只说"没找到"没有用；说清"我在哪儿找过"才让人能自己判断。
+        eprintln!(
+            "[say] 没找到 dsh：PATH 里没有 npm 那份，桌面版候选目录里也没有（{:?}）",
+            desktop_roots()
+        );
+    }
+    found
+}
+
+/// `PATH` 上 npm 全局装的那份。
+fn npm_installed() -> Option<Launcher> {
     let path = std::env::var_os("PATH")?;
     locate_in(std::env::split_paths(&path))
 }
@@ -92,9 +135,130 @@ pub fn locate_in<I: IntoIterator<Item = PathBuf>>(dirs: I) -> Option<Launcher> {
         } else {
             PathBuf::from("node")
         };
-        return Some(Launcher { node, bin });
+        return Some(Launcher {
+            node,
+            bin,
+            pre: &[],
+            env: &[],
+            from: "npm",
+        });
     }
     None
+}
+
+/// 一个安装根目录是不是桌面版；是就拼出启动器。
+///
+/// 判据两条，缺一不可：
+///   1. `resources/app.asar` 在（证明这是个打包好的 Electron 应用）；
+///   2. 那个 exe 或它所在目录的名字里有 `deepseek`（证明它是**这个**应用）。
+///
+/// 第 2 条不是洁癖，是实测踩出来的：本机 `%LOCALAPPDATA%\Programs` 下还有
+/// Cherry Studio 等好几个 Electron 应用，只按第 1 条判会直接把 Cherry Studio
+/// 的 exe 当成 node 去跑 dsh 的脚本（2026-11-10 用临时探针抓到的）。
+///
+/// 名字被彻底改掉的情况用 `CLAWD_DSH_ROOT` 兜，不靠猜。
+///
+/// 注意 `DESKTOP_BIN` 落在 asar 里面，磁盘上查不到这个文件（asar 是个归档，
+/// 由 Electron 自己解析），所以这里只能校验"根目录像不像"，不能校验"入口在不在"。
+pub fn desktop_at(root: &Path) -> Option<Launcher> {
+    if !root.join("resources").join("app.asar").is_file() {
+        return None;
+    }
+    let node = electron_exe(root)?;
+    let dir = root.file_name()?.to_string_lossy().to_lowercase();
+    let exe = node.file_stem()?.to_string_lossy().to_lowercase();
+    if !dir.contains("deepseek") && !exe.contains("deepseek") {
+        return None;
+    }
+    Some(Launcher {
+        node,
+        bin: root.join(DESKTOP_BIN),
+        // 照抄它自己的 `resources/runtime/bin/node.cmd`：
+        // `set ELECTRON_RUN_AS_NODE=1` + `--expose-internals`。
+        // 少了前者，Electron 会把整个 GUI 启起来——桌宠"发消息"变成"又开一个 DSH"。
+        pre: &["--expose-internals"],
+        env: &[("ELECTRON_RUN_AS_NODE", "1")],
+        from: "desktop",
+    })
+}
+
+/// 从安装根目录里挑出那个 Electron 可执行文件。
+///
+/// 规则：`.exe` 里排除卸载器；剩多个时优先取名字与目录同名的那个——
+/// electron-builder 的命名就是 `<productName>.exe` 放在 `<productName>\` 里。
+fn electron_exe(root: &Path) -> Option<PathBuf> {
+    let want = root.file_name()?.to_string_lossy().to_string();
+    let mut fallback = None;
+    let entries = std::fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+        if !p.extension().is_some_and(|x| x.eq_ignore_ascii_case("exe")) {
+            continue;
+        }
+        let Some(stem) = p.file_stem().map(|s| s.to_string_lossy().to_string()) else {
+            continue;
+        };
+        if stem.to_ascii_lowercase().starts_with("uninstall") {
+            continue;
+        }
+        if stem == want {
+            return Some(p);
+        }
+        if fallback.is_none() {
+            fallback = Some(p);
+        }
+    }
+    fallback
+}
+
+/// 桌面版可能装在哪些目录。
+///
+/// 三个来源，都是"列一层子目录"这种便宜操作（每个子目录两次 stat）：
+///   · `%LOCALAPPDATA%\Programs` —— electron-builder 的 per-user 默认位置
+///   · `%PROGRAMFILES%` / `%PROGRAMFILES(X86)%` —— per-machine 安装
+///
+/// 不查注册表：`InstallLocation` 确实更权威（装到自定义路径也能拿到），但枚举
+/// Uninstall 下那几十个 GUID 子键要一大段 unsafe，而它换来的只是"装到 D 盘也能找到"。
+/// 那种情况用 `CLAWD_DSH_ROOT` 直接指一下就行（见 `desktop`）。
+fn desktop_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for var in ["LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)"] {
+        let Some(base) = std::env::var_os(var).map(PathBuf::from) else {
+            continue;
+        };
+        let dir = if var == "LOCALAPPDATA" {
+            base.join("Programs")
+        } else {
+            base
+        };
+        let Ok(list) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in list.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                roots.push(p);
+            }
+        }
+    }
+    roots
+}
+
+/// 手动指定优先：`CLAWD_DSH_ROOT` 既可以指向 npm 布局的那个
+/// "装着 node_modules 的目录"，也可以指向桌面版的安装根目录——两种都试，
+/// 用户不用记自己装的是哪一种。
+fn override_root() -> Option<Launcher> {
+    let p = PathBuf::from(std::env::var_os("CLAWD_DSH_ROOT")?);
+    locate_in([p.clone()]).or_else(|| desktop_at(&p))
+}
+
+/// 在候选目录里找桌面版。
+fn desktop() -> Option<Launcher> {
+    override_root()
+        .or_else(|| desktop_roots().into_iter().find_map(|p| desktop_at(&p)))
 }
 
 // ------------------------------------------------------------
@@ -148,13 +312,26 @@ fn yaml_field(line: &str, key: &str) -> Option<String> {
     }
 }
 
+/// 起一条 "node 在跑脚本" 的命令：可执行文件 + 前置参数 + 环境变量 + bin.js。
+///
+/// 两处调用（`--dump-config` 和真发消息）**必须**走这一条：桌面版的
+/// `ELECTRON_RUN_AS_NODE` 只在一处生效的话，另一处就会去启 GUI。
+fn base(l: &Launcher) -> Command {
+    let mut c = Command::new(&l.node);
+    c.args(l.pre);
+    for (k, v) in l.env {
+        c.env(k, v);
+    }
+    c.arg(&l.bin);
+    c
+}
+
 /// 真跑一次 `--dump-config` 拿默认模型。找不到 node / 跑挂了都只是 None。
 ///
 /// 用 `.output()` 而不是自己接管道：它内部会把三条流都读干，而这里是
 /// "活着 -> 打印几十 KB YAML -> 退出"的一次性调用，不存在需要边跑边处理的场景。
 pub fn default_model(l: &Launcher) -> Option<(String, String)> {
-    let out = Command::new(&l.node)
-        .arg(&l.bin)
+    let out = base(l)
         .arg("--profile")
         .arg("headless")
         .arg("--dump-config")
@@ -181,9 +358,8 @@ pub fn default_model(l: &Launcher) -> Option<(String, String)> {
 /// `--json` 不是可选的（见文件头）：没有它，我们既不知道新会话的 id，
 /// 也拿不到答案；而这两样恰好是"发了之后有反馈"的全部内容。
 pub fn command(l: &Launcher, id: Option<&str>, cwd: &str, text: &str) -> Command {
-    let mut c = Command::new(&l.node);
-    c.arg(&l.bin)
-        .arg("--profile")
+    let mut c = base(l);
+    c.arg("--profile")
         .arg("headless")
         .arg("--json");
     if let Some(id) = id {
@@ -425,6 +601,11 @@ pub fn explain(raw: &str) -> String {
     if body.contains("MISSING_CREDENTIAL") {
         return "找不到 API key：`dsh` 的凭据没配好（见 README 的『供应商』一节）".to_string();
     }
+    // 桌面版那条路是按"当前版本的内部布局"拼出来的（见 DESKTOP_BIN）。
+    // 上游改了布局就是这句 —— 它对用户毫无意义，得翻译。
+    if body.contains("Cannot find module") || body.contains("ERR_MODULE_NOT_FOUND") {
+        return "桌面版里的 dsh 入口和预期不一样（DeepSeek Harness 可能刚升级过）".to_string();
+    }
     if body.is_empty() {
         return "dsh 没有说原因就退出了（退出码非 0）".to_string();
     }
@@ -448,6 +629,20 @@ mod tests {
         Launcher {
             node: PathBuf::from("C:\\node\\node.exe"),
             bin: PathBuf::from("C:\\node\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js"),
+            pre: &[],
+            env: &[],
+            from: "npm",
+        }
+    }
+
+    /// 桌面版那一份：node 换成 Electron 本体，参数和环境变量都要跟着来。
+    fn desktop_launcher() -> Launcher {
+        Launcher {
+            node: PathBuf::from("C:\\app\\DeepSeek Harness.exe"),
+            bin: PathBuf::from("C:\\app\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-desktop-host\\lib\\cli.js"),
+            pre: &["--expose-internals"],
+            env: &[("ELECTRON_RUN_AS_NODE", "1")],
+            from: "desktop",
         }
     }
 
@@ -541,6 +736,102 @@ mod tests {
         assert!(locate_in(vec![PathBuf::from("C:\\definitely\\not\\here")]).is_none());
     }
 
+    // ---- 桌面版（2026-11-10 用户报「找不到 dsh」）----
+    //
+    // 背景：npm 那份装在 node 的全局目录里，nvm 一清理就连目录一起没了
+    // （本机 `C:\nvm4w` 就是这么空掉的），而桌面版一直在。
+
+    /// 造一个"像 Electron 安装包"的根目录：`<app>` 目录 + 同名 exe + `resources\app.asar`。
+    ///
+    /// `tag` 必须每个测试各不相同：这些测试是并行跑的，共用一个目录时
+    /// 一边 `remove_dir_all`、另一边还在写，会随机报"拒绝访问"。
+    fn fake_electron(app: &str, tag: &str) -> PathBuf {
+        let root = std::env::temp_dir()
+            .join(format!("clawd-say-{}-{tag}", std::process::id()))
+            .join(app);
+        std::fs::create_dir_all(root.join("resources")).unwrap();
+        std::fs::write(root.join("resources").join("app.asar"), "asar").unwrap();
+        std::fs::write(root.join(format!("{app}.exe")), "").unwrap();
+        root
+    }
+
+    #[test]
+    fn desktop_install_yields_a_launcher() {
+        let root = fake_electron("DeepSeek Harness", "install");
+        std::fs::write(root.join("Uninstall DeepSeek Harness.exe"), "").unwrap();
+
+        let l = desktop_at(&root).expect("应该认出这是桌面版");
+        assert_eq!(l.node, root.join("DeepSeek Harness.exe"), "卸载器不能当 node 用");
+        assert_eq!(l.bin, root.join(DESKTOP_BIN));
+        assert_eq!(l.from, "desktop");
+        // 这两样是桌面版能当 node 用的**全部**条件，少一样就会去启 GUI。
+        assert_eq!(l.pre, ["--expose-internals"]);
+        assert_eq!(l.env, [("ELECTRON_RUN_AS_NODE", "1")]);
+
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+
+    // 本机实测过的真事：`%LOCALAPPDATA%\Programs` 下有一堆 Electron 应用，
+    // 第一版判据只认 `resources/app.asar`，于是把 Cherry Studio 的 exe 选中了。
+    #[test]
+    fn does_not_mistake_another_electron_app_for_dsh() {
+        let root = fake_electron("Cherry Studio", "cherry");
+        assert!(desktop_at(&root).is_none(), "别的 Electron 应用不是 dsh");
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_bare_exe_without_app_asar_is_not_a_desktop_install() {
+        let root = std::env::temp_dir().join(format!("clawd-say-{}-bare", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("DeepSeek Bare.exe"), "").unwrap();
+        assert!(desktop_at(&root).is_none(), "没有 resources/app.asar 就不是它");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // 安装目录可以自定义，所以 exe 名不一定等于目录名。优先同名（electron-builder
+    // 的命名），退而求其次取第一个非卸载器的 exe——但绝不能把 Uninstall 挑走。
+    #[test]
+    fn the_exe_named_like_the_directory_wins() {
+        let root = fake_electron("DeepSeek Harness", "exe-wins");
+        std::fs::write(root.join("Other.exe"), "").unwrap();
+        let l = desktop_at(&root).unwrap();
+        assert_eq!(l.node, root.join("DeepSeek Harness.exe"));
+
+        std::fs::remove_file(root.join("DeepSeek Harness.exe")).unwrap();
+        let l2 = desktop_at(&root).expect("名字对不上目录也不要紧，还有 exe 名兜着");
+        assert_eq!(l2.node, root.join("Other.exe"));
+
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+
+    // 桌面版的 `pre`/`env` 必须真的进了命令行才叫修好了。只断言 struct 里存了
+    // 一遍是不够的——`base()` 忘了转手一次，"找不到 GUI 又冒出来一个"就回来了。
+    #[test]
+    fn desktop_command_actually_runs_electron_as_node() {
+        let c = command(&desktop_launcher(), Some("s1"), "E:\\work", "你好");
+        let a = argv(&c);
+        assert_eq!(a[0], "--expose-internals", "前置参数必须在脚本之前");
+        assert_eq!(a[1], "C:\\app\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-desktop-host\\lib\\cli.js");
+        assert_eq!(a[a.len() - 1], "-");
+        let envs: Vec<_> = c
+            .get_envs()
+            .map(|(k, v)| (k.to_string_lossy().to_string(), v.map(|v| v.to_string_lossy().to_string())))
+            .collect();
+        assert_eq!(
+            envs,
+            vec![("ELECTRON_RUN_AS_NODE".to_string(), Some("1".to_string()))]
+        );
+    }
+
+    // npm 那份不能因为加了桌面版支持就被带上多余的东西。
+    #[test]
+    fn npm_command_is_unchanged() {
+        let c = command(&launcher(), None, "E:\\work", "x");
+        assert_eq!(argv(&c)[0], "C:\\node\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js");
+        assert_eq!(c.get_envs().count(), 0, "npm 版不该设任何环境变量");
+    }
+
     // 形状照抄真实输出（2026-11-05 从 headless profile 抓的）：
     // 目标块之后紧跟着 `dsh-base` 的一串包，里面也有 `model:`——不能串味。
     const DUMP: &str = "\
@@ -606,6 +897,16 @@ mod tests {
     fn explain_handles_empty_stderr() {
         assert!(explain("").contains("没有说原因"));
         assert!(explain("   \n\n").contains("没有说原因"));
+    }
+
+    // 桌面版那条路拼的是"当前版本的内部布局"。上游换了布局就只有这一句英文，
+    // 而它会被显示在 380px 的小窗里——必须翻成人话，否则用户只能看到一个堆栈。
+    #[test]
+    fn explain_translates_a_missing_module_from_the_desktop_build() {
+        let raw = "node:internal/modules/cjs/loader:1143\nError: Cannot find module 'electron/main'\n";
+        let msg = explain(raw);
+        assert!(msg.contains("桌面版"), "{msg}");
+        assert!(!msg.contains("Cannot find"), "别把原始报错贴给用户：{msg}");
     }
 
     // `--json` 的第一行就是会话 id。整个"发了之后有反馈"的能力都挂在这一行上：

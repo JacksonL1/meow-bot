@@ -292,6 +292,14 @@ Import-Certificate -FilePath .\clawd-starter-selfsign.cer `
 - 想让桌宠能**发**消息，headless profile 里要打开 `credentials` 插件
   （headless bundle 默认 `disabled: true`，否则 `dsh headless` 读不到 `~/.dsh/.credentials.yaml`）。
   这是**你的 DSH 配置**，不随本项目走；仓库里不碰任何 key。
+- **发消息需要本机有一个能跑的 dsh**，两种装法都认：
+  - `npm i -g @deepseek-ai/dsh`（桌宠扫 `PATH` 上的 `node_modules/@deepseek-ai/dsh/lib/bin.js`）；
+  - **桌面版 DeepSeek Harness**（桌宠扫 `%LOCALAPPDATA%\Programs` / `%PROGRAMFILES%` 下
+    名字含 `deepseek` 且带 `resources/app.asar` 的目录，用 `DeepSeek Harness.exe` 以
+    node 模式跑它自带的 `dsh-desktop-host/lib/cli.js`）。
+  - 装在别处（比如 D 盘）就设环境变量 `CLAWD_DSH_ROOT` 指向那个目录，两种布局都认。
+  - 两个都没有时，输入窗会直接说「找不到 dsh」，**不会静默失败**；启动日志里还有一行
+    `[say] 没找到 dsh：…（找过的目录）`。
 
 排查用 `window.clawd.dshState()`（见下面「调试入口」）。
 
@@ -568,8 +576,9 @@ WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333 npm start
 | 现象 | 先看哪儿 |
 |---|---|
 | 点了「说一句」没窗 | 宿主日志里有没有 `[compose]`；`compose_target` 是不是被判成"这条会话已经不在了" |
-| 窗开了、发出去没回音 | 宿主 stderr 里有没有 `[say] 收工 ok=…` 那一行——**它同时回答"进程结束了没有 / 拿到 id 没有 / 抓到答案没有"** |
-| `[say] 收工 ok=false` | 原因已被 `say.rs::explain` 翻成人话：桌面端会话 / 目录不对 / 另一个 dsh 正开着它 / 找不到 API key |
+| 输入窗说「找不到 dsh」 | 宿主 stderr 的 `[say] 没找到 dsh：…` 那行会列出**找过的目录**。装一个 dsh（npm 或桌面版都行），装在别处就设 `CLAWD_DSH_ROOT` |
+| 窗开了、发出去没回音 | 宿主 stderr 里有没有 `[say] 出发 … 用 {npm\|desktop} 那份 dsh` 和 `[say] 收工 ok=…` 两行——后者**同时回答"进程结束了没有 / 拿到 id 没有 / 抓到答案没有"** |
+| `[say] 收工 ok=false` | 原因已被 `say.rs::explain` 翻成人话：桌面端会话 / 目录不对 / 另一个 dsh 正开着它 / 找不到 API key / 桌面版里的 dsh 入口和预期不一样 |
 
 `window.clawd.dshState()` 是排查「接了 DSH 但猫不动」的第一站，四个数一次说清死在哪一步：
 

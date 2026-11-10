@@ -87,7 +87,7 @@ S8 的「跟桌宠说话」**2026-10-30 整套删掉了**（理由见下方被�
 
 ## 进行中
 
-- 无。S12 的三件事（供应商 / 看板 / 说）都已真机验过，闸门 134 + 68 全绿。
+- 无。S12 的四件事（供应商 / 看板 / 说 / 找 dsh）都已真机验过，闸门 134 + 75 全绿。
   下一步取决于用户：是把「说」的接力棒交给**多轮对话 UI**（现在一次一窗，发完就关），
   还是先把「桌面端会话续不了」这件事在界面上讲得更醒目。
 - **待用户决策**：桌宠默认端口 23333 与用户 Claude Code 的 `ANTHROPIC_BASE_URL` 冲突
@@ -118,6 +118,43 @@ S8 的「跟桌宠说话」**2026-10-30 整套删掉了**（理由见下方被�
 - [x] ~~状态时长（25s 发呆 / 60s 入睡）仍写死在 `state.js`~~ → **已进 `theme.json.timings`**（2026-10-28）。注意原来写的「25s 发呆」是个误会：那个 `IDLE_AFTER_MS` **从头没有消费者**，连配置项都算不上，已删（见 DEVLOG）。搬过去的是 `oneshot` 三个时长 + `sleepAfterMs`
 
 ## 已完成
+
+### S12-4 「找不到 dsh」：桌面版也是 dsh（2026-11-10）
+
+用户报「返回找不到 dsh」。查下来**不是权限、不是转义、不是 PATH 没继承**，是
+`locate()` 的定位范围写窄了：它只认 `PATH` 上的 npm 全局布局
+（`<dir>/node_modules/@deepseek-ai/dsh/lib/bin.js`），而本机那份 npm 安装随着
+`C:\nvm4w` 被清空一起没了（`ls -la` 只剩 `.`/`..`，`which dsh` 也没有）。
+dsh 现在只存在于桌面版 `AppData\Local\Programs\DeepSeek Harness` 里。
+
+桌面版的 dsh 是同一个产品、同一套参数：它的 `resources/runtime/cli/bin/dsh.cmd` 指向
+`app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js`，用
+`DeepSeek Harness.exe` + `ELECTRON_RUN_AS_NODE=1` + `--expose-internals` 跑。
+逐条对着 `--help` 核过（`--profile headless` / `--json` / `--session-id` / `-` 全都在），
+`--dump-config` 也能拿到 `cmg · DeepSeek-V4.1-Flash-1017`。
+
+改动：
+
+- `Launcher` 加了 `pre` / `env` / `from` 三项。npm 那两项为空——**命令行和以前一字不差**。
+  `command()` 与 `default_model()` 现在共用 `base()`，避免"一条路设了环境变量、另一条没设"
+  导致 `--dump-config` 那边去启 GUI。
+- `locate()` 两条来源：npm（`PATH`）→ 桌面版（`%LOCALAPPDATA%\Programs` /
+  `%PROGRAMFILES%` / `%PROGRAMFILES%(X86)` 各扫一层）。另留 `CLAWD_DSH_ROOT` 手动指定。
+- **第一版判据是错的**：用"有 `resources/app.asar` 就算"，临时探针当场选中了本机的
+  **Cherry Studio**（同目录下还有好几个 Electron 应用）。改成"exe 名或目录名含 `deepseek`"
+  才认，并把这次误判钉成回归测试 `does_not_mistake_another_electron_app_for_dsh`。
+- 报错文案改成「找不到 dsh：PATH 上没有 npm 那份，也没找到桌面版」，并且**失败时往 stderr
+  打一遍找过的候选目录**——"在哪儿找过"比"没找到"有用。
+- `explain()` 加一条：`Cannot find module` → 「桌面版里的 dsh 入口和预期不一样
+  （DeepSeek Harness 可能刚升级过）」。`DESKTOP_BIN` 是 asar 内部路径，上游改布局就会到这里。
+- 新增一条诊断 `[say] 出发 id=… 用 {npm|desktop} 那份 dsh cwd=…`：两种安装出问题的姿势
+  完全不同，先知道是哪一份省一半时间。
+
+闸门 `cargo test` 68 → **75**（+7：桌面版启动器、排除别的 Electron 应用、无 asar 不算、
+exe 同名优先、`pre/env` 真的进了命令行、npm 那条没被污染、`Cannot find module` 的翻译），
+`verify:tauri` **134 / 0**（这轮没动页面，条目不变）。真机 e2e：桌宠发「只回复两个字：收到」，
+**2.0 秒**拿到答案，日志 `[say] 出发 … 用 desktop 那份` / `[say] 收工 ok=true reply=收到`，
+输入窗 `ans="收到"`、高度 128 → 152。
 
 ### S12-3 发完消息，答案必须有落点（2026-11-10）
 
@@ -1388,6 +1425,7 @@ spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"]);
 | S12 「说」 | 0 | 0 | 0 | 0 | **无新增 SEC 编号**（核对全节见 SECURITY.md「S12『说』」）。本项目第一次**主动 fork 一个会调用模型的外部进程**，面的大小由三条设计决定：① 用户的文字**一个字都不进 argv**，全走 stdin（argv 有语法，`--help` / `-1` 会被当 flag；Windows 转义还要同时对 `cmd` 与 node 两个解析器正确）；`--session-id` 是唯一可变参数位，且只从宿主状态机取，**不接受页面传的字符串**；② `say_send` 的签名里**没有 cwd**（硬约束 46），目录只来自「这条会话自己的桶」或「用户上次干活的地方」——一旦 cwd 可传，`sandboxMode: workspace-write` 就成了相对错目录的沙箱，比路径泄露严重得多；③ 新开的两扇窗各配一条白名单（`W_COMPOSE` 只给自己那点事、`W_SAY` 开给主窗/输入窗/看板），输入窗沿用 `default-src 'none'` 且**只登记一份最小 capability**（`core:event:default`）——Tauri 的 ACL 是白名单，漏登记的表现是"一条事件都收不到"，S12 第一版正是被 500ms 轮询兜底把这个静默失效盖住了（硬约束 51：命令白名单与 capability 登记是两件事）。**凭据面没有扩大**：没有把 key 塞进子进程 environ（那会让它出现在每一个子进程里），而是让 `dsh` 自己读 `~/.dsh/.credentials.yaml`（仓库外），本项目一行没碰。**一条明说的边界**：`locate()` 取 `PATH` 上第一个含 `@deepseek-ai/dsh/lib/bin.js` 的目录，所以**能改 `PATH` 的人能让桌宠跑任意 `bin.js`**——与"能改 `PATH` 也能换掉桌宠 exe"同一权限级，故不另加白名单，但结论的边界就在这儿 |
 | S12-1 权限气泡三条死路 | 0 | 0 | 0 | 0 | **无新增 SEC 编号**（设计核对见 SECURITY.md「八、`bubble_close`：收窗不是裁决」）。这次改的是"界面有按钮、宿主没有账"，**不需要任何新权限**：`bubble_close` 只给气泡窗（`W_BUBBLE`），**不产生裁决**（不调 `settle()`、不回 HTTP；"不表态"仍走 `bubble_dismiss` 的 204），且**只收"当前这一条"**（带 id 时比对 `bubble_current`，不带 id 时只在 `bubble_current.is_none()` 才动手）——防止一张过期卡片把别人刚弹出来的请求收掉。收窗与 `Notify::Resolved` 共用 `resolve_current()`，队列里的下一条照常顶上。**顺带一条可观测性收益**：`permission_decide` 改收回执（`call` 而非 `send`），`send()` 会吞掉所有异常、让"决定没送到宿主"在日志里也不存在——这不是漏洞，但它是"用户说点了、宿主说没收到"扯皮的土壤。硬约束 51：凡用户能点的东西，必须能回答"这一下发给了谁、对方收没收到" |
 | S12-2 端口挪到 27333 | 0 | 0 | 0 | 0 | **无新增 SEC 编号**。这是**端口混淆（可用性 + 错觉风险），不是越权**：旧默认端口 `23333` 与用户 `~/.claude/settings.json` 的 `ANTHROPIC_BASE_URL` 重合，桌宠先启动就占住 Claude Code 的模型网关——Claude Code 的请求打到我们的 HTTP 服务上吃 401。边界没被击穿的原因是既有的两道：服务**只绑 `127.0.0.1`**，且除 `/permission` 外的端点仍校 token（`/permission` 不校 token 是 HTTP hook 架构的固有属性，风险收敛在 Host/Origin/Content-Type + UI 不盲批，见 S5 行）。挪动前做过安全检查：`~/.claude` / `~/.codebuddy` / `~/.workbuddy` 三条配置里**没有任何已装的 HTTP hook 指向旧端口**，所以不存在"改了端口但 hook 仍指向 23333、请求落到别人服务上"的窗口。**遗留的判断**：端口仍是固定的（权限 hook 的 url 是安装时写死进 `settings.json` 的，随机端口等于 hook 指向死端口），所以这类撞车以后还会以别的服务名出现——判据是装 hook 时报出的端口，而不是记在文档里的数字 |
+| S12-4 认桌面版的 dsh | 0 | 0 | 0 | 0 | **无新增 SEC 编号**（设计核对见 SECURITY.md「十、`locate()` 加认桌面版」）。这一轮**没有新增任何命令、窗口或权限**，但把"发现外部程序"的面讲清楚了：`locate()` 现在有多个入口（`PATH` 上的 npm 布局、三个安装根目录各扫一层、`CLAWD_DSH_ROOT`），**它们的前提是同一个**——已经能在该用户身份下写盘或设环境变量，所以权限级没提高，只是需要检查的位置变多了。**最值得记的不是漏洞而是判据**：第一版用"有 `resources/app.asar` 就算"，临时探针当场选中了同机的 **Cherry Studio**，即"拿一个无关程序去跑 dsh 的脚本"——判据太松的代价不是误报，是**执行了别的东西**。最终判据是"asar 在 **且** exe 名或目录名含 `deepseek`"，名字被改掉的情况用 `CLAWD_DSH_ROOT` 显式指定，不猜。另：桌面版要靠 `ELECTRON_RUN_AS_NODE=1` 才以 node 身份跑，少了它不是报错而是**又启一个 GUI**，所以 `pre`/`env` 进了 `Launcher`，并由 `base()` 统一转手给两条调用路径 |
 
 下一阶段开工前，先看 [SECURITY.md](./SECURITY.md) 里该阶段的预判小节。
 
@@ -1395,6 +1433,7 @@ spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"]);
 
 | 日期 | 类型 | 内容 |
 |---|---|---|
+| 2026-11-10 | 修复 | **「找不到 dsh」= 只认了 npm 布局**（S12-4，见上方「已完成」与 SECURITY「十」）。用户的报错是「PATH 里没有 `@deepseek-ai/dsh`」，而 `locate()` 确实只会扫 `PATH` 上的 `<dir>/node_modules/@deepseek-ai/dsh/lib/bin.js`。查下来本机那份 npm 安装**随着 `C:\nvm4w` 被清空一起没了**（`ls -la` 只剩 `.`/`..`、`which dsh` 空），dsh 现在只活在桌面版 `AppData\Local\Programs\DeepSeek Harness` 里。桌面版是同一个产品同一套参数（`app.asar/.../dsh-desktop-host/lib/cli.js`，用 `DeepSeek Harness.exe` + `ELECTRON_RUN_AS_NODE=1` 跑），逐条对着 `--help` 核过。改动：`Launcher` 加 `pre`/`env`/`from`，`command()` 与 `default_model()` 共用 `base()`；`locate()` 加第二条来源（三个安装根目录各扫一层），留 `CLAWD_DSH_ROOT` 手动指定。**过程中最值钱的一条是探针抓出来的误判**：第一版判据只认"有 `resources/app.asar`"，当场选中了同机的 **Cherry Studio**——判据松的代价不是"找不到"，而是**拿一个无关程序去跑 dsh 的脚本**；改成"asar 在 **且** 名字含 `deepseek`"，并把误判钉成回归测试。另：报错时把**找过的候选目录打进 stderr**，`Cannot find module` 翻成「桌面版入口和预期不一样」。闸门 `cargo test` 68 → **75**、`verify:tauri` 134/0；真机 e2e 2.0 秒拿到「收到」 |
 | 2026-11-06 | 决策 | **桌宠默认端口 23333 → 27333**（S12-2，`6402d86`，见上方「已完成」）。S12-1 收尾时发现的雷：`23333` 与用户本机 `~/.claude/settings.json` 的 `ANTHROPIC_BASE_URL` 完全重合——桌宠先启动就占住 Claude Code 的模型网关，Claude Code 的请求打到我们的 HTTP 服务上吃 401，现象是"发出去没有任何返回"。改动只有两处常量（`server.rs` / `port-file.js` 的 `DEFAULT_PORT`），其余全部读端点文件或常量、没有第二个写死数字。**挪之前先查了三条 agent 配置**（`~/.claude` / `~/.codebuddy` / `~/.workbuddy`）里没有任何已装的 HTTP hook 指向旧端口，所以不用重装；观察型 hook 运行时读端点文件，自动跟上。顺带解开一条旧限制：与主仓库 `clawd-on-desk`（23333）现在可以同时跑。**顺手修掉一道假闸门**：「gaze 至少推过一次」在光标离桌宠超过约 260px 时必挂——变化检测是对**钳制后**的归一化坐标做的，光标在远处时挪 8px 没有任何变化，这条断言以前全靠"跑测试的人恰好把光标放在猫旁边"。修法是先 `moveCursorTo` 把光标传送进桌宠窗口内（坐标取自 `hitState().window` + scale）存基准，再 nudge 造变化。闸门 `cargo test` 68/0、`verify:tauri` 128 PASS / 0 FAIL |
 | 2026-11-06 | 修复 | **「点了允许却什么都没发生」= 三条静默死路**（S12-1，`b2b1369`，见上方「已完成」与 SECURITY「八」）。用户报「确认操作，没有任何返回」，用 CDP 复刻出的真实时序是：卡片亮着、按钮亮着，点下去一个字节都没发出去，请求挂满 120 秒才回落 204。三个入口同一类病——**界面有按钮，宿主那边没有账**：① 卡片加载即可见、按钮初始可点，`permission:request` 还没到（首次请求 / 页面重载 / 事件没投递）时点下去撞上 `currentId === null` 的静默 return → 按钮**初始禁用**，只有 `render()` 拿到真请求才放开；② `decide()` 先清 `currentId`、置灰，再 fire-and-forget，主进程回 `false`（已超时 / 已被结掉）时没人接，卡片留着、按钮永久灰、这扇窗从此废掉 → 改走 `call` **收下回执**，`false` 就写明「已经结束」并收窗；③ 修 ①② 时自己引入的竞态：`await` 回执后无条件清 `currentId`，把这几毫秒里刚渲染上来的下一条请求的 id 擦掉（卡片显示 Read、点下去走"没有当前请求"）→ `if (currentId !== id) return;`，写状态前先比对身份。宿主侧 `permission_decide` 返回 `false` 且当前窗显示的正是这条时，复用 `resolve_current()` 收窗（与 `Notify::Resolved` 同一条路径），不留废窗；新增 `bubble_close`（只给气泡窗、只做界面收尾、**不产生任何裁决**、只收当前这一条）。契约变化：`permission_decide` 的回执不再被 `send()` 吞掉——"决定没送到宿主"从"日志里都不存在"变成"能看见"。`verify:tauri` 123 → **128**（+5：不存在的 id 回执 false、超时后点允许能说明情况、`bubble_close` 跨窗被拒等），`cargo test` 68/0；真机复现脚本实测修前 204 @120s、修后同一条 200 带 allow 回包。硬约束 51 由这条落地 |
 | 2026-11-06 | 重构 | **清掉全部 10 条编译警告**（`0119af0`，7 个 `.rs`，+13 / −35）。全是 S12 那批代码留下的尾巴，逐条按"谁还在用"清：`sys.rs` 的 `HANDLE` / `BOOL` / `PostMessageW` 三个导入（前两个随 `bool_ok` 一起删，`BOOL` 只有它在用；`PostMessageW` 只在测试里模拟锁屏消息，**挪进 `tests` 模块自己导入**）；`sys.rs::bool_ok` 写完没接上，`BOOL` 判空各处都是内联 `!= 0`，删；`theme.rs` 的 `Deserialize` 没用上、`themes_root_display` 没人调、`_unused(&Path)` 是当年为留住 `Path` 导入写的占位——三个一起清，导入收窄成 `{ Serialize, PathBuf }`；`main.rs` 的 `ContextMenu` 与 `risk.rs` 的 `Rule`（`push` 直接构造 `Reason`，它是重构残留）删；`permission.rs::size()` 只有单测在数排队数，**标 `#[cfg(test)]` 而不是删**；`state.rs::oneshot_ms` 包装方法没人调（调用方都直接用 `oneshot_ms_with`）删；`server.rs::ServerHandle` 的 `port` / `token` 没有任何读者（port 文件在 `start` 内部写完，调用方拿到 handle 只会丢弃）——结构体删掉、`start` 返回 `()`。`cargo build` **0 警告（dev + release）**、`cargo test` 68/68、`verify:tauri` 123/0 |

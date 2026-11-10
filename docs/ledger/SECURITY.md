@@ -1095,14 +1095,19 @@ S11 的结论是"本项目不读 `~/.dsh/.credentials.yaml`，key 交给 DSH 解
 | 面 | 谁能触到 | 现状 |
 |---|---|---|
 | `say_send`（起进程） | 主窗 / 输入窗 / 看板 | 目标与目录宿主查；同一目标只允许一条在飞；文字上限 8000 字 |
-| `node bin.js` 的路径 | 只来自 `locate()`（扫 `PATH` 找 `@deepseek-ai/dsh`） | 找不到就是"这个功能不可用"，**不从页面接受路径** |
+| `node bin.js` 的路径 | 只来自 `locate()`（`PATH` 上的 npm 布局，以及桌面版安装目录） | 找不到就是"这个功能不可用"，**不从页面接受路径** |
 | `--dump-config` | 启动时一次，只读 stdout | 只解析 `provider` / `model` 两个字段；认不出就 `None` |
 | 子进程 stdout（NDJSON） | dsh 自己 | 逐行 `serde_json::from_str`，**解析不了就跳过**；`text` / `final` 只当字符串用，从不拼 HTML |
 
-第一条有一个明确的**未覆盖点**：`locate()` 拿的是 `PATH` 上第一个含
-`node_modules/@deepseek-ai/dsh/lib/bin.js` 的目录，所以**能改 `PATH` 的人能让桌宠跑任意
-`bin.js`**。这与"能改 `PATH` 的人也能改桌宠自己的 exe"是同一个权限级，故不额外加白名单，
-但要知道结论的边界在这儿。
+第一条有一个明确的**未覆盖点**：`locate()` 认两个来源——`PATH` 上第一个含
+`node_modules/@deepseek-ai/dsh/lib/bin.js` 的目录，或者 `%LOCALAPPDATA%\Programs` /
+`%PROGRAMFILES%` / `%PROGRAMFILES(X86)%` 下**名字里带 `deepseek` 且含 `resources/app.asar`
+的目录**（后一条是 S12-4 加的，见第十节），外加 `CLAWD_DSH_ROOT` 环境变量覆盖。
+所以**能改这三个目录、能设环境变量的人，能让桌宠跑他指定的 exe**。这与"能改 `PATH`
+的人也能换掉桌宠自己的 exe"是同一个权限级（都是"以该用户身份写文件/设环境"），
+故不额外加白名单，但要知道结论的边界在这儿。**S12-4 之后这条边界比原来宽了一格**：
+原来只有 `PATH` 一个入口，现在多了三个目录和一个环境变量——但四者的前提是同一个，
+即"已经能在该用户身份下写盘"，所以权限级没有提高，只是**需要检查的位置变多了**。
 
 ---
 
@@ -1134,6 +1139,38 @@ S11 的结论是"本项目不读 `~/.dsh/.credentials.yaml`，key 交给 DSH 解
 
 它改的是窗口几何而不是内容：页面上没有任何接口能把用户原文/答案写进别的窗口，
 答案只出现在用户自己发起的那次对话的窗口里。
+
+---
+
+### 十、`locate()` 加认桌面版：判据太松比"找不到"更危险（S12-4）
+
+2026-11-10 用户报「找不到 dsh」。根因不是权限也不是转义，是**定位范围写窄了**：
+`locate()` 只认 `PATH` 上的 npm 全局布局（`node_modules/@deepseek-ai/dsh/lib/bin.js`），
+而本机 npm 那份随着 `C:\nvm4w` 被清空一起没了（`ls -la` 只剩 `.`/`..`），
+dsh 现在只存在于 `AppData\Local\Programs\DeepSeek Harness` 这个桌面版里。
+
+修法是给 `locate()` 加第二条来源。这里有一条**必须写下来的安全账**：
+
+- **第一版判据是错的，而且错的方式很危险**。当时用"目录里有 `resources/app.asar`"当判据，
+  临时探针跑出来选中的是 **Cherry Studio** 的 exe（本机 `%LOCALAPPDATA%\Programs` 下
+  还有好几个 Electron 应用）。后果不是"找不到"，是**拿一个无关程序去跑 dsh 的脚本**：
+  轻则报 `Cannot find module`，重则那个 exe 被 `ELECTRON_RUN_AS_NODE=1` 以 node 身份
+  执行我们拼的参数——**跑错程序比找不到难查一个数量级**，因为它有一整套"看起来在工作"的表现。
+- **判据改成两条同时成立**：`resources/app.asar` 在，**且** exe 名或目录名里含 `deepseek`。
+  名字可以被改，所以留了 `CLAWD_DSH_ROOT` 手动指定，**不靠猜**。
+- **`DESKTOP_BIN` 是内部路径**（在 asar 里面，磁盘上查不到，只能由 Electron 解析），
+  所以只能校验"根目录像不像"，校验不了"入口在不在"。拼错的表现是 Electron 打
+  `Cannot find module`，由 `explain()` 翻成「桌面版里的 dsh 入口和预期不一样」——
+  不让用户面对一坨堆栈。
+- **桌面版要以 node 身份跑，靠的是环境变量**：`ELECTRON_RUN_AS_NODE=1` +
+  `--expose-internals`（照抄它自己 `resources/runtime/bin/node.cmd`）。少了前者的后果
+  不是报错，是**又启一个 GUI**——所以这两项进了 `Launcher` 的 `pre`/`env`，
+  并且 `command()` 与 `default_model()` 共用同一个 `base()`，避免"一条路设了、另一条没设"。
+
+结论：**这一轮没有新增权限，也没有跨出"该用户能写盘"的信任边界**，但把
+"发现外部程序"这件事的风险形态讲清楚了——**判据松的代价不是误报，是执行了别的东西**。
+同一条适用于以后任何"自动发现本机某个程序"的代码：判据要能**排除同类应用**，
+排除不了就提供显式指定，不要让"猜"成为默认路径。
 
 ---
 
