@@ -204,6 +204,8 @@ fn ensure_bubble(app: &AppHandle) -> Option<WebviewWindow> {
         .resizable(false)
         .shadow(false)
         .visible(false)
+        // 权限气泡是**不请自来**的：建窗那一刻也不能抢前台（2026-11-12）。
+        .focused(false)
         .build()
         .ok()?;
     Some(w)
@@ -313,8 +315,11 @@ fn present_bubble(app: &AppHandle, entry: &PendingView) {
     let Some(bubble) = ensure_bubble(app) else { return };
     let _ = bubble.emit("permission:request", entry.clone());
     position_bubble(app);
-    let _ = bubble.show();
-    let _ = bubble.set_focus();
+    // **不抢焦点**（2026-11-12）：这条提示是不请自来的，用户可能正在 Word 里打字。
+    // 窗要置顶、要看得见，但前台和键盘焦点都留在用户正在用的那个程序上。
+    // 用户想处理它时会自己点过来——那一下才是"我要跟它交互"。
+    sys::show_no_activate(&bubble);
+    eprintln!("[bubble] #{} 已显示（置顶，不抢焦点）", entry.id);
 }
 
 fn show_bubble(app: &AppHandle, entry: PendingView) {
@@ -1283,13 +1288,13 @@ fn say_send(
                 "prompt": said,
             }),
         );
-        // 这扇窗在"送出"那一刻就自己藏了（420ms 的即时反馈），而失败是几十秒后才知道的
-        // （模型 401 / 网络断 / 45 分钟超时）。不把它重新亮出来，用户就永远看不到——
-        // **这是唯一一处"发送之后还有话说"的场合**，所以宁可打扰一次。
+        // 失败是几十秒后才知道的（模型 401 / 网络断 / 45 分钟超时），那时用户多半已经
+        // 去干别的事了，甚至按 Esc 把窗藏起来了。不亮出来他就永远看不到失败原因。
+        // **但亮出来不等于抢键盘**（2026-11-12）：这也是一条不请自来的提示，
+        // 和权限气泡同等待遇——显示、置顶、不抢前台。用户看见了自己会点回来。
         if !ok {
             if let Some(w) = app.get_webview_window("compose") {
-                let _ = w.show();
-                let _ = w.set_focus();
+                sys::show_no_activate(&w);
             }
         }
         // 一条诊断：用户说"发了没反应"时，先看这一行有没有出现。
@@ -1651,7 +1656,8 @@ fn apply_lock(app: &AppHandle, locked: bool) {
         }
         if st.bubble_current.lock().unwrap().is_some() {
             if let Some(b) = app.get_webview_window("bubble") {
-                let _ = b.show();
+                // 解锁回来也不抢焦点：这条等待是锁屏前就开始了，不是用户刚点的。
+                sys::show_no_activate(&b);
             }
         }
     }

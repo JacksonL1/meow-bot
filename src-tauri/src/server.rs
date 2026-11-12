@@ -137,8 +137,14 @@ fn handle(
         }
 
         let (id, rx) = center.create(&payload);
+        // 一条诊断（2026-11-12 用户报「需要确认的操作没体现到桌宠上」）：
+        // 有这行而屏幕上没气泡 = 窗口侧的问题；**连这行都没有** = 请求根本没到——
+        // 那就是平台/hook 的事（WorkBuddy 在原生 GUI 里处理权限，从不调这个端点），
+        // 往气泡代码里找是找不到的。
+        eprintln!("[perm] 收到确认请求 #{id}，等用户点（超时 {}ms）", center.timeout().as_millis());
         // 挂起这个响应，等用户在气泡里点。超时自己兜底。
         let outcome = rx.recv_timeout(center.timeout()).unwrap_or(Outcome::NoDecision);
+        eprintln!("[perm] #{id} 结局 {outcome:?}");
         if outcome == Outcome::NoDecision {
             // 超时路径也要把条目清掉，否则气泡关不掉、内存也不掉
             center.settle(id, Outcome::NoDecision);

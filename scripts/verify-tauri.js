@@ -308,6 +308,22 @@ function moveCursorTo(x, y) {
   return r.status === 0;
 }
 
+// 前台窗口是谁（句柄 + 标题）。用来证明"气泡弹出来**没有**打断正在打字的人"
+// （2026-11-12 用户原话：「桌宠的所有提示都不要干扰正在做的事情，比如写 word」）。
+// 只看标题不够：真正的问题是**键盘焦点**归谁，而 Windows 上那就是前台窗口。
+function foregroundWindow() {
+  if (process.platform !== "win32") return "";
+  const ps = [
+    'Add-Type \'using System;using System.Runtime.InteropServices;using System.Text;public class FG{[DllImport("user32.dll")]public static extern IntPtr GetForegroundWindow();[DllImport("user32.dll")]public static extern int GetWindowText(IntPtr h,StringBuilder s,int n);}\';',
+    '$h=[FG]::GetForegroundWindow();$sb=New-Object System.Text.StringBuilder 512;[FG]::GetWindowText($h,$sb,512)|Out-Null;Write-Output ($h.ToString()+"|"+$sb.ToString())',
+  ].join(" ");
+  const r = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", ps], {
+    encoding: "utf8",
+    timeout: 8000,
+  });
+  return r.status === 0 ? String(r.stdout || "").trim() : "";
+}
+
 async function main() {
   console.log("Tauri 迁移回归\n" + "=".repeat(56));
 
@@ -1019,6 +1035,10 @@ async function main() {
     //
     // 全链路：HTTP 挂起 → 建窗 → 页面 ready 握手 → 投递 → 用户点 → 回包。
     // 这五步里任何一步断掉，用户在界面上看到的都是"什么都没发生"。
+    // 弹之前先记下前台是谁：这条提示是**不请自来**的，不该把键盘抢走。
+    // 必须先取再发请求——反过来写的话，PowerShell 启动那两百毫秒里气泡已经弹出来了，
+    // 取到的"弹之前"其实就是气泡自己，这条断言就成了摆设。
+    const fgBefore = foregroundWindow();
     const p1 = post("/permission", { session_id: "perm1", tool_name: "Bash", tool_input: { command: "rm -rf /" }, cwd: "E:/work/demo" }, null, { timeout: 20000 });
     const bubbleTarget = await waitTarget((u) => u.includes("bubble"));
     ok("第一条权限请求把气泡窗口建起来了", !!bubbleTarget);
@@ -1040,6 +1060,15 @@ async function main() {
       const h = await B.eval("document.getElementById('card').getBoundingClientRect().height");
       const winH = await B.eval("window.outerHeight");
       ok("窗口高度跟着卡片走（±8px）", Math.abs(Number(h) - Number(winH)) <= 8, `卡片 ${Math.round(h)} / 窗口 ${winH}`);
+
+      // 气泡已经完整显示出来了，这时前台**必须还是原来那个程序**。
+      // 只比句柄：标题可能正在被编辑器刷新，而焦点归谁看句柄就够了。
+      const fgAfter = foregroundWindow();
+      ok(
+        "气泡弹出没有抢走前台（正在打字的人不会被打断）",
+        !!fgBefore && fgBefore.split("|")[0] === fgAfter.split("|")[0],
+        `${fgBefore} → ${fgAfter}`
+      );
 
       await B.eval("document.getElementById('btnDeny').click(), 1");
       const r1 = await p1;

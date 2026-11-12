@@ -35,6 +35,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, GetMessageW,
     RegisterClassW, SystemParametersInfoW, TranslateMessage, DestroyWindow, HWND_MESSAGE, MSG,
     SPI_GETWORKAREA, WNDCLASSW, WM_WTSSESSION_CHANGE, WTS_SESSION_LOCK, WTS_SESSION_UNLOCK,
+    SetWindowPos, ShowWindow, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SWP_SHOWWINDOW,
 };
 
 /// 全局光标位置。窗口跟着光标移动后，光标在窗口内的相对位置不变，
@@ -54,6 +56,34 @@ pub fn work_area() -> (i32, i32, i32, i32) {
         SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut r as *mut RECT as *mut _, 0);
     }
     (r.left, r.top, r.right - r.left, r.bottom - r.top)
+}
+
+/// 显示一扇窗，但**不把前台抢走**。
+///
+/// 为什么需要它（2026-11-12 用户原话：「桌宠的所有提示都不要干扰正在做的事情，
+/// 比如写 word，发消息」）：权限气泡是**不请自来**的。`show() + set_focus()` 意味着
+/// 用户正在 Word 里打字、接下来的几个字会敲进气泡里——这不是"提醒"，是打断。
+/// Windows 上对应的正确调用是 `SW_SHOWNOACTIVATE` + `SetWindowPos(SWP_NOACTIVATE)`：
+/// 窗照常显示、照常被点，但**前台进程不变、键盘焦点不变**。
+///
+/// 只在"不请自来"的场合用它。用户主动点出来的窗口（输入窗、看板）仍要拿焦点，
+/// 否则用户会以为程序卡了。
+pub fn show_no_activate(w: &tauri::WebviewWindow) {
+    let Ok(raw) = w.hwnd() else { return };
+    let h = raw.0 as HWND;
+    unsafe {
+        ShowWindow(h, SW_SHOWNOACTIVATE);
+        // 只改"显示"这一件事：位置、大小、层叠顺序都不动（置顶是建窗时就设好的）。
+        SetWindowPos(
+            h,
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+    }
 }
 
 /// 把文本塞进剪贴板。返回是否成功。
