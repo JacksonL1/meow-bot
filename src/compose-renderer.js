@@ -44,7 +44,7 @@ let pollTimer = null;
 
 function sigOf(t) {
   if (!t) return "";
-  return [t.id || "", t.title || "", t.cwd || "", t.can_resume ? "1" : "0"].join("\u0001");
+  return [t.id || "", t.title || "", t.cwd || "", t.can_resume ? "1" : "0", t.reason || ""].join("\u0001");
 }
 
 function renderTarget() {
@@ -71,13 +71,20 @@ function renderTarget() {
     el.to.append(dir);
   }
   if (target.can_resume === false) {
-    // 提前说清，免得白打一屏字。原因见 Rust 侧 say.rs 文件头第 3 条。
+    // 提前说清，免得白打一屏字。**理由用宿主给的那句**（target.reason）：
+    // "桌面端建的"和"这是另一家 agent 的会话"是两件事，界面自己编理由就会说错。
     const warn = document.createElement("span");
-    warn.textContent = " · 桌面端会话，写不进去";
+    warn.textContent = " · 这条写不进去";
     el.to.append(warn);
-    setFoot("这条是在桌面端建的，DSH 不许一次性 runner 往里写；在这儿发会新起一条", true);
+    setFoot(blockedText(), true);
     el.text.disabled = false;
   }
+}
+
+/** 指定了目标却写不进去时，那一行该说什么。两处用同一句（打开时 + 按回车时）。 */
+function blockedText() {
+  const why = (target && target.reason) || "这条会话没法从桌宠往里写";
+  return `${why}。要新起一条，用泡泡底部的「说一句」`;
 }
 
 function setFoot(text, bad) {
@@ -173,11 +180,19 @@ async function submit() {
   }
   busy = true;
   el.card.classList.add("busy");
-  setFoot(HINT_BUSY, false);
 
-  // 已经提前告知"写不进去"的会话，就**不续**它——发一条新会话，
-  // 比发出去然后弹一个用户没法处理的错误要好。用户要的就是"让它动起来"。
-  const id = target && target.id && target.can_resume !== false ? target.id : null;
+  // **指定了哪条，就只能发进哪条**（2026-11-12 用户的要求）。
+  // 以前的写法是"这条写不进去就悄悄新起一条"：用户以为自己在接着那条会话说，
+  // 实际上开了一个新的——答案落在另一张卡片上，看上去就像"它把我前头说的忘了"。
+  // 现在写不进去就停在这里说原因，换不换目标由用户自己决定。
+  if (target && target.id && target.can_resume === false) {
+    busy = false;
+    el.card.classList.remove("busy");
+    setFoot(blockedText(), true);
+    return;
+  }
+  setFoot(HINT_BUSY, false);
+  const id = target && target.id ? target.id : null;
 
   sentPrompt = text;
   let r = null;

@@ -144,6 +144,9 @@ struct ComposeTarget {    /// Some = 接着这条说；None = 新起一条。
     /// 这条会话能不能被一次性 runner 续写。false 时页面上要说明原因，
     /// 而不是让用户点了发送才在错误里看到（见 say::explain 的第一条）。
     can_resume: bool,
+    /// 不能续的原因（`can_resume == false` 时给）。界面**原样显示**，
+    /// 不自己编理由：桌面端建的会话和"这是另一家 agent 的会话"不是一回事。
+    reason: Option<String>,
     /// 是谁叫出来的：`main`（桌宠）或 `dashboard`（看板）。
     /// 决定了输入窗贴在哪扇窗上方——从看板点「说」，窗口却蹦到屏幕角落的猫头上，
     /// 用户会以为点错了。
@@ -926,6 +929,107 @@ fn pinned_new_cwd(st: &AppState) -> String {
     c
 }
 
+/// 不能续时的固定理由之一。放在这里是因为**两处都要说同一句话**：
+/// 输入窗打开时（`compose_target_of`）和真正发送时（`say_send`）。
+const REASON_PRESET: &str = "这条是在桌面端 / 网页端建的，DSH 不许一次性 runner 往里写";
+
+/// 一条被点中的会话，宿主查到的结果。
+///
+/// 这个结构存在的理由（2026-11-12 用户报「发送消息时，指定哪个 session 就发到哪个
+/// session」）：**"指定了"和"发到了"之间隔着一次查找，而那次查找以前查错了地方。**
+/// 看板列的是磁盘上的全部 DSH 会话，状态机里却只有"最近还在动"的那些
+/// （`dsh::Probe::reconcile` 的活跃窗口），于是历史会话一点发送就回
+/// 「这条会话已经不在了」。现在查找的顺序是 **磁盘投影优先、状态机兜底**，
+/// 两边都没有才是真的"不在了"。
+#[derive(Clone, Debug)]
+struct Resolved {
+    /// 两边都查不到 = false。这时**必须报错**，不许退化成"新起一条"。
+    known: bool,
+    cwd: Option<String>,
+    title: Option<String>,
+    can_resume: bool,
+    /// 不能续的人话原因，由界面原样显示。界面不该自己编理由——
+    /// "桌面端建的"和"这是另一家 agent 的会话"是两件完全不同的事。
+    reason: Option<String>,
+}
+
+/// 纯函数版：磁盘投影（DSH 全量）与状态机（活跃会话）各给一份，合成一个结论。
+/// 抽出来是为了能拿假数据钉住这几种组合，不用真起一条会话。
+fn resolve_target(
+    disk: Option<(Option<String>, Option<String>, bool)>,
+    live: Option<(Option<String>, Option<String>, String)>,
+) -> Resolved {
+    if let Some((cwd, title, can_resume)) = disk {
+        // 磁盘是权威：目录必须是这条会话自己的（DSH 按目录分桶），
+        // 标题可能还没写进投影，那就借状态机那份。
+        let cwd = cwd.or_else(|| live.as_ref().and_then(|l| l.0.clone()));
+        let title = title.or_else(|| live.and_then(|l| l.1));
+        return Resolved {
+            known: true,
+            cwd,
+            title,
+            can_resume,
+            reason: if can_resume { None } else { Some(REASON_PRESET.to_string()) },
+        };
+    }
+    match live {
+        Some((cwd, title, agent)) => {
+            // 状态机里有、磁盘投影里还没有：DSH 的会话也会这样（投影 1s 一拍，
+            // 刚建的那条可能还没扫到）。这时**平台**是唯一判据——别家的会话
+            // 塞给 `dsh --session-id` 只会换一句看不懂的报错。
+            // `unknown` 算 DSH 一侧：S13 之前 DSH 的 payload 不带 agent，
+            // 那些会话在状态机里就是 unknown（见 state.rs 的常量注释）。
+            let dsh_like = agent == "dsh" || agent == state::UNKNOWN_AGENT;
+            Resolved {
+                known: true,
+                cwd,
+                title,
+                can_resume: dsh_like,
+                reason: if dsh_like {
+                    None
+                } else {
+                    Some(format!(
+                        "这条是 {agent} 的会话：本机没有能往里写的 CLI，只能从它自己的界面继续"
+                    ))
+                },
+            }
+        }
+        None => Resolved {
+            known: false,
+            cwd: None,
+            title: None,
+            can_resume: false,
+            reason: Some("这条会话已经不在了（看板刷新一下再试）".to_string()),
+        },
+    }
+}
+
+/// 按 id 查一次。两处调用方（打开输入窗 / 真正发送）走同一条路，
+/// 免得"窗里说能发、点了又说不能"。
+fn resolve_id(st: &AppState, id: &str) -> Resolved {
+    let (disk, first_poll_done) = {
+        let probe = st.dsh.lock().unwrap();
+        (
+            probe.target(id).map(|t| {
+                (
+                    t.cwd.map(str::to_string),
+                    t.title.map(str::to_string),
+                    t.can_resume,
+                )
+            }),
+            probe.polls > 0,
+        )
+    };
+    let live = st.store.lock().unwrap().live_target(id);
+    let mut r = resolve_target(disk, live);
+    // 刚启动、磁盘投影一拍还没扫完时，"查不到"不等于"没有"。
+    // 真机踩过：启动后立刻点发送，回一句"这条会话已经不在了"——而它就躺在磁盘上。
+    if !r.known && !first_poll_done {
+        r.reason = Some("会话列表还在扫描（刚启动），等一秒再点".to_string());
+    }
+    r
+}
+
 /// 组装"这一次发给谁"，顺便把能不能续判掉。
 ///
 /// 为什么不在点发送的时候才判：`can_resume` 要在窗口打开的那一刻就显示出来。
@@ -935,36 +1039,19 @@ fn compose_target_of(
     id: Option<String>,
     origin: &str,
 ) -> Result<ComposeTarget, String> {
-    // DSH 侧"这条会话记过 agentPreset 吗"——记过就不能被一次性 runner 续。
-    // 判据见 say.rs 文件头第 3 条（`assertAdoptable`）。
-    let resumable: std::collections::HashSet<String> = st
-        .dsh
-        .lock()
-        .unwrap()
-        .sessions
-        .iter()
-        .filter(|o| o.agent_preset.is_none())
-        .map(|o| o.id.clone())
-        .collect();
-
     match id {
         Some(id) => {
-            let (cwd, title) = {
-                let store = st.store.lock().unwrap();
-                let cwd = store.full_cwd(&id).map(|s| s.to_string());
-                let title = store
-                    .snapshot()
-                    .sessions
-                    .into_iter()
-                    .find(|s| s.id == id)
-                    .and_then(|s| s.title);
-                (cwd, title)
-            };
+            let r = resolve_id(st, &id);
+            // 打开窗的那一刻就说"这条没了"，而不是让人打了半屏字、按回车才知道。
+            if !r.known {
+                return Err(r.reason.unwrap_or_else(|| "这条会话已经不在了".to_string()));
+            }
             Ok(ComposeTarget {
-                can_resume: resumable.contains(&id),
-                cwd: state::tail_cwd(&cwd),
+                can_resume: r.can_resume,
+                reason: r.reason,
+                cwd: state::tail_cwd(&r.cwd),
                 id: Some(id),
-                title,
+                title: r.title,
                 origin: origin.to_string(),
             })
         }
@@ -974,6 +1061,7 @@ fn compose_target_of(
             cwd: state::tail_cwd(&Some(pinned_new_cwd(st))),
             // 新会话没有 preset，天然可以（也就是等下一条消息还能接着它）。
             can_resume: true,
+            reason: None,
             origin: origin.to_string(),
         }),
     }
@@ -1085,18 +1173,22 @@ fn say_send(
         return Err(format!("太长了（最多 {} 字）", say::MAX_TEXT_CHARS));
     }
 
-    // 目标与目录一律从状态机里查（见本节开头）。
+    // 目标与目录一律由宿主查（见本节开头），**页面传的只是一个 id**。
     // 新会话走 `pinned_new_cwd`：和输入窗上显示的是同一个值——不然用户看到的
     // 目录和实际落地的目录会分叉（那段注释在 pinned_new_cwd 上）。
+    //
+    // 指定了 id 就**必须**落到那一条上（2026-11-12）：查不到、不能续、没目录，
+    // 三种都直接报错。**绝不在这里退化成"新起一条"**——用户以为自己在跟
+    // 那条会话说，实际上开了一个新的，这比报错难发现得多。
     let (id, cwd) = match id.filter(|s| !s.is_empty()) {
         Some(id) => {
-            let cwd = st
-                .store
-                .lock()
-                .unwrap()
-                .full_cwd(&id)
-                .ok_or_else(|| "这条会话已经不在了".to_string())?
-                .to_string();
+            let r = resolve_id(&st, &id);
+            if !r.known || !r.can_resume {
+                return Err(r.reason.unwrap_or_else(|| "这条会话不能续".to_string()));
+            }
+            let cwd = r
+                .cwd
+                .ok_or_else(|| "这条会话没记下目录，没法续（DSH 按目录分桶存会话）".to_string())?;
             (Some(id), cwd)
         }
         None => (None, pinned_new_cwd(&st)),
@@ -1798,4 +1890,87 @@ fn main() {
             let _ = std::fs::remove_file(server::port_file_path());
         }
     });
+}
+
+// ------------------------------------------------------------
+// 「指定哪个 session 就发到哪个 session」的查找规则（2026-11-12）
+//
+// 这几条钉的是**查找**，不是命令行怎么拼（那个在 say.rs 的测试里）。
+// 用户报的问题正是查找：历史会话在看板上能点，却因为不在状态机里而被判"不在了"。
+// ------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn disk(cwd: Option<&str>, title: Option<&str>, can: bool) -> Option<(Option<String>, Option<String>, bool)> {
+        Some((
+            cwd.map(str::to_string),
+            title.map(str::to_string),
+            can,
+        ))
+    }
+
+    fn live(cwd: Option<&str>, title: Option<&str>, agent: &str) -> Option<(Option<String>, Option<String>, String)> {
+        Some((
+            cwd.map(str::to_string),
+            title.map(str::to_string),
+            agent.to_string(),
+        ))
+    }
+
+    #[test]
+    fn a_history_session_only_on_disk_is_still_a_valid_target() {
+        // 这是用户报的那条：会话在磁盘上、不在状态机里（早就过了活跃窗口）。
+        let r = resolve_target(disk(Some("E://w//proj"), Some("昨天的会话"), true), None);
+        assert!(r.known && r.can_resume);
+        assert_eq!(r.cwd.as_deref(), Some("E://w//proj"));
+        assert_eq!(r.title.as_deref(), Some("昨天的会话"));
+        assert!(r.reason.is_none());
+    }
+
+    #[test]
+    fn the_disk_directory_wins_over_the_live_one() {
+        // DSH 按目录分桶存会话：续聊的 cwd 必须是**这条会话自己的**，
+        // 不是状态机里那条可能已经被别的事件改写过的值。
+        let r = resolve_target(
+            disk(Some("E://w//proj"), None, true),
+            live(Some("C://elsewhere"), Some("活态标题"), "dsh"),
+        );
+        assert_eq!(r.cwd.as_deref(), Some("E://w//proj"));
+        // 标题反过来：投影里还没有时，借活态那份，别显示"未命名会话"。
+        assert_eq!(r.title.as_deref(), Some("活态标题"));
+    }
+
+    #[test]
+    fn a_desktop_session_is_refused_before_anything_is_spawned() {
+        let r = resolve_target(disk(Some("E://w"), None, false), None);
+        assert!(r.known && !r.can_resume);
+        assert_eq!(r.reason.as_deref(), Some(REASON_PRESET));
+    }
+
+    #[test]
+    fn a_session_from_another_agent_is_not_sayable_through_dsh() {
+        // 别家的会话塞给 `dsh --session-id`，只会换一句看不懂的报错。
+        let r = resolve_target(None, live(Some("E://w"), None, "workbuddy"));
+        assert!(r.known && !r.can_resume);
+        assert!(r.reason.as_deref().unwrap().contains("workbuddy"));
+    }
+
+    #[test]
+    fn a_live_dsh_session_not_yet_on_disk_can_still_be_continued() {
+        // 投影 1s 一拍，刚建的那条可能还没扫到——这时不能误判成"别家的"。
+        for agent in ["dsh", state::UNKNOWN_AGENT] {
+            let r = resolve_target(None, live(Some("E://w"), None, agent));
+            assert!(r.known && r.can_resume, "agent={agent} 应该能续");
+        }
+    }
+
+    #[test]
+    fn an_unknown_id_is_an_error_never_a_new_session() {
+        // 这条是整件事的底线：指定了目标却查不到，就报错。
+        // 悄悄新起一条会让"我以为我在跟那条会话说"变成永远发现不了的错。
+        let r = resolve_target(None, None);
+        assert!(!r.known && !r.can_resume);
+        assert!(r.reason.is_some());
+    }
 }

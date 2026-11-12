@@ -104,9 +104,11 @@ const MAX_CWD_PUBLIC: usize = 200;
 /// 平台名的最长长度。`claude-code` / `workbuddy` 都在 12 个字以内，
 /// 32 是给"以后接别家"留的余量，不是猜出来的值。
 const MAX_AGENT: usize = 32;
-/// 报不上来平台名时的值。看板把它显示成「未知来源」——
-/// 这种行只会来自手工 `POST /state`（真 hook 一定带 `agent`）。
-const UNKNOWN_AGENT: &str = "unknown";
+/// 报不上来平台名时的值。看板把它显示成「未知来源」。
+/// DSH 的会话也是这个值——它们来自 `dsh.rs` 的磁盘投影，那份 payload 不带
+/// `agent` 字段（平台是调用方自己知道的，不必写）。所以判"这条能不能续"时，
+/// `unknown` 必须算作 DSH 一侧，否则所有 DSH 会话都会被误判成"别家的、写不了"。
+pub(crate) const UNKNOWN_AGENT: &str = "unknown";
 
 /// 主题给的状态时长。`None` = 主题没写，用内置默认。
 /// oneshot 时长查表。做成自由函数是为了能在 `sessions.values_mut()` 里调用——
@@ -646,6 +648,18 @@ impl Store {
     // 只有"用户对某一条会话显式做了动作"（点复制路径）时，按 id 取出这一条。
     pub fn full_cwd(&self, id: &str) -> Option<&str> {
         self.sessions.get(id).and_then(|s| s.cwd.as_deref())
+    }
+
+    /// "接着这条说"要的三样：完整目录 / 标题 / **平台**。
+    ///
+    /// 为什么不复用 `full_cwd` + 快照（2026-11-12）：续聊之前必须回答"这条是谁的
+    /// 会话"。目录对但平台不对（比如一条 WorkBuddy 的会话）时，把它的 id 塞给
+    /// `dsh --session-id` 只会换来一句看不懂的报错——而比这更糟的做法是悄悄
+    /// 新起一条会话，让用户以为自己在跟原来那条说话。
+    pub fn live_target(&self, id: &str) -> Option<(Option<String>, Option<String>, String)> {
+        self.sessions
+            .get(id)
+            .map(|s| (s.cwd.clone(), s.title.clone(), s.agent.clone()))
     }
 
     /// 最近有动静的那条会话在哪个目录。

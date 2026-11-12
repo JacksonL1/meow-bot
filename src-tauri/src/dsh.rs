@@ -579,6 +579,33 @@ impl Default for ProbeView {
     }
 }
 
+/// 续聊一条会话要的三样：**完整目录** / 标题 / 能不能续。
+///
+/// 为什么必须从磁盘投影取（2026-11-12 用户报「指定哪个 session 就发到哪个 session」）：
+/// `reconcile()` 只把"最近还在动"的会话喂给状态机（`ACTIVE_WINDOW_MS` + `MAX_FEED`），
+/// 而看板上列的是磁盘上的**全部**会话。于是历史会话在界面上能点、在状态机里查不到，
+/// 一发送就回"这条会话已经不在了"。这里读的是 `identity.cwd`——DSH 按目录分桶存会话，
+/// 续聊时的 cwd 必须是**这条会话自己的**目录，不是"最近干过活的那个"。
+///
+/// 完整路径只在这个结构里流转，不出宿主进程（SEC-09）。
+pub struct SessionTarget<'a> {
+    pub cwd: Option<&'a str>,
+    pub title: Option<&'a str>,
+    /// false = 这条记过 `agentPreset`（桌面端 / 网页端建的），一次性 runner 写不进去。
+    pub can_resume: bool,
+}
+
+impl ProbeView {
+    /// 按 id 找一条会话。**找不到就是找不到**，不要在这里退化成"新起一条"。
+    pub fn target(&self, id: &str) -> Option<SessionTarget<'_>> {
+        self.sessions.iter().find(|o| o.id == id).map(|o| SessionTarget {
+            cwd: o.cwd.as_deref(),
+            title: o.title.as_deref(),
+            can_resume: o.agent_preset.is_none(),
+        })
+    }
+}
+
 fn stamp_of(p: &PathBuf) -> Option<(u64, u64)> {
     let md = std::fs::metadata(p).ok()?;
     let mtime = md
@@ -860,6 +887,9 @@ fn payload(o: &Obs, event: &str) -> Value {
     let mut m = serde_json::Map::new();
     m.insert("session_id".into(), json!(o.id));
     m.insert("event".into(), json!(event));
+    // 平台是**这里**确知的：这份观测就是我们从 DSH 的存储里读出来的。
+    // 不写的话 state.rs 只能把它记成 unknown，而"这条能不能续"恰恰要看平台。
+    m.insert("agent".into(), json!("dsh"));
     // 标题/目录/关键词每拍都带：state.rs 那边的语义是"粘的，只有真的拿到才写",
     // 所以重复带同一个值不会被当成覆盖，改了标题也能立刻反映。
     if let Some(t) = &o.title {
@@ -1295,5 +1325,36 @@ mod tests {
                     .to_string()
             })
             .collect()
+    }
+
+    #[test]
+    fn the_say_target_comes_from_disk_with_its_own_full_cwd() {
+        // 一条桌面端会话（SAMPLE 里带 agentPreset）+ 一条 headless 会话。
+        let desktop = parse_session("session-desktop", SAMPLE, 0).unwrap();
+        let headless = parse_session("session-headless", SAMPLE_HEADLESS, 0).unwrap();
+        let view = ProbeView {
+            sessions: vec![desktop, headless],
+            ..Default::default()
+        };
+        // headless 那条：能续，而且目录是**它自己的**（不是最近干活那个目录）。
+        let t = view.target("session-headless").expect("磁盘上有的会话必须找得到");
+        assert!(t.can_resume);
+        assert_eq!(t.cwd, Some("E:\\JacksonLee\\project\\clawd-starter"));
+        assert_eq!(t.title, Some("probe"));
+        // 桌面端那条：找得到，但**不许续**——这条要在打开输入窗时就说，不是发送时才报错。
+        let d = view.target("session-desktop").unwrap();
+        assert!(!d.can_resume);
+        assert_eq!(d.cwd, Some("E:\\JacksonLee\\project\\DeepseekWorkSpace"));
+        // 不存在的 id：None。调用方拿它报错，而不是退化成"新起一条"。
+        assert!(view.target("session-nope").is_none());
+    }
+
+    #[test]
+    fn the_dsh_payload_names_its_own_platform() {
+        // 不写 agent 的话，状态机只能把 DSH 的会话记成 unknown，
+        // 而"这条能不能被 dsh 续"恰恰要靠平台判断。
+        let o = obs("s", false, None, 0);
+        let p = payload(&o, "SessionStart");
+        assert_eq!(p.get("agent").and_then(|a| a.as_str()), Some("dsh"));
     }
 }

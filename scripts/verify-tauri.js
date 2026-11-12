@@ -49,7 +49,7 @@ process.env.CLAWD_PORT_FILE = PORT_FILE;
 const DSH_FIXTURE = path.join(TMP_ROOT, "dsh-home");
 const DSH_FIXTURE_ID = "session-dsh-verify";
 
-function writeDshFixture(phase, promptAt) {
+function writeDshFixture(phase, promptAt, id = DSH_FIXTURE_ID, cwd = "E:\\JacksonLee\\project\\clawd-starter") {
   const dir = path.join(DSH_FIXTURE, "storages", "session_projcache", "sessions");
   fs.mkdirSync(dir, { recursive: true });
   const openStep =
@@ -65,7 +65,7 @@ function writeDshFixture(phase, promptAt) {
   const record = {
     version: 7,
     record: {
-      identity: { createdAt: Date.now(), cwd: "E:\\JacksonLee\\project\\clawd-starter" },
+      identity: { createdAt: Date.now(), cwd },
       rows: {
         sessionStats: {
           ver: 1,
@@ -107,8 +107,42 @@ function writeDshFixture(phase, promptAt) {
       },
     },
   };
-  fs.writeFileSync(path.join(dir, DSH_FIXTURE_ID + ".json"), JSON.stringify(record));
+  fs.writeFileSync(path.join(dir, id + ".json"), JSON.stringify(record));
 }
+
+// ---------- 假 dsh：只记录"被怎么叫起来的"，不调模型 ----------
+//
+// 为什么需要它（2026-11-12）：用户要求「指定哪个 session 就发到哪个 session」。
+// 这句话的判据不在 UI 上，而在**真正 spawn 出去的那条命令行**里——
+// `--session-id` 是不是被点中的那个、cwd 是不是那条会话自己的目录。
+// 真跑一次 DSH 要 8 秒起、还花钱，而且它的回答内容不是我们要钉的东西。
+// 所以造一个 npm 布局的假 dsh（`node_modules/@deepseek-ai/dsh/lib/bin.js`），
+// 让 `say::locate()` 走最真实的那条定位路径找到它；它把 argv / cwd / stdin
+// 写进一个文件，再按真 dsh 的形状吐两行 NDJSON 收尾。
+const FAKE_DSH_DIR = path.join(TMP_ROOT, "fake-dsh");
+const FAKE_DSH_LOG = path.join(TMP_ROOT, "fake-dsh-call.json");
+const FAKE_BIN = path.join(FAKE_DSH_DIR, "node_modules", "@deepseek-ai", "dsh", "lib");
+fs.mkdirSync(FAKE_BIN, { recursive: true });
+fs.writeFileSync(
+  path.join(FAKE_BIN, "bin.js"),
+  `const fs=require("fs");
+if(process.argv.includes("--dump-config")){process.stdout.write("");process.exit(0);}
+let input="";
+process.stdin.on("data",(c)=>(input+=c));
+process.stdin.on("end",()=>{
+  const rec={argv:process.argv.slice(2),cwd:process.cwd(),text:input};
+  fs.writeFileSync(process.env.CLAWD_FAKE_DSH_LOG,JSON.stringify(rec));
+  const i=rec.argv.indexOf("--session-id");
+  const sid=i>=0?rec.argv[i+1]:"session-fake-new";
+  process.stdout.write(JSON.stringify({type:"session",sessionId:sid,cwd:rec.cwd})+"\\n");
+  process.stdout.write(JSON.stringify({type:"final",text:"fake dsh got it"})+"\\n");
+  process.exit(0);
+});
+`
+);
+const samePath = (a, b) =>
+  String(a || "").replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase() ===
+  String(b || "").replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
 
 const RELEASE = process.argv.includes("--release");
 const EXE = path.join(
@@ -334,6 +368,10 @@ async function main() {
       CLAWD_PORT_FILE: PORT_FILE,
       // 指向临时夹具，不碰用户真实的 ~/.dsh
       DSH_HOME: DSH_FIXTURE,
+      // 「指定哪条会话就发进哪条」那一节要读真实命令行，不能真调模型。
+      // 把假 dsh 放在 PATH 最前面：`say::locate()` 走的就是这条定位路径。
+      PATH: FAKE_DSH_DIR + path.delimiter + (process.env.PATH || ""),
+      CLAWD_FAKE_DSH_LOG: FAKE_DSH_LOG,
       // WebView2 认这个变量：注入 Chromium 命令行开关。
       // 这是 Tauri 版能被 CDP 驱动的前提，也是当年整套 Electron 回归能平移过来的原因。
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${CDP_PORT}`,
@@ -664,7 +702,14 @@ async function main() {
     //
     // 三个入口都在这里测：泡泡底部的「说一句」（新会话）、行右侧的 ✎（对着这条说）、
     // 以及——最要紧的——**输入窗自己有没有资格调别的窗口的命令**。
-    await post("/state", { session_id: "s-say", event: "UserPromptSubmit", title: "对着这条说" }, ep.token);
+    // 夹具必须带 cwd：目标行的"· 目录"应该由**目录**写出来。
+    // 2026-11-12 之前这条断言是靠"桌面端会话，写不进去"那句警告里的 · 蒙混通过的——
+    // 那次把 live-only 的会话误判成不可续，警告一没，断言才露出它本来什么都没验。
+    await post(
+      "/state",
+      { session_id: "s-say", event: "UserPromptSubmit", title: "对着这条说", cwd: ROOT },
+      ep.token
+    );
     await sleep(1200);
 
     ok("点泡泡底部「说一句」→ 交给宿主", (await R.eval("window.petDebug.clickSayNew()")) === true);
@@ -691,6 +736,14 @@ async function main() {
       const st2 = JSON.parse((await W.eval("JSON.stringify(window.composeDebug.state())")) || "{}");
       ok("点某一行的 ✎ → 目标变成那条会话", /对着这条说/.test(st2.to || ""), JSON.stringify(st2.to));
       ok("目标行同时报出了它属于哪个目录", /·/.test(st2.to || ""), JSON.stringify(st2.to));
+      // 这条是 2026-11-12 改出来的：以前"能不能续"只看磁盘投影里有没有，
+      // 于是只存在于状态机里的会话（比如刚通过 hook 报上来的那条）被误判成
+      // "桌面端会话，写不进去"，一发送就悄悄换成新会话。
+      ok(
+        "活态会话不再被误判成「写不进去」",
+        !/写不进去/.test(st2.to || "") && !/写不进去/.test(st2.msg || ""),
+        JSON.stringify(st2.msg)
+      );
 
       // 空文字不许发出去（也不该起进程）
       const empty = String(
@@ -1177,6 +1230,93 @@ async function main() {
       D.close();
     }
     await R.eval("window.clawd.toggleDashboard(), 1");
+
+    // ---------- 9.5 指定哪条会话就发进哪条（2026-11-12） ----------
+    //
+    // 用户原话：「发送消息的时候，我需要实现的是，指定哪个 session 就发送到哪个
+    // session 里」。毛病不在命令行怎么拼，而在**查找**：看板列的是磁盘上的全部
+    // DSH 会话，状态机里却只有"最近还在动"的那些，于是历史会话一发送就回
+    // 「这条会话已经不在了」。所以夹具刻意造一条**一小时前**的会话：
+    // 它必须在磁盘投影里、且**不在**状态机里——否则这一节什么也证明不了。
+    const HISTORY_ID = "session-dsh-history";
+    writeDshFixture("idle", Date.now() - 3600_000, HISTORY_ID, TMP_ROOT);
+    let probeHas = false;
+    for (let i = 0; i < 40 && !probeHas; i++) {
+      const v = JSON.parse((await R.eval("window.clawd.dshState().then(s=>JSON.stringify(s))")) || "null");
+      probeHas = !!(v && (v.sessions || []).some((s) => s.id === HISTORY_ID));
+      if (!probeHas) await sleep(200);
+    }
+    ok("历史会话在磁盘投影里（看板就是靠它列出这条的）", probeHas);
+    const live0 = JSON.parse((await post("/state", null, ep.token, { method: "GET" })).body || "{}");
+    ok(
+      "它不在状态机里（这正是以前一查就说「不在了」的原因）",
+      !(live0.sessions || []).some((s) => s.id === HISTORY_ID)
+    );
+
+    const bogus = String(
+      await R.eval("window.clawd.saySend('session-not-here','x').then(()=>'ALLOWED').catch(e=>'ERR:'+String(e))")
+    );
+    ok("指定一条不存在的会话 → 报错，而不是悄悄新起一条", /^ERR:/.test(bogus), bogus.slice(0, 70));
+    ok("那一次没有起任何 dsh 进程", !fs.existsSync(FAKE_DSH_LOG));
+
+    await post(
+      "/state",
+      { session_id: "wb-target", event: "UserPromptSubmit", title: "别家的会话", cwd: TMP_ROOT, agent: "workbuddy" },
+      ep.token
+    );
+    const other = String(
+      await R.eval("window.clawd.saySend('wb-target','x').then(()=>'ALLOWED').catch(e=>'ERR:'+String(e))")
+    );
+    ok("指定别家 agent 的会话 → 明说不能写，不塞进 dsh", /ERR:.*workbuddy/.test(other), other.slice(0, 90));
+    ok("那一次同样没有起 dsh 进程", !fs.existsSync(FAKE_DSH_LOG));
+
+    const sent = String(
+      await R.eval(
+        `window.clawd.saySend(${JSON.stringify(HISTORY_ID)},'只发给历史那一条').then(r=>JSON.stringify(r)).catch(e=>'ERR:'+String(e))`
+      )
+    );
+    const sentObj = sent.startsWith("{") ? JSON.parse(sent) : null;
+    ok("指定历史会话发送 → 宿主受理", !!sentObj && sentObj.ok === true, sent.slice(0, 90));
+    ok("回执里的目标就是被点中的那一条", !!sentObj && sentObj.target === HISTORY_ID, sentObj ? sentObj.target : sent.slice(0, 60));
+
+    let rec = null;
+    for (let i = 0; i < 50 && !rec; i++) {
+      if (fs.existsSync(FAKE_DSH_LOG)) {
+        try {
+          rec = JSON.parse(fs.readFileSync(FAKE_DSH_LOG, "utf8"));
+        } catch {}
+      }
+      if (!rec) await sleep(100);
+    }
+    ok("这一发真的起了 dsh（不是凭空返回成功）", !!rec);
+    const at = rec ? rec.argv.indexOf("--session-id") : -1;
+    ok(
+      "命令行里带的就是被点中的那个 session id",
+      !!rec && at >= 0 && rec.argv[at + 1] === HISTORY_ID,
+      rec ? rec.argv.join(" ") : "没有记录"
+    );
+    ok("工作目录是这条会话自己的目录（不是最近干活的那个）", !!rec && samePath(rec.cwd, TMP_ROOT), rec ? rec.cwd : "");
+    ok(
+      "那句话从 stdin 进去，没进 argv",
+      !!rec && rec.text.includes("只发给历史那一条") && !rec.argv.join(" ").includes("只发给历史那一条"),
+      rec ? rec.text.slice(0, 40) : ""
+    );
+
+    const ct = String(
+      await R.eval(
+        `window.clawd.openCompose(${JSON.stringify(HISTORY_ID)}).then(t=>JSON.stringify(t)).catch(e=>'ERR:'+String(e))`
+      )
+    );
+    const cto = ct.startsWith("{") ? JSON.parse(ct) : null;
+    ok("输入窗的目标就是那条历史会话（不是「新会话」）", !!cto && cto.id === HISTORY_ID, ct.slice(0, 80));
+    ok("它被认为可以续（不是误判成桌面端会话）", !!cto && cto.can_resume === true && !cto.reason, ct.slice(0, 90));
+    ok("输入窗报出的目录来自这条会话自己", !!cto && /clawd-verify-tauri/.test(cto.cwd || ""), cto ? String(cto.cwd) : "");
+    const comp = await waitTarget((u) => u.includes("compose"), 4000);
+    if (comp) {
+      const W2 = await Cdp.connect(comp.webSocketDebuggerUrl);
+      await W2.eval("window.clawd.composeClose(), 1");
+      W2.close();
+    }
 
     // ---------- 10. 单实例锁 ----------
     // 测的是"第二份进程不该活着"，但真正要钉的判据是**端点文件一个字节都没变**。
