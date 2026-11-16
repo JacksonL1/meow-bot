@@ -1232,7 +1232,7 @@ fn say_send(
         l.from
     );
 
-    let (child, captured) = match say::start(&l, id.as_deref(), &cwd, &text) {
+    let (child, mut captured) = match say::start(&l, id.as_deref(), &cwd, &text) {
         Ok(c) => c,
         Err(e) => {
             st.say_jobs.lock().unwrap().remove(&key);
@@ -1243,8 +1243,23 @@ fn say_send(
     let emit_id = id.clone();
     let job_key = key.clone();
     let said = text.clone();
+    let retry_cwd = cwd.clone();
     std::thread::spawn(move || {
-        let verdict = say::wait(child, &cancel);
+        let mut verdict = say::wait(child, &cancel);
+        // 写锁竞争是**按操作**的租约：桌面端打开/加载/收尾补写都会短暂占一下，
+        // 并不是"这条会话一直开在别处"。所以撞上了先隔一会儿再发一次——
+        // 大多数情况第二次就过了；真被长期占着时，也只是晚 1.5 秒给出同样的原因。
+        if say::is_contended(&verdict) && !cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            eprintln!("[say] 会话被写锁占着，1.5s 后重试一次 id={emit_id:?}");
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            match say::start(&l, emit_id.as_deref(), &retry_cwd, &said) {
+                Ok((child2, cap2)) => {
+                    captured = cap2;
+                    verdict = say::wait(child2, &cancel);
+                }
+                Err(e) => verdict = say::Verdict::Failed(e),
+            }
+        }
         // 先取快照再收尾：`captured` 里的 id 是**新会话真正的那一个**，
         // 前端只有拿到它，看板才能把这次的回答挂到正确的卡片上。
         let (sid, reply) = {

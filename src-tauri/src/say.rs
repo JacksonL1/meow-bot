@@ -572,6 +572,22 @@ pub fn wait(mut child: Child, cancel: &AtomicBool) -> Verdict {
     Verdict::Failed(explain(&text))
 }
 
+/// 「这条会话被另一个写者占着」的固定文案。
+///
+/// 为什么单独拎成常量（2026-11-16）：DSH 的写租约是**按操作**持有的——
+/// 桌面端打开、加载、收尾补写都会短暂占一下，并不要求"会话一直开着"。
+/// 所以这个错经常是"隔一秒再发就过了"。`say_send` 靠它判断要不要重试一次；
+/// 如果只当普通失败文案转述，用户会看到一句"等它关掉"，而实际上根本没有
+/// 一个长期占着的"它"可等。
+pub const CONTENDED_MSG: &str =
+    "这条会话正被另一个 dsh 写者占用：多半是桌面端正打开或刚写完它，也可能上一次发送还没退出。\
+     等一两秒再发；反复出现就关掉桌面端里那条会话";
+
+/// 这次失败是不是「写锁被别人占着」。写锁通常只持有很短一段时间，值得重试一次。
+pub fn is_contended(v: &Verdict) -> bool {
+    matches!(v, Verdict::Failed(m) if m == CONTENDED_MSG)
+}
+
 /// 把 DSH 的 stderr 翻成一句人话。
 ///
 /// 为什么值得单独一个函数：dsh 的报错是给开发者看的，而这里要显示在一个 380px 宽的
@@ -596,7 +612,7 @@ pub fn explain(raw: &str) -> String {
         return "这条会话属于另一个工作目录，没法从这儿接着写".to_string();
     }
     if body.contains("already owned by an active write handle") {
-        return "另一个 dsh 正开着这条会话，等它关掉再发".to_string();
+        return CONTENDED_MSG.to_string();
     }
     if body.contains("MISSING_CREDENTIAL") {
         return "找不到 API key：`dsh` 的凭据没配好（见 README 的『供应商』一节）".to_string();
@@ -897,6 +913,18 @@ mod tests {
     fn explain_handles_empty_stderr() {
         assert!(explain("").contains("没有说原因"));
         assert!(explain("   \n\n").contains("没有说原因"));
+    }
+
+    /// 写锁竞争：翻译成可操作的说明，并且**能被 say_send 认出来去重试**
+    /// （2026-11-16 用户问「为什么返回另一个 dsh 正开着这条会话」——这个错
+    ///  并不要求会话一直开着，它是按操作持有的租约，所以值得再试一次）。
+    #[test]
+    fn explain_names_the_write_lease_contention_for_retry() {
+        let raw = "dsh: session \"session-1\" is already owned by an active write handle\n";
+        assert_eq!(explain(raw), CONTENDED_MSG);
+        assert!(is_contended(&Verdict::Failed(CONTENDED_MSG.to_string())));
+        assert!(!is_contended(&Verdict::Failed("别的原因".to_string())));
+        assert!(!is_contended(&Verdict::Ok));
     }
 
     // 桌面版那条路拼的是"当前版本的内部布局"。上游换了布局就只有这一句英文，
