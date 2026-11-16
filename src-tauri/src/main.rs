@@ -1247,18 +1247,39 @@ fn say_send(
     std::thread::spawn(move || {
         let mut verdict = say::wait(child, &cancel);
         // 写锁竞争是**按操作**的租约：桌面端打开/加载/收尾补写都会短暂占一下，
-        // 并不是"这条会话一直开在别处"。所以撞上了先隔一会儿再发一次——
-        // 大多数情况第二次就过了；真被长期占着时，也只是晚 1.5 秒给出同样的原因。
-        if say::is_contended(&verdict) && !cancel.load(std::sync::atomic::Ordering::SeqCst) {
-            eprintln!("[say] 会话被写锁占着，1.5s 后重试一次 id={emit_id:?}");
-            std::thread::sleep(std::time::Duration::from_millis(1500));
+        // 并不是"这条会话一直开在别处"。所以撞上了先隔一会儿再发——大多数情况
+        // 第二次就过了；真的被长期占着，也只是晚几秒给出同样的原因。
+        //
+        // 退避两档而不是一次（2026-11-16 用户实测「发了两次都是同样的返回」）：
+        // 一次 1.5s 覆盖不了"另一个操作正写到一半"的情形，而 3s 足够它收尾。
+        for wait_ms in [1200u64, 3000] {
+            if !say::is_contended(&verdict) || cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            eprintln!("[say] 会话被写锁占着，{wait_ms}ms 后重试 id={emit_id:?}");
+            std::thread::sleep(std::time::Duration::from_millis(wait_ms));
             match say::start(&l, emit_id.as_deref(), &retry_cwd, &said) {
                 Ok((child2, cap2)) => {
                     captured = cap2;
                     verdict = say::wait(child2, &cancel);
                 }
-                Err(e) => verdict = say::Verdict::Failed(e),
+                Err(e) => {
+                    verdict = say::Verdict::Failed(e);
+                    break;
+                }
             }
+        }
+        // 重试用尽仍然是写锁：把现场留下来（锁文件在不在、多久之前动过）。
+        // 用户报"怎么发都不行"时，这条是唯一能区分"真有人占着"和"锁已经放了"的证据。
+        if say::is_contended(&verdict) {
+            let probe = say::probe_lock(emit_id.as_deref().unwrap_or(""));
+            eprintln!("[say] 写锁现场：{probe}");
+            say::append_diag(&format!(
+                "[{}] 写锁竞争未解除 target={:?} cwd={retry_cwd} from={} probe={probe}\n",
+                say::now_secs(),
+                emit_id,
+                l.from
+            ));
         }
         // 先取快照再收尾：`captured` 里的 id 是**新会话真正的那一个**，
         // 前端只有拿到它，看板才能把这次的回答挂到正确的卡片上。

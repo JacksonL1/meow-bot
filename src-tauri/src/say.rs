@@ -569,6 +569,13 @@ pub fn wait(mut child: Child, cancel: &AtomicBool) -> Verdict {
     if status.success() {
         return Verdict::Ok;
     }
+    // 失败原因只在这台机器上看得见（用户多半是双击启动，stderr 无处可见）。
+    // 留一份原文：一次"怎么发都失败"的排查，最贵的就是拿不到 DSH 自己的那行字。
+    append_diag(&format!(
+        "[{}] dsh 非零退出，stderr 尾部：\n{}\n",
+        now_secs(),
+        text.trim()
+    ));
     Verdict::Failed(explain(&text))
 }
 
@@ -586,6 +593,74 @@ pub const CONTENDED_MSG: &str =
 /// 这次失败是不是「写锁被别人占着」。写锁通常只持有很短一段时间，值得重试一次。
 pub fn is_contended(v: &Verdict) -> bool {
     matches!(v, Verdict::Failed(m) if m == CONTENDED_MSG)
+}
+
+/// 写锁竞争的现场取证（2026-11-16）。
+///
+/// 为什么需要：这个错只说"有人正占着写句柄"，而用户能把三个嫌疑人都排除掉
+/// （客户端没开那条、桌宠没在跑、终端没有 dsh）——光一句翻译，谁也不知道该关什么。
+/// 这里只回答两个**可观测**的事实，不猜：
+///   1. 这条会话的目录里现在有没有 `session.lock`，多久之前被动过；
+///   2. 同一个 id 出现在几个目录桶里（会话按 cwd 分桶，id 只在桶内唯一）。
+///
+/// 判读方法：报错那一刻锁文件还在 = 真有一个持有者，且它一直没放手；
+/// 锁文件已经不在 = 锁在报错后立刻释放了，属于瞬时冲突（重试本该能过）。
+pub fn probe_lock(id: &str) -> String {
+    if id.is_empty() {
+        return "（新会话，没有目标 id）".to_string();
+    }
+    let Some(home) = crate::dsh::home() else {
+        return "找不到 DSH_HOME".to_string();
+    };
+    let root = home.join("sessions");
+    let Ok(buckets) = std::fs::read_dir(&root) else {
+        return "找不到 sessions 目录".to_string();
+    };
+
+    let mut hits: Vec<String> = Vec::new();
+    for b in buckets.flatten() {
+        let dir = b.path().join(id);
+        if !dir.is_dir() {
+            continue;
+        }
+        let bucket = b.file_name().to_string_lossy().to_string();
+        match std::fs::metadata(dir.join("session.lock")) {
+            Ok(m) => {
+                let age = m
+                    .modified()
+                    .ok()
+                    .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                hits.push(format!("{bucket}：锁存在（{age} 秒前动过）"));
+            }
+            Err(_) => hits.push(format!("{bucket}：无锁文件")),
+        }
+    }
+    if hits.is_empty() {
+        return "没找到这条会话的目录（id 与 cwd 对不上？）".to_string();
+    }
+    hits.join("；")
+}
+
+/// 失败现场写进 `%TEMP%\clawd-say-diag.txt`（追加）。
+///
+/// 为什么不只 eprintln：用户多半是双击启动的，stderr 没有一个能看见的地方；
+/// 而这条线索恰恰只在他那台机器上。写文件是唯一不需要他复制粘贴的办法。
+pub fn append_diag(msg: &str) {
+    use std::io::Write as _;
+    let p = std::env::temp_dir().join("clawd-say-diag.txt");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+        let _ = writeln!(f, "{msg}");
+    }
+}
+
+/// 给诊断行用的时间戳（epoch 秒）。
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// 把 DSH 的 stderr 翻成一句人话。
