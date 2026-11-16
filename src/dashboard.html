@@ -198,15 +198,17 @@
       .group > ul {
         padding-left: 19px;
       }
-      /* 「还有 N 条」：不是一张卡片，是一条虚线边的"翻页口子"。
-         做成虚线是为了让它看起来像"列表的边界"，而不是又一个会话。 */
-      li.more {
+      /* 「还有 N 条」/「历史一次性会话」：都不是一张卡片，是一条虚线边的
+         "翻页口子"。做成虚线是为了让它看起来像"列表的边界"，而不是又一个会话。 */
+      li.more,
+      li.htoggle {
         background: none;
         border: 1px dashed var(--line);
         padding: 2px;
         align-items: center;
       }
-      li.more button {
+      li.more button,
+      li.htoggle button {
         border: none;
         background: none;
         color: var(--muted);
@@ -214,7 +216,8 @@
         width: 100%;
         padding: 3px 6px;
       }
-      li.more button:hover {
+      li.more button:hover,
+      li.htoggle button:hover {
         color: var(--text);
         border: none;
       }

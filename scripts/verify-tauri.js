@@ -1270,6 +1270,55 @@ async function main() {
         JSON.stringify((wb && wb.text || "").slice(0, 60))
       );
 
+      // ---- 9.2.1 headless 一次性历史收进折叠分组（2026-11-16） ----
+      //
+      // 用户原话：「DSH 为什么会有 56 条 session？我在 DSH 客户端上只看到了 5 条」。
+      // 看板列的是磁盘上全部投影文件，其中大半是 `dsh headless` 一次性跑的残留。
+      // 默认它们该收进「历史一次性会话」折叠组，主列表只留正常会话；
+      // 折叠组里的卡片必须是完整的（headless 恰恰是能续聊的那批，藏起功能不行）。
+      // 判据是 has_stats（headless 不写 sessionStats），和宿主 dsh.rs 的语义一致。
+      const hl = JSON.parse(
+        (await D.eval(
+          `(()=>{window.dashboardDebug.render({visual:'idle',sessions:[]},[
+              {agent:'dsh',id:'hl-gate-1',title:'一次性任务',last_prompt:'跑一下就收工',has_stats:false,can_say:true,updated_ms:Date.now()-30000},
+              {agent:'dsh',id:'nm-gate-1',title:'正常会话',last_prompt:'该在主列表里',has_stats:true,updated_ms:Date.now()-60000}]);
+            const g=document.querySelector('#groups .group.a-dsh');
+            const btn=g.querySelector('.htoggle button');
+            const collapsed={toggle:!!btn,text:btn?btn.textContent:'',
+              hasHeadless:document.getElementById('groups').textContent.includes('跑一下就收工'),
+              hasNormal:document.getElementById('groups').textContent.includes('该在主列表里')};
+            window.dashboardDebug.toggleHeadless('dsh');
+            const btn2=document.querySelector('#groups .group.a-dsh .htoggle button');
+            const expanded={text:btn2?btn2.textContent:'',
+              hasHeadless:document.getElementById('groups').textContent.includes('跑一下就收工'),
+              cards:document.querySelectorAll('#groups .group.a-dsh li:not(.more):not(.htoggle)').length};
+            window.dashboardDebug.toggleHeadless('dsh');
+            const back={hasHeadless:document.getElementById('groups').textContent.includes('跑一下就收工'),
+              hasNormal:document.getElementById('groups').textContent.includes('该在主列表里')};
+            return JSON.stringify({collapsed,expanded,back});})()`
+        )) || "null"
+      );
+      ok(
+        "headless 历史默认不在正文里，正常会话在",
+        !!hl && !hl.collapsed.hasHeadless && hl.collapsed.hasNormal,
+        JSON.stringify(hl && hl.collapsed)
+      );
+      ok(
+        "折叠组那一行写明内容和条数",
+        !!hl && /历史一次性会话/.test(hl.collapsed.text || "") && /（\d+ 条）/.test(hl.collapsed.text || ""),
+        hl ? hl.collapsed.text : "null"
+      );
+      ok(
+        "展开后 headless 会话可见（整张卡片，不是一行摘要）",
+        !!hl && hl.expanded.hasHeadless && hl.expanded.cards === 2,
+        JSON.stringify(hl && hl.expanded)
+      );
+      ok(
+        "再点一次收起，headless 卡片撤出 DOM，正常会话不受影响",
+        !!hl && !hl.back.hasHeadless && hl.back.hasNormal,
+        JSON.stringify(hl && hl.back)
+      );
+
       // 收摊：夹具用完就撤，后面的章节不该多出一条会话
       fs.rmSync(DSH_FIXTURE, { recursive: true, force: true });
       await sleep(600);

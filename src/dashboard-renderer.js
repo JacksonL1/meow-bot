@@ -117,6 +117,26 @@ function saveCollapsed() {
 const SHOW_LIMIT = 8;
 const expandedGroups = new Set();
 
+// ---- headless 一次性会话收进折叠分组（2026-11-16）----
+//
+// 用户原话：「DSH 为什么会有 56 条 session？我在 DSH 客户端上只看到了 5 条」。
+// 原因：看板列的是磁盘上全部投影文件，其中 46 条是 `dsh headless` 的一次性
+// 残留（多数是我们自己的验证跑出来的），DSH 客户端从来不展示它们。
+//
+// 折叠判据用 `has_stats === false`：headless 会话不写 sessionStats，这是
+// 宿主侧（dsh.rs）一直在序列化的字段，不用新加。两个刻意保留：
+//   · **活着的**会话（桌宠正在演的）永远留在主列表——收起"正在发生的事"等于
+//     让猫对着一条看不见的会话演戏；
+//   · 折叠组里的卡片是**完整的卡片**，不是一行摘要——headless 恰恰是
+//     能从桌宠续聊的那批会话，藏起来等于把功能也藏了。
+// 展开状态和 expandedGroups 一样记在内存里：翻一眼是临时动作，不是偏好。
+const headlessExpanded = new Set();
+
+/** 这条会话是不是该归进「历史一次性会话」折叠组。 */
+function isArchivedHeadless(r) {
+  return !r.live && String(r.agent) === "dsh" && !(r.rich && r.rich.has_stats);
+}
+
 // ---- 卡片 ----
 
 /** key = `agent/id`：两个平台各有一条同名会话时不能互相顶掉。 */
@@ -226,6 +246,16 @@ function makeGroup(agent) {
     tick();
   });
 
+  // 「历史一次性会话」折叠组（只有 dsh 组会真的把它放进 DOM）。
+  // 点一下展开/收起；走 toggleHeadless() 同步重渲染——比等下一拍轮询
+  // 更跟手，而且让 dashboardDebug 喂数据的闸门测试也能立刻看到结果。
+  const hToggle = document.createElement("li");
+  hToggle.className = "htoggle";
+  const hBtn = document.createElement("button");
+  hBtn.type = "button";
+  hToggle.append(hBtn);
+  hBtn.addEventListener("click", () => toggleHeadless(agent));
+
   sec.append(gh, ul);
 
   const toggle = () => {
@@ -242,7 +272,7 @@ function makeGroup(agent) {
     }
   });
 
-  const g = { sec, ul, more, moreBtn, name, meta, note, agent };
+  const g = { sec, ul, more, moreBtn, hToggle, hBtn, name, meta, note, agent };
   applyCollapsed(agent, g);
   return g;
 }
@@ -314,17 +344,120 @@ function cmpRow(a, b) {
   return stamp(b) - stamp(a);
 }
 
+/** 最近一次 render 拿到的两路数据。折叠组点开/收起时用它同步重渲染，
+ *  不用等下一拍轮询；dashboardDebug 喂进来的假数据也走这条路。 */
+let lastRender = { snapshot: null, rich: [] };
+
+/** 展开/收起「历史一次性会话」折叠组。同步重渲染，立刻生效。 */
+function toggleHeadless(agent) {
+  if (headlessExpanded.has(agent)) headlessExpanded.delete(agent);
+  else headlessExpanded.add(agent);
+  const { snapshot, rich } = lastRender;
+  render(snapshot, rich);
+}
+
+/** 填一张卡片的内容。DOM 节点在 makeCard 里只建一次，这里每次 render 重写。 */
+function fillCard(card, s, agent, dominantVisual) {
+  card.id = String(s.id);
+  // DSH 的会话在图状态机里有全路径（按裸 id 查）；磁盘扫出来的那几家只有
+  // 宿主侧那份 `agent/id`。这个差别由宿主兜底，这里只把两种都送对。
+  card.copyKey = agent === "dsh" ? String(s.id) : `${agent}/${s.id}`;
+  const r = s.rich || {};
+  card.canSay = Boolean(r.can_say);
+
+  // 1) 状态。没有活态的历史会话显示「记录」——它不是在做什么，它只是存在过。
+  const meta = STATE_META[s.state] || { label: "记录", cls: "b-sleeping" };
+  card.badge.textContent = meta.label;
+  card.badge.className = `badge ${meta.cls}`;
+
+  // 2) 标题 / 目录。演示模式藏标题和目录，理由和上一版一样（S6 的注释）：
+  //    目录名"低敏感但容易社死"，标题是用户自己说的第一句话，敏感度更高。
+  card.title.textContent = s.title ? (demoMode ? HIDDEN_TITLE : s.title) : "";
+  card.title.classList.toggle("untitled", !s.title);
+  card.li.classList.toggle("untitled", !s.title);
+  card.dir.textContent = demoMode ? HIDDEN_DIR : s.cwd || "（未知目录）";
+
+  // 3) 模型 + 供应商。用户自己配过供应商，所以这里不能写死任何名字。
+  //    `model_default` = 这条会话自己没记模型（headless 会话就是这样），
+  //    这个值是从 profile 的 agent-default-model 补来的。必须标出来：
+  //    "它就是这么配的"和"这条会话真的用了它"是两句话，混成一句就是在编。
+  const modelText = [r.model, r.provider].filter(Boolean).join(" · ");
+  card.model.textContent = modelText ? (r.model_default ? `${modelText}（默认）` : modelText) : "";
+  card.model.hidden = !modelText;
+  card.model.title = r.model_default
+    ? "这条会话没记模型，显示的是 headless profile 的默认模型"
+    : "";
+
+  // 4) 计数：轮数 / 进→出 / 上下文占用。**只显示有的**——
+  //    headless 会话没有 sessionStats，硬填 0 就是在编。
+  const bits = [];
+  if (r.turns) bits.push(`${r.turns} 轮`);
+  if (r.steps && r.steps !== r.turns) bits.push(`${r.steps} 步`);
+  if (r.tokens_in || r.tokens_out) {
+    bits.push(`${fmtTok(r.tokens_in)} → ${fmtTok(r.tokens_out)}`);
+  }
+  if (r.ctx_tokens && r.ctx_window) {
+    const pct = (r.ctx_tokens / r.ctx_window) * 100;
+    bits.push(`上下文 ${pct < 0.1 ? "<0.1" : pct.toFixed(1)}%`);
+  }
+  if (r.llm_ms) bits.push(`模型 ${fmtSpan(r.llm_ms)}`);
+  card.chip.textContent = bits.join(" · ");
+  card.chip.hidden = bits.length === 0;
+
+  // 5) 最后一轮：用户原话 + 回复开头。这是整张卡片的信息主体。
+  if (demoMode) {
+    card.ask.textContent = HIDDEN_TEXT;
+    card.ans.textContent = "";
+  } else {
+    card.ask.textContent = r.last_prompt || "";
+    card.ans.textContent = r.last_reply || "";
+  }
+
+  // 历史会话没有"闲置"，只有"多久以前"——两者都由 stamp() 算，语义一致。
+  card.idle.textContent = s.live ? fmtIdle(s.idleMs) : fmtIdle(Math.max(0, Date.now() - stamp(s)));
+
+  // 6) 底部提示：发送失败的原因留在这儿，比一闪而过的弹窗有用。
+  //    `sayErrors` 按**裸 session id** 存：那个事件只可能来自 DSH 的发送，
+  //    和卡片 key（`agent/id`）不是一回事。
+  const err = sayErrors.get(String(s.id));
+  card.note.classList.toggle("bad", Boolean(err));
+  if (err) {
+    card.note.textContent = err;
+  } else if (r.agent_preset) {
+    // 桌面端 / 网页端建的会话：一次性 runner 写不进去（原因见 say.rs）。
+    // 与其等用户点了「说一句」再被拒，不如现在就说清楚。
+    card.note.textContent = "桌面端会话 · 只能看";
+  } else {
+    card.note.textContent = "";
+  }
+  // 能不能续：宿主在窗口里也会判一次，这里灰掉只是少一次白跑。
+  card.say.disabled = !card.canSay;
+  card.say.title = !card.canSay
+    ? r.agent_preset
+      ? "这条是桌面端建的，DSH 不许一次性 runner 往里写；点了会在桌宠里新起一条"
+      : `${agentName(agent)} 没有可写的 CLI，这条会话只能看`
+    : "在桌宠那个小窗里对着这条会话说";
+
+  // 主导标记：这条正是桌宠此刻在演的那个状态
+  card.li.classList.toggle("dominant", s.state != null && s.state === dominantVisual);
+}
+
 function render(snapshot, rich) {
+  lastRender = { snapshot, rich };
   const rows = join(snapshot, rich);
   const dominantVisual = snapshot?.visual;
 
   // 顶部聚合：几条在跑 / 一共多少 token。比单纯一个"3"有用。
+  // 计数和 2026-11-16 的折叠分组同一口径：headless 历史单列，不混进"条数"里。
   const running = rows.filter(isRunning).length;
+  const archivedTotal = rows.filter(isArchivedHeadless).length;
+  const mainTotal = rows.length - archivedTotal;
   const tok = rows.reduce((a, r) => a + ((r.rich && r.rich.tokens_out) || 0), 0);
   el.sum.replaceChildren();
   const n = document.createElement("b");
-  n.textContent = String(rows.length);
+  n.textContent = String(mainTotal);
   el.sum.append(n, document.createTextNode(" 条"));
+  if (archivedTotal) el.sum.append(document.createTextNode(` · 历史 ${archivedTotal} 条`));
   if (running) el.sum.append(document.createTextNode(` · ${running} 条在跑`));
   if (tok) el.sum.append(document.createTextNode(` · 累计出 ${fmtTok(tok)} token`));
 
@@ -364,9 +497,17 @@ function render(snapshot, rich) {
     const list = byAgent.get(agent).sort(cmpRow);
     const run = list.filter(isRunning).length;
     const latest = Math.max(...list.map(stamp));
+
+    // headless 一次性历史收进折叠组（只有 dsh 有这个概念，见 isArchivedHeadless）。
+    // 活着的会话永远留在主列表：收起"正在发生的事"等于让猫演一条看不见的会话。
+    const archived = agent === "dsh" ? list.filter(isArchivedHeadless) : [];
+    const archivedSet = new Set(archived);
+    const main = archived.length ? list.filter((r) => !archivedSet.has(r)) : list;
+
     g.name.textContent = agentName(agent);
     g.meta.textContent =
-      `${list.length} 条` +
+      `${main.length} 条` +
+      (archived.length ? ` · 历史 ${archived.length} 条` : "") +
       (run ? ` · ${run} 条在跑` : "") +
       (latest ? ` · ${fmtIdle(Math.max(0, Date.now() - latest))}` : "");
 
@@ -379,9 +520,10 @@ function render(snapshot, rich) {
     applyCollapsed(agent, g);
 
     const shown =
-      expandedGroups.has(agent) || list.length <= SHOW_LIMIT ? list : list.slice(0, SHOW_LIMIT);
+      expandedGroups.has(agent) || main.length <= SHOW_LIMIT ? main : main.slice(0, SHOW_LIMIT);
 
-    shown.forEach((s, index) => {
+    /** 建卡、登记、放进这一组本轮的节点序列。主列表和折叠组共用同一套卡片。 */
+    const place = (s) => {
       const key = `${agent}/${s.id}`;
       seenKeys.add(key);
       let card = cards.get(key);
@@ -389,105 +531,41 @@ function render(snapshot, rich) {
         card = makeCard();
         cards.set(key, card);
       }
-      card.id = String(s.id);
-      card.key = key;
-      // DSH 的会话在图状态机里有全路径（按裸 id 查）；磁盘扫出来的那几家只有
-      // 宿主侧那份 `agent/id`。这个差别由宿主兜底，这里只把两种都送对。
-      card.copyKey = agent === "dsh" ? String(s.id) : key;
-      const r = s.rich || {};
-      card.canSay = Boolean(r.can_say);
+      fillCard(card, s, agent, dominantVisual);
+      nodes.push(card.li);
+    };
 
-      // 1) 状态。没有活态的历史会话显示「记录」——它不是在做什么，它只是存在过。
-      const meta = STATE_META[s.state] || { label: "记录", cls: "b-sleeping" };
-      card.badge.textContent = meta.label;
-      card.badge.className = `badge ${meta.cls}`;
-
-      // 2) 标题 / 目录。演示模式藏标题和目录，理由和上一版一样（S6 的注释）：
-      //    目录名"低敏感但容易社死"，标题是用户自己说的第一句话，敏感度更高。
-      card.title.textContent = s.title ? (demoMode ? HIDDEN_TITLE : s.title) : "";
-      card.title.classList.toggle("untitled", !s.title);
-      card.li.classList.toggle("untitled", !s.title);
-      card.dir.textContent = demoMode ? HIDDEN_DIR : s.cwd || "（未知目录）";
-
-      // 3) 模型 + 供应商。用户自己配过供应商，所以这里不能写死任何名字。
-      //    `model_default` = 这条会话自己没记模型（headless 会话就是这样），
-      //    这个值是从 profile 的 agent-default-model 补来的。必须标出来：
-      //    "它就是这么配的"和"这条会话真的用了它"是两句话，混成一句就是在编。
-      const modelText = [r.model, r.provider].filter(Boolean).join(" · ");
-      card.model.textContent = modelText ? (r.model_default ? `${modelText}（默认）` : modelText) : "";
-      card.model.hidden = !modelText;
-      card.model.title = r.model_default
-        ? "这条会话没记模型，显示的是 headless profile 的默认模型"
-        : "";
-
-      // 4) 计数：轮数 / 进→出 / 上下文占用。**只显示有的**——
-      //    headless 会话没有 sessionStats，硬填 0 就是在编。
-      const bits = [];
-      if (r.turns) bits.push(`${r.turns} 轮`);
-      if (r.steps && r.steps !== r.turns) bits.push(`${r.steps} 步`);
-      if (r.tokens_in || r.tokens_out) {
-        bits.push(`${fmtTok(r.tokens_in)} → ${fmtTok(r.tokens_out)}`);
-      }
-      if (r.ctx_tokens && r.ctx_window) {
-        const pct = (r.ctx_tokens / r.ctx_window) * 100;
-        bits.push(`上下文 ${pct < 0.1 ? "<0.1" : pct.toFixed(1)}%`);
-      }
-      if (r.llm_ms) bits.push(`模型 ${fmtSpan(r.llm_ms)}`);
-      card.chip.textContent = bits.join(" · ");
-      card.chip.hidden = bits.length === 0;
-
-      // 5) 最后一轮：用户原话 + 回复开头。这是整张卡片的信息主体。
-      if (demoMode) {
-        card.ask.textContent = HIDDEN_TEXT;
-        card.ans.textContent = "";
-      } else {
-        card.ask.textContent = r.last_prompt || "";
-        card.ans.textContent = r.last_reply || "";
-      }
-
-      // 历史会话没有"闲置"，只有"多久以前"——两者都由 stamp() 算，语义一致。
-      card.idle.textContent = s.live ? fmtIdle(s.idleMs) : fmtIdle(Math.max(0, Date.now() - stamp(s)));
-
-      // 6) 底部提示：发送失败的原因留在这儿，比一闪而过的弹窗有用。
-      //    `sayErrors` 按**裸 session id** 存：那个事件只可能来自 DSH 的发送，
-      //    和卡片 key（`agent/id`）不是一回事。
-      const err = sayErrors.get(String(s.id));
-      card.note.classList.toggle("bad", Boolean(err));
-      if (err) {
-        card.note.textContent = err;
-      } else if (r.agent_preset) {
-        // 桌面端 / 网页端建的会话：一次性 runner 写不进去（原因见 say.rs）。
-        // 与其等用户点了「说一句」再被拒，不如现在就说清楚。
-        card.note.textContent = "桌面端会话 · 只能看";
-      } else {
-        card.note.textContent = "";
-      }
-      // 能不能续：宿主在窗口里也会判一次，这里灰掉只是少一次白跑。
-      card.say.disabled = !card.canSay;
-      card.say.title = !card.canSay
-        ? r.agent_preset
-          ? "这条是桌面端建的，DSH 不许一次性 runner 往里写；点了会在桌宠里新起一条"
-          : `${agentName(agent)} 没有可写的 CLI，这条会话只能看`
-        : "在桌宠那个小窗里对着这条会话说";
-
-      // 主导标记：这条正是桌宠此刻在演的那个状态
-      card.li.classList.toggle("dominant", s.state != null && s.state === dominantVisual);
-
-      // 按排序结果调整 DOM 顺序（insertBefore 对已在正确位置的节点是空操作）
-      const at = g.ul.children[index];
-      if (at !== card.li) g.ul.insertBefore(card.li, at || null);
-    });
+    const nodes = [];
+    shown.forEach(place);
 
     // 「还有 N 条」永远在最后一行：append 对已在末尾的节点是移动，不是复制。
     // 不需要的时候**移出 DOM**，不是 hidden——留着它，"组里有几条会话"这件事
     // 在 DOM 上就多出一个人造节点（闸门数 li 的时候会数错）。
-    const rest = list.length - shown.length;
+    const rest = main.length - shown.length;
     if (rest > 0) {
       g.moreBtn.textContent = `还有 ${rest} 条（展开）`;
-      g.ul.append(g.more);
+      nodes.push(g.more);
     } else {
       g.more.remove();
     }
+
+    if (archived.length) {
+      const open = headlessExpanded.has(agent);
+      g.hBtn.textContent = open
+        ? `收起历史一次性会话（${archived.length} 条）`
+        : `历史一次性会话（${archived.length} 条）（展开）`;
+      g.hBtn.title = open
+        ? "这些是 dsh headless 一次性跑留下的历史，可以从中挑一条续聊"
+        : "DSH 每次一次性跑都会留一条会话记录，客户端不展示它们；点开可查看或续聊";
+      nodes.push(g.hToggle);
+      if (open) archived.forEach(place);
+    } else {
+      g.hToggle.remove();
+    }
+
+    // 按上面排好的顺序把节点逐个 append 进去——append 对已在正确位置的
+    // 节点是移动，不是复制；被折叠挡住的卡片不在 nodes 里，由末尾的清理撤掉。
+    nodes.forEach((node) => g.ul.append(node));
 
     // 组本身也要排到正确的位置
     const gAt = el.groups.children[ordered.indexOf(agent)];
@@ -558,9 +636,11 @@ el.demo.checked = demoMode;
 tick();
 setInterval(tick, 1000);
 
-// 调试入口：DevTools 里 dashboardDebug.render(...) 手动灌一份快照
+// 调试入口：DevTools 里 dashboardDebug.render(...) 手动灌一份快照；
+// toggleHeadless(agent) 用来在测试里同步翻「历史一次性会话」折叠组。
 window.dashboardDebug = {
   render,
+  toggleHeadless,
   state: () => ({ demoMode, cards: cards.size, sum: el.sum.textContent }),
 };
 
