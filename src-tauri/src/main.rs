@@ -12,6 +12,7 @@
 
 mod agents;
 mod dsh;
+mod dshlock;
 mod permission;
 mod risk;
 mod say;
@@ -1246,33 +1247,48 @@ fn say_send(
     let retry_cwd = cwd.clone();
     std::thread::spawn(move || {
         let mut verdict = say::wait(child, &cancel);
-        // 写锁竞争是**按操作**的租约：桌面端打开/加载/收尾补写都会短暂占一下，
-        // 并不是"这条会话一直开在别处"。所以撞上了先隔一会儿再发——大多数情况
-        // 第二次就过了；真的被长期占着，也只是晚几秒给出同样的原因。
+        // 写锁竞争的处理分三步（2026-11-16 第三次修正，前两版的假设都错了）：
         //
-        // 退避两档而不是一次（2026-11-16 用户实测「发了两次都是同样的返回」）：
-        // 一次 1.5s 覆盖不了"另一个操作正写到一半"的情形，而 3s 足够它收尾。
-        for wait_ms in [1200u64, 3000] {
-            if !say::is_contended(&verdict) || cancel.load(std::sync::atomic::Ordering::SeqCst) {
-                break;
-            }
-            eprintln!("[say] 会话被写锁占着，{wait_ms}ms 后重试 id={emit_id:?}");
-            std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+        // ① 先立刻重发一次。真是"另一个操作正写到一半"的话，这一次就过了。
+        // ② 还撞上就按 DSH 的真实判据看一眼锁（`dshlock.rs` 的命名信号量）：
+        //    · Held → 有一个**活着的进程**正攥着它。实测（同一会话 40 分钟内
+        //      反复探测）桌面端只要开着这条会话就一直 Held，并不存在"等一秒就放"。
+        //      再等到 3 秒只是把同一句话晚点说出来，所以停手。
+        //    · 否则 → 锁其实已经放了，说明这次撞在临界点上，再发一次值得。
+        // ③ 无论停在哪一步，都留一份现场（用户双击启动，stderr 无处可见）。
+        if say::is_contended(&verdict)
+            && !cancel.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            eprintln!("[say] 会话被写锁占着，1200ms 后重发一次 id={emit_id:?}");
+            std::thread::sleep(std::time::Duration::from_millis(1200));
             match say::start(&l, emit_id.as_deref(), &retry_cwd, &said) {
                 Ok((child2, cap2)) => {
                     captured = cap2;
                     verdict = say::wait(child2, &cancel);
                 }
-                Err(e) => {
-                    verdict = say::Verdict::Failed(e);
-                    break;
+                Err(e) => verdict = say::Verdict::Failed(e),
+            }
+        }
+        if say::is_contended(&verdict)
+            && !cancel.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            let target = emit_id.as_deref().unwrap_or("");
+            if say::probe_lock(target).0 != crate::dshlock::LockState::Held {
+                eprintln!("[say] 锁已不在持有态，再发一次 id={emit_id:?}");
+                std::thread::sleep(std::time::Duration::from_millis(800));
+                match say::start(&l, emit_id.as_deref(), &retry_cwd, &said) {
+                    Ok((child3, cap3)) => {
+                        captured = cap3;
+                        verdict = say::wait(child3, &cancel);
+                    }
+                    Err(e) => verdict = say::Verdict::Failed(e),
                 }
             }
         }
-        // 重试用尽仍然是写锁：把现场留下来（锁文件在不在、多久之前动过）。
-        // 用户报"怎么发都不行"时，这条是唯一能区分"真有人占着"和"锁已经放了"的证据。
         if say::is_contended(&verdict) {
-            let probe = say::probe_lock(emit_id.as_deref().unwrap_or(""));
+            // 重新取一次（上面的重发可能已经让它变了），再贴到原因后面：
+            // 用户最需要知道的是"现在到底还占不占"，而不只是一句通用的翻译。
+            let (_, probe) = say::probe_lock(emit_id.as_deref().unwrap_or(""));
             eprintln!("[say] 写锁现场：{probe}");
             say::append_diag(&format!(
                 "[{}] 写锁竞争未解除 target={:?} cwd={retry_cwd} from={} probe={probe}\n",
@@ -1280,6 +1296,9 @@ fn say_send(
                 emit_id,
                 l.from
             ));
+            if let say::Verdict::Failed(m) = &verdict {
+                verdict = say::Verdict::Failed(format!("{m}。（刚查：{probe}）"));
+            }
         }
         // 先取快照再收尾：`captured` 里的 id 是**新会话真正的那一个**，
         // 前端只有拿到它，看板才能把这次的回答挂到正确的卡片上。

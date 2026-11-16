@@ -25,8 +25,8 @@ WorkBuddy 仍在自己的 GUI 里处理权限，这个边界没有变。
 
 | 闸门 | 脚本 | 结果 | 断言数 |
 |---|---|---|---|
-| Tauri 2.12.5 + WebView2 | `npm run verify:tauri` | **162 PASS / 0 FAIL** | 162 |
-| Rust 单测 | `cd src-tauri && cargo test` | **97 passed / 0 failed** | 97 |
+| Tauri 2.12.5 + WebView2 | `npm run verify:tauri` | **166 PASS / 0 FAIL** | 166 |
+| Rust 单测 | `cd src-tauri && cargo test` | **100 passed / 0 failed** | 100 |
 | DSH 审批桥 | `npm run verify:dsh` | **11 PASS / 0 FAIL** | 11 |
 | 打包（NSIS 安装包） | `npm run verify:bundle:install` | **25 PASS / 0 FAIL** | 25 |
 | 状态回放（真实事件序列） | `npm run verify:diag` | **10 步全中期望** | 10 |
@@ -1582,7 +1582,7 @@ spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"]);
 
 | 日期 | 类型 | 内容 |
 |---|---|---|
-| 2026-11-16 | 修复 | **「另一个 dsh 正开着这条会话」其实是按操作的写租约，且常常是瞬时的**。用户反馈三条都不成立（客户端没开那条、桌宠没有在跑、终端没有 dsh）——查 DSH 源码确认：租约是会话目录里 `session.lock` + 内核独占锁（`flock`/`LockFileEx`），桌面端**打开/加载/收尾补写**都会短暂持有，不要求会话一直开着；DSH 自己不重试竞争。改法：`say::CONTENDED_MSG` + `is_contended()`，`say_send` 撞上后**两档退避（1.2s / 3s）各重发一次**；文案改为"等一两秒再发，反复出现才关掉那条会话"。用户复测仍失败后补**现场取证**：`probe_lock()` 报该 id 在各目录桶有没有 `session.lock`、多久前动过；`append_diag()` 把 DSH 原始 stderr 与竞争现场追加到 `%TEMP%\clawd-say-diag.txt`（双击启动时 stderr 无处可见）。Rust **98/98**、UI **166/0** |
+| 2026-11-16 | 修复 | **「另一个 dsh 正开着这条会话」的真因：Windows 上是命名信号量，而且桌面端开着就一直攥着**。用户反馈三条嫌疑全排除（客户端没开那条、桌宠没有在跑、终端没有 dsh）后，前两版判断（"瞬时冲突，退避 1.2s/3s 重发即可"、"查 `session.lock` 文件在不在"）**都被实测推翻**：`session.lock` 在 Windows 上根本不会被创建，文件探测永远是假阴性。新增 `dshlock.rs` 照 DSH 真实判据走——`Local\dsh-session-lock-<sha256(小写化绝对路径)>` 命名信号量，`WaitForSingleObject(0)` 拿到计数即 `Held`（拿到必须 `ReleaseSemaphore` 还回去，否则探测自己吃锁）；三条状态 `Held`/`Free`/`Absent`，查不出来一律当 `Absent`（不编"有人占着"）。真机探针实测：同一条会话 40 分钟内反复探测都是 `Held`，持有者是从 10:08 起一直开着的桌面宿主——**写锁不是"按操作短暂持有"**。发送链路据此改成三步：先重发一次（覆盖真瞬时）→ 还撞就取证，锁仍 `Held` 就**停止盲等**（不再白等 3s 说同一句话）→ 现场（状态 + 目录桶）贴到原因后面并追加到 `%TEMP%\clawd-say-diag.txt`。文案改为"桌面端只要开着这条会话就一直占着，关掉它或退出桌面端后再发"。Rust **100/100**（含 3 条 SHA-256 标准向量、信号量名钉死期望值、真机探针 `#[ignore]`）、UI **166/0** |
 | 2026-11-16 | 功能 | **看板：DSH 的 headless 一次性历史收进折叠分组**。用户问「为什么看板 56 条、DSH 客户端只有 5 条」——看板列的是磁盘全量投影（46 条是 `dsh headless` 一次性残留，多数是我们自己的验证跑出来的），客户端只展示交互会话。主列表改为按 `has_stats === false`（headless 不写 sessionStats，宿主早已序列化）把**非活跃**的 headless 会话归进「历史一次性会话（N 条）」折叠行，点开/收起同步重渲染；活着的会话永远留主列表，折叠组里是完整卡片（headless 恰恰是能续聊的那批）。顶部聚合与组头计数同口径单列「历史 N 条」。闸门补 4 条（默认折叠 / 行文案条数 / 展开见整卡 / 再收撤出 DOM），UI 162 → **166 条**。顺手修掉重构引入的回归：「还有 N 条」不再需要时必须 `remove()`（FILE_MAP 那条教训的又一次验证） |
 | 2026-11-16 | 功能 | **DeepSeek Harness 的确认上桌宠**（S16，见上方「已完成」与 SECURITY「S16」）。新增 headless Cordis 插件接 `approval/request`，复用同一个 `/permission` 气泡；回包按真实 `hookSpecificOutput.decision.behavior` 映射成 `allowed-once` / `rejected` / `unavailable`，中止为 `cancelled`，网络失败委托 `next()`，不自动允许。新增幂等安装器（`install:hooks:dsh` / preview / uninstall），只维护自己的 `insert` 段并备份原子写，已替换固定 rejected 的实验原型。气泡快照 `agent` 来源，DSH 解除沙箱标高风险，说明文字不再错指 Claude Code。快速闸门 **11/0**、Rust **97/0**、UI **162/0**、打包 **10/0**、回放 **10 步全中**。真实 DSH `workspace-write + ask` 验证：允许后文件确实写入，拒绝后文件确实不存在 |
 | 2026-11-12 | 修复 | **桌宠的提示不再抢焦点**（S15，见上方「已完成」）。用户原话「我希望桌宠的所有提示都不要干扰正在做的事情，比如写 word，发消息」。根因很直白：权限气泡是 `show() + set_focus()`，一条**不请自来**的提示会把键盘抢走——正在 Word 里打字的人，接下来的字会敲进气泡里。新增 `sys::show_no_activate()`（`SW_SHOWNOACTIVATE` + `SetWindowPos(SWP_NOACTIVATE)`），用在三处不请自来的显示上：权限气泡（建窗也加 `.focused(false)`）、发送失败后重新亮出的输入窗、解锁后恢复的等待中气泡；**用户主动点出来的窗口不动**（输入窗/看板仍拿焦点，否则没法打字）。闸门加真判据：气泡完整显示后读 Win32 **前台窗口句柄**必须与弹出前相同。同一句抱怨里的「需要确认的操作没能体现到桌宠上」要分平台：**WorkBuddy 在自己的 GUI 里处理权限、从不调外部端点**（`install.js` 里 `permission:"none"`），它的确认从来不会到桌宠；Claude Code / CodeBuddy 走 HTTP hook 才会。为此 `/permission` 加了 `[perm] 收到/结局` 两行日志——**没有第一行就是请求没到**，别往气泡代码里找。闸门 `cargo test` 95/0、`verify:tauri` 156 → **157** |

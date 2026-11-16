@@ -1324,7 +1324,12 @@ async function main() {
       await sleep(600);
       // SEC-09：快照里只出 basename，完整路径不许进渲染层
       const leak = await D.eval("JSON.stringify(window.__lastSnapshot||null) + document.body.textContent");
-      ok("快照里没有完整 cwd（SEC-09 分层仍在）", typeof leak === "string" && !/[A-Za-z]:\\\\Users\\\\/.test(leak), "");
+      // 证据取匹配点前后各 60 字，而不是整段 body（几万字，报错时看不清是哪一句）
+      const hit = typeof leak === "string" ? leak.match(/[A-Za-z]:\\\\Users\\\\/) : null;
+      const where = hit
+        ? leak.slice(Math.max(0, hit.index - 60), hit.index + 60)
+        : `取回的不是字符串：${String(leak).slice(0, 80)}`;
+      ok("快照里没有完整 cwd（SEC-09 分层仍在）", typeof leak === "string" && !hit, where);
       const themes = JSON.parse((await D.eval("window.dashboard.listThemes().then(t=>JSON.stringify(t))")) || "null");
       ok("主题列表至少有一项", !!(themes && Array.isArray(themes.themes) && themes.themes.length > 0), themes && themes.current);
       // 反过来再验一次：看板调主窗口的命令也必须被拒。

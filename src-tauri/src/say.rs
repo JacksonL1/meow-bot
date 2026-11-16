@@ -581,66 +581,56 @@ pub fn wait(mut child: Child, cancel: &AtomicBool) -> Verdict {
 
 /// 「这条会话被另一个写者占着」的固定文案。
 ///
-/// 为什么单独拎成常量（2026-11-16）：DSH 的写租约是**按操作**持有的——
-/// 桌面端打开、加载、收尾补写都会短暂占一下，并不要求"会话一直开着"。
-/// 所以这个错经常是"隔一秒再发就过了"。`say_send` 靠它判断要不要重试一次；
-/// 如果只当普通失败文案转述，用户会看到一句"等它关掉"，而实际上根本没有
-/// 一个长期占着的"它"可等。
+/// 为什么单独拎成常量（2026-11-16）：`say_send` 靠它判断这次失败是不是写锁竞争，
+/// 从而决定要不要重发、要不要取证。如果只当普通失败文案转述，用户会看到一句
+/// "等它关掉"，却不知道到底有没有一个"它"。
+///
+/// 文案本身也修正过一次：早先写的是「多半是刚写完，等一两秒再发」——那是照着
+/// "租约按操作短暂持有"的猜测写的。实测推翻了这个猜测：同一条会话在 40 分钟里
+/// 反复探测都是 `Held`，占着它的是一直开着的桌面宿主。所以给出的动作必须是
+/// **关掉那个占着的进程**，而不是"稍后再试"。
 pub const CONTENDED_MSG: &str =
-    "这条会话正被另一个 dsh 写者占用：多半是桌面端正打开或刚写完它，也可能上一次发送还没退出。\
-     等一两秒再发；反复出现就关掉桌面端里那条会话";
+    "这条会话的写锁被另一个活着的进程占着。最常见是 DSH 桌面端还开着这条会话——它只要开着就一直占着，不只在写的时候。在桌面端里关掉它，或退出桌面端后再发";
 
-/// 这次失败是不是「写锁被别人占着」。写锁通常只持有很短一段时间，值得重试一次。
+/// 这次失败是不是「写锁被别人占着」。
 pub fn is_contended(v: &Verdict) -> bool {
     matches!(v, Verdict::Failed(m) if m == CONTENDED_MSG)
 }
 
-/// 写锁竞争的现场取证（2026-11-16）。
+/// 写锁竞争的现场取证（2026-11-16 第二版）。
 ///
-/// 为什么需要：这个错只说"有人正占着写句柄"，而用户能把三个嫌疑人都排除掉
-/// （客户端没开那条、桌宠没在跑、终端没有 dsh）——光一句翻译，谁也不知道该关什么。
-/// 这里只回答两个**可观测**的事实，不猜：
-///   1. 这条会话的目录里现在有没有 `session.lock`，多久之前被动过；
-///   2. 同一个 id 出现在几个目录桶里（会话按 cwd 分桶，id 只在桶内唯一）。
+/// 第一版查的是 `<会话目录>/session.lock` 文件，结论永远是"无锁文件"——
+/// 因为 **Windows 上 DSH 用的是命名信号量**，那个文件根本不会被创建
+/// （规则见 `dshlock.rs` 文件头）。所以这里改成按 DSH 的真实判据去开一次信号量：
+/// 持有 = 有一个**活着的进程**拿着它；空闲/不存在 = 锁其实已经放了。
 ///
-/// 判读方法：报错那一刻锁文件还在 = 真有一个持有者，且它一直没放手；
-/// 锁文件已经不在 = 锁在报错后立刻释放了，属于瞬时冲突（重试本该能过）。
-pub fn probe_lock(id: &str) -> String {
+/// 返回 `(状态, 人话)`：状态给"要不要再试一次"的判断用，人话直接贴给用户看。
+/// 只回字符串的话，调用方还得再探一次才能判断，两次探测之间状态可能就变了。
+pub fn probe_lock(id: &str) -> (crate::dshlock::LockState, String) {
     if id.is_empty() {
-        return "（新会话，没有目标 id）".to_string();
+        return (
+            crate::dshlock::LockState::Absent,
+            "（新会话，没有目标 id）".to_string(),
+        );
     }
-    let Some(home) = crate::dsh::home() else {
-        return "找不到 DSH_HOME".to_string();
+    let (state, dirs) = crate::dshlock::state_for(id);
+    if dirs.is_empty() {
+        return (
+            state,
+            "没找到这条会话的目录（id 与 cwd 对不上？）".to_string(),
+        );
+    }
+    let bucket = dirs
+        .iter()
+        .filter_map(|d| d.parent()?.file_name().map(|s| s.to_string_lossy().to_string()))
+        .collect::<Vec<_>>()
+        .join("、");
+    let word = match state {
+        crate::dshlock::LockState::Held => "写锁仍被持有",
+        crate::dshlock::LockState::Free => "写锁已释放（对象还在，计数已满）",
+        crate::dshlock::LockState::Absent => "没有锁对象",
     };
-    let root = home.join("sessions");
-    let Ok(buckets) = std::fs::read_dir(&root) else {
-        return "找不到 sessions 目录".to_string();
-    };
-
-    let mut hits: Vec<String> = Vec::new();
-    for b in buckets.flatten() {
-        let dir = b.path().join(id);
-        if !dir.is_dir() {
-            continue;
-        }
-        let bucket = b.file_name().to_string_lossy().to_string();
-        match std::fs::metadata(dir.join("session.lock")) {
-            Ok(m) => {
-                let age = m
-                    .modified()
-                    .ok()
-                    .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                hits.push(format!("{bucket}：锁存在（{age} 秒前动过）"));
-            }
-            Err(_) => hits.push(format!("{bucket}：无锁文件")),
-        }
-    }
-    if hits.is_empty() {
-        return "没找到这条会话的目录（id 与 cwd 对不上？）".to_string();
-    }
-    hits.join("；")
+    (state, format!("{word}（{bucket}）"))
 }
 
 /// 失败现场写进 `%TEMP%\clawd-say-diag.txt`（追加）。
