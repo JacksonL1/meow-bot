@@ -17,12 +17,16 @@
     "uninstall:hooks:workbuddy": "node hooks/install.js --agent workbuddy --uninstall",
     "install:hooks:codebuddy": "node hooks/install.js --agent codebuddy",
     "uninstall:hooks:codebuddy": "node hooks/install.js --agent codebuddy --uninstall",
+    "install:hooks:dsh": "node hooks/install-dsh-approval.js",
+    "uninstall:hooks:dsh": "node hooks/install-dsh-approval.js --uninstall",
+    "preview:hooks:dsh": "node hooks/install-dsh-approval.js --dry-run",
     "verify:tauri": "node scripts/verify-tauri.js --release",
     "verify:bundle": "node scripts/verify-bundle.js",
     "verify:bundle:install": "node scripts/verify-bundle.js --install",
     "verify:diag": "node scripts/diag-events.js --replay",
+    "verify:dsh": "node scripts/verify-dsh-approval.js",
     "diag:events": "node scripts/diag-events.js",
-    "verify:all": "node scripts/verify-tauri.js --release && node scripts/diag-events.js --replay && node scripts/verify-bundle.js",
+    "verify:all": "node scripts/verify-dsh-approval.js && node scripts/verify-tauri.js --release && node scripts/diag-events.js --replay && node scripts/verify-bundle.js",
     "icons": "node scripts/make-icons.js"
   }
 }

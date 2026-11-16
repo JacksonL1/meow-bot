@@ -637,6 +637,29 @@ fn is_write_tool(name: &str) -> bool {
     .is_match(name)
 }
 
+/// DSH 的审批请求只给工具名和审批理由，不给命令原文。`danger-full-access`
+/// 表示这一轮要越出沙箱，不能因为文本不像 shell 命令就显示成低风险。
+/// 这条只补充提示，不改变裁决：不点仍然是不决定，永远不会自动允许。
+pub fn assess_agent_risk(agent: &str, tool_name: &str, command: &str, cwd: &str) -> Risk {
+    let mut risk = assess_risk(tool_name, command, cwd);
+    let lower = command.to_ascii_lowercase();
+    if agent == "dsh" && lower.contains("escalate sandbox") && lower.contains("danger-full-access") {
+        risk.reasons.push(Reason {
+            code: "DSH_SANDBOX_ESCALATION".into(),
+            level: Level::High,
+            text: "DeepSeek Harness 请求解除沙箱限制，可访问当前工作区之外的位置".into(),
+        });
+        risk.reasons.sort_by(|x, y| y.level.cmp(&x.level));
+        risk.reasons.truncate(4);
+        if risk.level < Level::High {
+            risk.level = Level::High;
+            risk.label = Level::High.label().to_string();
+            risk.score = Level::High as u8;
+        }
+    }
+    risk
+}
+
 /// 给一条权限请求评级。永不 panic、永不产生副作用——它只读两个字符串。
 pub fn assess_risk(tool_name: &str, command: &str, _cwd: &str) -> Risk {
     let a = analyze(command);
@@ -723,6 +746,20 @@ mod tests {
             }
         }
         assert!(bad.is_empty(), "{}", bad.join(" | "));
+    }
+
+    #[test]
+    fn dsh_sandbox_escalation_is_visibly_high_risk() {
+        let r = assess_agent_risk(
+            "dsh",
+            "pwsh",
+            "escalate sandbox to danger-full-access: workspace boundary",
+            "",
+        );
+        assert_eq!(r.level, Level::High);
+        assert_eq!(r.reasons[0].code, "DSH_SANDBOX_ESCALATION");
+        // 普通请求不因为来自 DSH 就一律抬高，避免所有提示都变成红色。
+        assert_eq!(assess_agent_risk("dsh", "Read", "a.txt", "").level, Level::Low);
     }
 
     #[test]

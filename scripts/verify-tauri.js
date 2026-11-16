@@ -1091,6 +1091,36 @@ async function main() {
     const r2 = await p2;
     ok("点允许 → 200 且回包是 allow", r2.code === 200 && r2.body.includes('"behavior":"allow"'), r2.body.slice(0, 60));
 
+    // DSH 的审批理由不是 shell 命令，不能因为它不含 rm/sudo 就显示成低危。
+    // 同一条 /permission 链路还要把来源和“没有其他原生提示”的结局说准确。
+    const pDsh = post(
+      "/permission",
+      {
+        session_id: "dsh-perm",
+        agent: "dsh",
+        tool_name: "pwsh",
+        tool_input: { command: "escalate sandbox to danger-full-access: workspace boundary" },
+      },
+      null,
+      { timeout: 20000 }
+    );
+    const btDsh = await waitTarget((u) => u.includes("bubble"));
+    if (btDsh) {
+      const BD = await Cdp.connect(btDsh.webSocketDebuggerUrl);
+      await BD.send("Runtime.enable");
+      await sleep(400);
+      ok("DSH 气泡明确写出平台来源", (await BD.eval("document.getElementById('meta').textContent")).includes("DeepSeek Harness"));
+      ok("DSH 解除沙箱限制标为 high（不是按 shell 关键词误判 low）", (await BD.eval("document.getElementById('card').getAttribute('data-risk')")) === "high");
+      const dshWhy = String(await BD.eval("document.getElementById('why').textContent"));
+      ok("DSH 高风险理由说清可访问工作区之外", /工作区之外/.test(dshWhy), dshWhy.slice(0, 80));
+      const dshNote = String(await BD.eval("document.getElementById('note').textContent"));
+      ok("DSH 超时不谎称会交还给 Claude Code", /DeepSeek Harness/.test(dshNote) && !/Claude Code/.test(dshNote), dshNote.slice(0, 90));
+      await BD.eval("document.getElementById('btnAllow').click(), 1");
+      BD.close();
+    }
+    const rDsh = await pDsh;
+    ok("DSH 请求点允许 → 同一条链路回 allow", rDsh.code === 200 && rDsh.body.includes('"behavior":"allow"'), rDsh.body.slice(0, 60));
+
     // ---- 8.1 「点了允许，没有任何返回」（2026-11-06 用户报障）----
     //
     // 旧实现有两处静默死路，两条都长成"卡片在、按钮在、点完什么也不发生"：

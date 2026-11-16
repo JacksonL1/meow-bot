@@ -37,7 +37,7 @@
 
 ```text
 事件流   agent 事件 → hook（短命进程，async）→ 本地 HTTP → 状态机 → IPC → 弹簧动画
-裁决流   agent 要执行工具 → HTTP hook（阻塞）→ 气泡等你点 → 同一个 socket 回 200 / 204
+裁决流   agent 要执行工具 → HTTP hook / DSH 审批插件（阻塞）→ 气泡等你点 → 同一 socket 回 200 / 204
 看板流   双击桌宠 → 独立窗口 → 1s 轮询（状态机 + 各平台会话，按 id 合）→ 平台 → 会话两级
 说话流   点「说一句」/ ✎ → 输入窗 → 宿主起 dsh → 读它的 --json 流 → 回答回看板
 主题流   启动 → 读 themes/<id>/ → 校验 → IPC → 渲染层换帧数据（白名单在这层之前就生效）
@@ -92,6 +92,7 @@ Uninstall 子键集合回到安装前。
 | `npm run feed` | 喂一轮假事件：thinking → working → error → attention → idle |
 | `npm run feed -- Stop` / `--hold working 10` | 单事件 / 保持某状态 10 秒 |
 | `npm run verify:tauri` | UI 闸门：起真窗口、连 CDP，逐条断言（**唯一一道 UI 闸门**） |
+| `npm run verify:dsh` | DSH 审批桥：临时 profile + 假桌宠，覆盖安装与完整回包映射 |
 | `npm run verify:diag` | 状态回放：临时实例 + 10 步真实事件序列，逐步对期望 |
 | `npm run verify:bundle` / `:install` | 打包产物：配置与产物 / 再加真装真卸 |
 | `npm run verify:all` | 上面三道串起来 |
@@ -101,6 +102,7 @@ Uninstall 子键集合回到安装前。
 | `npm run icons` | 重画图标（猫脸 + 托盘图标） |
 | `npm run install:hooks` / `uninstall:hooks` / `preview:hooks` | 装 / 卸 / 预览 hook（默认 Claude Code） |
 | `npm run install:hooks:codebuddy` / `:workbuddy` | 同上，换目标 agent |
+| `npm run install:hooks:dsh` / `uninstall:hooks:dsh` / `preview:hooks:dsh` | 装 / 卸 / 预览 DSH headless 审批桥 |
 
 ## 代码签名
 
@@ -275,12 +277,19 @@ Import-Certificate -FilePath .\clawd-starter-selfsign.cer `
 | 要改 agent 配置 | **要**（下面那套备份/原子写） | **不要**，只读 |
 | 能看到 | 工具名、权限请求、压缩 | 状态、标题、目录、权限档位（**没有工具名**） |
 
-### 一、DeepSeek Harness：不用配置，装上即可
+### 一、DeepSeek Harness：状态自动接，审批桥按需安装
 
 桌宠会自动去找 `$DSH_HOME`（默认 `%USERPROFILE%\.dsh`）下的
 `storages/session_projcache/sessions/<id>.json`，**一会话一文件**，只读。
 
-- 什么都不用装、不用改。DSH 没装就当没这回事，零开销。
+- **只看会话状态**什么都不用装、不用改。DSH 没装就当没这回事，零开销。
+- **要把 DSH 的确认送上桌宠**，运行 `npm run install:hooks:dsh`。它只改
+  `$DSH_HOME/profiles/headless/`：安装 `clawd-approval-bridge.mjs`，并在 `cordis.patch.yml`
+  用 `insert` 登记 `approval/request` 应答者；模型、供应商和凭据段原样保留，写前备份、重复执行无变化。
+  预览用 `npm run preview:hooks:dsh`，卸载用 `npm run uninstall:hooks:dsh`。
+- 气泡会写明 **DeepSeek Harness**；`danger-full-access` 提权标为**高风险**。点「允许」只回
+  `allowed-once`，没有永久授权；点「拒绝」回 `rejected`。桌宠没开、网络断或请求中止时不会假装已决定，
+  DSH 保持原有 fail-closed 行为。
 - `dsh web` / 桌面版的会话状态完整：`thinking`（在等首字）/ `working`（在出字或跑工具）/
   `attention`（这一轮做完了）/ `idle` / `sleeping`。
 - `dsh headless "…"` 这类一次性会话在投影里**只有标题**（没有 `sessionStats` / `turnOutline` /
@@ -305,8 +314,8 @@ Import-Certificate -FilePath .\clawd-starter-selfsign.cer `
 
 ### 二、hook：把 agent 事件送进来
 
-hook 由 `hooks/install.js` 写进 agent 的全局配置。
-它是**整个项目里唯一会改用户配置的地方**：
+普通 hook 由 `hooks/install.js` 写进 agent 的全局配置；DSH 审批桥则由上一节那个独立安装器
+只改 headless profile。两类安装器都遵守同一组边界：
 
 1. 先备份 `settings.json.clawd-backup-<时间戳>`
 2. 原子写（同目录临时文件 + rename，不留半截 JSON）
@@ -476,7 +485,7 @@ Claude Code），点组头折叠；二级是那家平台下的会话卡片，每
 | `POST /state` | 观察型 hook | `200 {"ok":true,"visual":"working"}`——回包顺带告诉 hook 当前该显示什么 |
 | `GET /state` | 看板、`diag:events` | 快照 JSON（含 `recent` 事件账本） |
 | `GET /health` | 探活 | `200 {"ok":true,"lock":"event"}` |
-| `POST /permission` | Claude Code 的 HTTP hook | `200 {decision}` 或 `204` |
+| `POST /permission` | Claude Code / CodeBuddy 的 HTTP hook、DSH 审批桥 | `200 {hookSpecificOutput:{decision}}` 或 `204` |
 
 **端口不是权限**。本机任何进程都能连 127.0.0.1，所以每一关都要有理由：
 
@@ -537,12 +546,13 @@ themes/ragdoll/
 
 ## 开发与回归
 
-三道闸门 + 一道回放，判据不同源：
+四道闸门 + 一道回放，判据不同源：
 
 | 闸门 | 命令 | 现在的数 | 它回答什么 |
 |---|---|---|---|
-| UI | `npm run verify:tauri` | **106 PASS / 0 FAIL** | 二进制跑起来之后，行为对不对 |
-| 单测 | `cd src-tauri && cargo test` | **43 passed** | 状态机 / 风险评级 / 主题校验 / DSH 翻译的纯逻辑 |
+| UI | `npm run verify:tauri` | **162 PASS / 0 FAIL** | 二进制跑起来之后，行为对不对 |
+| 单测 | `cd src-tauri && cargo test` | **97 passed** | 状态机 / 风险评级 / 主题校验 / DSH 翻译的纯逻辑 |
+| DSH 审批桥 | `npm run verify:dsh` | **11 PASS / 0 FAIL** | 安装是否幂等、用户决定是否被翻成正确的 DSH 词汇 |
 | 打包 | `npm run verify:bundle` | **10 PASS**（`--install` 再 +15） | 用户拿到手的那一包，装得上、卸得干净 |
 | 回放 | `npm run verify:diag` | **10 步全中** | 真实事件序列走一遍，状态有没有掉 |
 | 审计 | `cargo audit` | **0 漏洞 / 2 条警告** | 1402 条公告 × 425 个依赖 |
@@ -556,6 +566,8 @@ themes/ragdoll/
   夹具是现造现撤的：造出来 → 断言 `/state` 里出现它、猫变 working → 改成 idle 断言结束发 `Stop`
   → 撤掉再等一拍。**拿真实缓存做断言是错的**——那里面有几个会话、是不是还在活跃窗口内
   由你的历史决定，闸门会变成看运气（第一版就是这么红的，而那其实是正确行为）。
+- **`verify:dsh` 不调用模型，也不碰真实 `~/.dsh`**：安装器指向临时 profile，HTTP 那一端是本机假桌宠。
+  它特别钉住回包的 `hookSpecificOutput.decision.behavior`——读错一层，点允许也会被错译成“未决定”。
 - **`verify:diag` 的位置最特殊**：它起一份临时实例，把现场观察到的一轮事件照原样喂回去
   （SessionStart → UserPromptSubmit → 补发 SessionStart → 工具 → PreCompact → 压缩后 SessionStart
   → UserPromptSubmit → Stop → SessionEnd），每一步都对**服务端快照**和**渲染层画面**两个读数。

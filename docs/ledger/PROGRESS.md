@@ -15,14 +15,19 @@ S1–S10 全部完成。**2026-11-02 补上 S10-5：容器从 Electron 换成 Ru
 
 **2026-11-04～05：接上 DeepSeek Harness**——S11 只做「看」（把 DSH 投影翻译成既有 hook 事件词汇），
 S12 补上「说」（从桌宠直接发消息，走 `dsh headless --session-id`）并把看板从"谁在发呆"改成"这条会话在干什么"。
-当前停在：三条路都真机验过，剩下的都是**已知让渡**（桌面端/网页端建的会话续不了，见「已知的能力让渡」）。
+三条路都真机验过，剩下的都是**已知让渡**（桌面端/网页端建的会话续不了，见「已知的能力让渡」）。
 
-四道闸门同时是绿的，前两道**判据同源**（后两道管的是"用户装不装得上 / 状态掉不掉"，判据天然不同源）：
+**2026-11-16：S16 把 DSH 审批接上同一个桌宠气泡**。headless profile 新增本地
+`approval/request` 应答者；真实模型验证过允许后文件确实写入、拒绝后文件确实不存在。
+WorkBuddy 仍在自己的 GUI 里处理权限，这个边界没有变。
+
+五道闸门同时是绿的，各自管一段不同的判据：
 
 | 闸门 | 脚本 | 结果 | 断言数 |
 |---|---|---|---|
-| Tauri 2.12.5 + WebView2 | `npm run verify:tauri` | **134 PASS / 0 FAIL** | 134 |
-| Rust 单测 | `cd src-tauri && cargo test` | **68 passed / 0 failed** | 68 |
+| Tauri 2.12.5 + WebView2 | `npm run verify:tauri` | **162 PASS / 0 FAIL** | 162 |
+| Rust 单测 | `cd src-tauri && cargo test` | **97 passed / 0 failed** | 97 |
+| DSH 审批桥 | `npm run verify:dsh` | **11 PASS / 0 FAIL** | 11 |
 | 打包（NSIS 安装包） | `npm run verify:bundle:install` | **25 PASS / 0 FAIL** | 25 |
 | 状态回放（真实事件序列） | `npm run verify:diag` | **10 步全中期望** | 10 |
 | Rust 依赖审计 | `cargo audit`（见 SECURITY「依赖审计」） | **0 漏洞 / 2 条警告**（都不在 Windows 构建图里） | 1402 条公告 / 425 个依赖 |
@@ -87,14 +92,11 @@ S8 的「跟桌宠说话」**2026-10-30 整套删掉了**（理由见下方被�
 
 ## 进行中
 
-- 无。S15 提示不抢焦点已验（闸门 157 + 95 全绿），S14 指定 session 发送已真机验过。
-  **待用户回答一件事**：他说的「需要确认的操作没能体现到桌宠上」是**哪个平台**——
-  WorkBuddy 的确认在它自己窗口里（设计上就到不了桌宠），Claude Code / CodeBuddy 才走气泡。
-  **另一件待做的**：重跑一次 `npm run install:hooks` / `npm run install:hooks:workbuddy`——
-  平台名是安装时烘进命令行的（`--from workbuddy`），老装的 hook 会一直报 `claude-code`。
-  不跑也能用（会话落盘之后看板会自动纠正分组），只是新会话在头几秒会被归到 Claude 组。
-  下一步取决于用户：是把「说」的接力棒交给**多轮对话 UI**（现在一次一窗），
-  还是先把「桌面端会话续不了」这件事在界面上讲得更醒目（S14 起它会被直接拦下并说原因）。
+- 无。S16 DSH 审批已真机验过（允许/拒绝两侧），快速闸门 11 + UI 162 + Rust 97 全绿。
+  WorkBuddy 的确认仍在它自己的窗口里（设计上就到不了桌宠）；DSH 与 Claude Code / CodeBuddy
+  都能走桌宠气泡。
+  **老 hook 仍可重跑一次** `npm run install:hooks` / `npm run install:hooks:workbuddy`：
+  平台名是安装时烘进命令行的（`--from workbuddy`）。不跑也能用，落盘后会自动纠正分组。
 - **待用户决策**：桌宠默认端口 23333 与用户 Claude Code 的 `ANTHROPIC_BASE_URL` 冲突
   （见 S12-1 末尾）。挪端口是产品决策，没有擅自改。
 
@@ -123,6 +125,31 @@ S8 的「跟桌宠说话」**2026-10-30 整套删掉了**（理由见下方被�
 - [x] ~~状态时长（25s 发呆 / 60s 入睡）仍写死在 `state.js`~~ → **已进 `theme.json.timings`**（2026-10-28）。注意原来写的「25s 发呆」是个误会：那个 `IDLE_AFTER_MS` **从头没有消费者**，连配置项都算不上，已删（见 DEVLOG）。搬过去的是 `oneshot` 三个时长 + `sleepAfterMs`
 
 ## 已完成
+
+### S16 DeepSeek Harness 审批上桌宠（2026-11-16）
+
+用户原话：「workbuddy不能上桌宠的话，至少把deepseek harness的确认反应到桌宠上」。
+
+DSH headless 原先没有审批应答者，需要提权时直接报
+`no approval channel is available`。本轮新增 `hooks/dsh-approval-bridge.mjs`，
+在 Cordis 的 `approval/request` waterfall 里把请求 POST 到既有 `/permission?via=dsh`，
+再把用户点击翻回 DSH 的词汇：允许 = `allowed-once`、拒绝 = `rejected`、
+不决定 = `unavailable`。桌宠没开 / 网络失败就 `next()`，不假装回答，DSH 仍 fail closed。
+
+- **安装器**：`npm run install:hooks:dsh`（另有 preview / uninstall）。只改
+  `$DSH_HOME/profiles/headless`，备份 + 原子写 + marker + 幂等；新插件必须用 Cordis
+  `insert` 才能注册。已替换本机那个固定回 `rejected` 的实验原型，模型与凭据段原样保留。
+- **回包契约**：决定实际位于 `hookSpecificOutput.decision.behavior`，不是 `body.decision`。
+  快速闸门直接用这个真实形状测 allow / deny / 204 / 网络失败 / abort。
+- **界面**：`PendingView.agent` 快照来源；DSH 显示全名，解除沙箱 `danger-full-access`
+  标高风险并说明可访问工作区之外。DSH 只给审批理由，不编造它没提供的独立命令原文。
+  超时说明也不再谎称会交还给 Claude Code。
+- **不打扰不变**：沿用 S15 的不抢焦点路径，本轮真实审批同样走这个气泡。
+
+验证：`cargo test` **97/0**；`verify:dsh` **11/0**；`verify:tauri` **162/0**（+5 条
+DSH 来源/风险/回包）；`verify:bundle` **10/0**；`verify:diag` **10 步全中**；`npm audit` 0。
+真实 DSH + `workspace-write --approval-policy ask` 各跑一轮：允许前文件不存在、点击后内容正确；
+拒绝后文件仍不存在且 DSH 记录拒绝结局。两轮桌宠日志分别为 `Allow` / `Deny`。
 
 ### S15 提示不抢焦点（2026-11-12）
 
@@ -1544,6 +1571,7 @@ spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"]);
 | S12-1 权限气泡三条死路 | 0 | 0 | 0 | 0 | **无新增 SEC 编号**（设计核对见 SECURITY.md「八、`bubble_close`：收窗不是裁决」）。这次改的是"界面有按钮、宿主没有账"，**不需要任何新权限**：`bubble_close` 只给气泡窗（`W_BUBBLE`），**不产生裁决**（不调 `settle()`、不回 HTTP；"不表态"仍走 `bubble_dismiss` 的 204），且**只收"当前这一条"**（带 id 时比对 `bubble_current`，不带 id 时只在 `bubble_current.is_none()` 才动手）——防止一张过期卡片把别人刚弹出来的请求收掉。收窗与 `Notify::Resolved` 共用 `resolve_current()`，队列里的下一条照常顶上。**顺带一条可观测性收益**：`permission_decide` 改收回执（`call` 而非 `send`），`send()` 会吞掉所有异常、让"决定没送到宿主"在日志里也不存在——这不是漏洞，但它是"用户说点了、宿主说没收到"扯皮的土壤。硬约束 51：凡用户能点的东西，必须能回答"这一下发给了谁、对方收没收到" |
 | S12-2 端口挪到 27333 | 0 | 0 | 0 | 0 | **无新增 SEC 编号**。这是**端口混淆（可用性 + 错觉风险），不是越权**：旧默认端口 `23333` 与用户 `~/.claude/settings.json` 的 `ANTHROPIC_BASE_URL` 重合，桌宠先启动就占住 Claude Code 的模型网关——Claude Code 的请求打到我们的 HTTP 服务上吃 401。边界没被击穿的原因是既有的两道：服务**只绑 `127.0.0.1`**，且除 `/permission` 外的端点仍校 token（`/permission` 不校 token 是 HTTP hook 架构的固有属性，风险收敛在 Host/Origin/Content-Type + UI 不盲批，见 S5 行）。挪动前做过安全检查：`~/.claude` / `~/.codebuddy` / `~/.workbuddy` 三条配置里**没有任何已装的 HTTP hook 指向旧端口**，所以不存在"改了端口但 hook 仍指向 23333、请求落到别人服务上"的窗口。**遗留的判断**：端口仍是固定的（权限 hook 的 url 是安装时写死进 `settings.json` 的，随机端口等于 hook 指向死端口），所以这类撞车以后还会以别的服务名出现——判据是装 hook 时报出的端口，而不是记在文档里的数字 |
 | S12-4 认桌面版的 dsh | 0 | 0 | 0 | 0 | **无新增 SEC 编号**（设计核对见 SECURITY.md「十、`locate()` 加认桌面版」）。这一轮**没有新增任何命令、窗口或权限**，但把"发现外部程序"的面讲清楚了：`locate()` 现在有多个入口（`PATH` 上的 npm 布局、三个安装根目录各扫一层、`CLAWD_DSH_ROOT`），**它们的前提是同一个**——已经能在该用户身份下写盘或设环境变量，所以权限级没提高，只是需要检查的位置变多了。**最值得记的不是漏洞而是判据**：第一版用"有 `resources/app.asar` 就算"，临时探针当场选中了同机的 **Cherry Studio**，即"拿一个无关程序去跑 dsh 的脚本"——判据太松的代价不是误报，是**执行了别的东西**。最终判据是"asar 在 **且** exe 名或目录名含 `deepseek`"，名字被改掉的情况用 `CLAWD_DSH_ROOT` 显式指定，不猜。另：桌面版要靠 `ELECTRON_RUN_AS_NODE=1` 才以 node 身份跑，少了它不是报错而是**又启一个 GUI**，所以 `pre`/`env` 进了 `Launcher`，并由 `base()` 统一转手给两条调用路径 |
+| S16 DSH 审批上桌宠 | 0 | 0 | 0 | 1 | **沿用 S5 的 P3，不新增漏洞编号**：`/permission` 仍不校 token，本机进程可伪造气泡的既有威胁模型不变，Host/Origin/Content-Type 与一次性内存 pending 不变。新插件只回 `allowed-once` / `rejected` / `cancelled` / `unavailable`，没有永久授权；桌宠不在或网络失败走 `next()`，DSH 仍 fail closed。安装器只维护自己 marker 的 `insert` 段，写前备份、原子写、幂等，不读 DSH 凭据。**信息边界**：DSH 给的是工具名与审批理由，不是独立命令原文；气泡如实显示理由、标出来源与提权高风险，不编造命令。真实允许/拒绝两侧均已验证 |
 | S15 提示不抢焦点 | 0 | 0 | 0 | 0 | **无新增 SEC 编号**。这一轮只改**窗口激活行为**，没有新增命令、窗口、权限或数据源：气泡的白名单（`W_BUBBLE`）、capability、CSP 一字未动，`/permission` 的三道边界（Host/Origin/Content-Type）与"204 = 不做决定"的语义也没动。新增的两行日志只含**自增 id 与结局枚举**，不含命令原文、路径或会话内容（与既有 stderr 诊断同一口径）。`show_no_activate()` 是 `SW_SHOWNOACTIVATE` + `SWP_NOACTIVATE`，纯展示语义，不构成也不削弱任何权限边界；用户点气泡时窗口照常激活，按钮链路不变（闸门全链路仍绿） |
 | S14 指定 session 发送 | 0 | 0 | 0 | 0 | **无新增 SEC 编号**。这一轮**没有新增命令、窗口或参数面**：`say_send` 的签名仍是 `(id, text)`，cwd 依旧**不接受页面传值**（硬约束 46），只是查找来源从"只有状态机"改成"磁盘投影优先、状态机兜底"。完整 cwd 的流转范围没变——它本来就由 `dsh::Probe` 读进宿主内存（`Obs.cwd`），现在只是多被一个**宿主侧**函数消费；出门仍只有 `tail_cwd` / `public_cwd`，SEC-09 的快照断言在闸门里照旧通过。**收敛而非扩大**：指定 id 后查不到 / 不能续 / 平台不对，一律在 spawn 之前报错，不再出现"悄悄新起一条会话"这条意外路径；别家 agent 的会话也不会再被塞给 `dsh --session-id`。闸门 9.5 节用 PATH 最前面的**假 dsh** 记录真实 argv/cwd/stdin，DSH_HOME 仍是临时夹具，全程不碰真实 `~/.dsh` 与凭据 |
 | S13 会话看板两级 | 0 | 0 | 0 | 0 | **新增一条 P3：SEC-18**（跨产品读取会话转录，见 SECURITY.md「十一」）。这一轮把读取面从"DSH 自己的投影"扩到了 **WorkBuddy / Claude Code 的转录文件**，性质要说清楚：① **只读**——不写、不复制、不落盘，摘要只活在内存（`Scanner.cache`）；② 出门只给**摘要**（标题 / 最后一轮 / 轮数 / 目录 basename / mtime），完整目录只留在宿主侧给「复制路径」用，SEC-09 的分层没有破；③ 文本一律截断（400 字）+ `textContent` 写入，续 S12 的老规矩；④ **窗口 7 天 / 每平台 20 条**，不做全库索引。**新面**：读的是另一个产品的私密记录，虽然同用户同权限级（能读到文件本来就意味着能读），但它比"读投影"多得多——所以这条记成 P3 而不是 P0。配套：平台名进 DOM 的 `data-agent` 前先收敛成 `[a-z0-9_-]`（`sanitize_agent`），不让 hook 传来的任意字符串直接当属性值。**而 SEC-16 的过滤仍只装在 hook 侧**：`agents.rs` 的 `title` / `last_prompt` / `last_reply` 三样都**不过 `TITLE_SECRET_RE`**（`grep -rn TITLE_SECRET_RE src-tauri/src/*.rs` 为空，那把正则只活在 `hooks/clawd-hook.js`），暴露面因此比 SEC-17 **大一档**——那边是 80 字标题，这边是整句原话，而看板是常驻可开的窗。这是 SEC-16「过滤在源头」在 Rust 侧仍无落点的**第三个数据源** |
@@ -1554,6 +1582,7 @@ spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"]);
 
 | 日期 | 类型 | 内容 |
 |---|---|---|
+| 2026-11-16 | 功能 | **DeepSeek Harness 的确认上桌宠**（S16，见上方「已完成」与 SECURITY「S16」）。新增 headless Cordis 插件接 `approval/request`，复用同一个 `/permission` 气泡；回包按真实 `hookSpecificOutput.decision.behavior` 映射成 `allowed-once` / `rejected` / `unavailable`，中止为 `cancelled`，网络失败委托 `next()`，不自动允许。新增幂等安装器（`install:hooks:dsh` / preview / uninstall），只维护自己的 `insert` 段并备份原子写，已替换固定 rejected 的实验原型。气泡快照 `agent` 来源，DSH 解除沙箱标高风险，说明文字不再错指 Claude Code。快速闸门 **11/0**、Rust **97/0**、UI **162/0**、打包 **10/0**、回放 **10 步全中**。真实 DSH `workspace-write + ask` 验证：允许后文件确实写入，拒绝后文件确实不存在 |
 | 2026-11-12 | 修复 | **桌宠的提示不再抢焦点**（S15，见上方「已完成」）。用户原话「我希望桌宠的所有提示都不要干扰正在做的事情，比如写 word，发消息」。根因很直白：权限气泡是 `show() + set_focus()`，一条**不请自来**的提示会把键盘抢走——正在 Word 里打字的人，接下来的字会敲进气泡里。新增 `sys::show_no_activate()`（`SW_SHOWNOACTIVATE` + `SetWindowPos(SWP_NOACTIVATE)`），用在三处不请自来的显示上：权限气泡（建窗也加 `.focused(false)`）、发送失败后重新亮出的输入窗、解锁后恢复的等待中气泡；**用户主动点出来的窗口不动**（输入窗/看板仍拿焦点，否则没法打字）。闸门加真判据：气泡完整显示后读 Win32 **前台窗口句柄**必须与弹出前相同。同一句抱怨里的「需要确认的操作没能体现到桌宠上」要分平台：**WorkBuddy 在自己的 GUI 里处理权限、从不调外部端点**（`install.js` 里 `permission:"none"`），它的确认从来不会到桌宠；Claude Code / CodeBuddy 走 HTTP hook 才会。为此 `/permission` 加了 `[perm] 收到/结局` 两行日志——**没有第一行就是请求没到**，别往气泡代码里找。闸门 `cargo test` 95/0、`verify:tauri` 156 → **157** |
 | 2026-11-12 | 修复 | **「指定哪个 session 就发到哪个 session」**（S14，见上方「已完成」）。用户要的这件事以前断在**查找**上，不是断在命令行上：先用真 CLI 证明 DSH 续聊本身是好的（第一轮给它代号 `ALPHA-731`，第二轮带 `--session-id` 问，它答得出且 sessionId 没变），再查我们这边——`say_send` 只问状态机要 cwd，而状态机里只有"最近还在动"的会话，看板列的却是磁盘上的全部会话，于是历史会话一点发送就回「这条会话已经不在了」；`compose_target_of` 反过来只看磁盘投影，活态会话被误判成"写不进去"，前端那时还会**悄悄新起一条**。改成唯一查找入口 `resolve_id()`：**磁盘投影优先、状态机兜底**，两边都没有才报错；`can_resume` 由平台与 `agentPreset` 一起定，`ComposeTarget.reason` 把原因写给界面（界面不自己编理由）。底线是**指定了目标就绝不悄悄换目标**——查不到、不能续、没目录都直接报错；别家 agent 的会话不许塞进 dsh（DSH 的 payload 现在显式写 `agent:"dsh"`）。附带抓出一条假阳性断言：「目标行报出了目录」一直靠警告文案里的 `·` 蒙混通过，夹具根本没给 cwd。闸门 `cargo test` 87 → **95**、`verify:tauri` 140 → **156**（9.5 节用假 dsh 记录真实 argv/cwd/stdin，不调模型）；真机 e2e 对半小时前的真实会话发消息，`reply=ALPHA-731`——代号还记着，才算真的续上 |
 | 2026-11-10 | 功能 | **看板从平铺改成「平台 → 会话」两级**（S13，`425e930`，见上方「已完成」与 SECURITY「十一」）。起因是用户原话「现在的会话太乱了」：一个平铺列表里混着 WorkBuddy 和 DSH 的会话，而它们**能不能说话**都不一样。新增 `src-tauri/src/agents.rs`（527 行，10 条单测）：从 `~/.workbuddy/projects` 与 `~/.claude/projects` 读两家的转录 jsonl，只留摘要（标题 / 最后一轮 / 轮数 / 目录），窗口 7 天、每平台 20 条，**只读、不写、不复制、不落盘**；`cwd` 出门前仍过 `public_cwd`（SEC-09 分层）。两家**行形状不同**（WorkBuddy 是 `{type,role,content:[…],cwd}`、Claude 是 `{type,message:{role,content}}`），`message_of()` 归一成 `(role, blocks)` 后再解。**「能不能说」必须由界面说出来**：DSH 有 `headless --session-id` 这个一等公民入口，WorkBuddy / Claude Code 在本机没有任何 CLI（查遍 `PATH` 与 `~/.workbuddy/binaries`），所以这两家的会话只能看。状态机侧 `Session` / `SessionView` 加 `agent` 字段，`sanitize_agent()` 只留 `a-z0-9-_`（它要进 DOM 的 `data-agent`）；老装法的 hook 一直报 `claude-code`，所以平台名**允许被纠正**而不是钉死不覆盖。附带一条：WorkBuddy 会把系统提示整坨塞进同一条 user 消息（实测 9000+ 字符），不挖 `<user_query>` 的话看板每条标题都是同一段系统提示——那正是"乱"的一部分。**分组只解决了一半**：真机上 DSH 那组一开就是 46 条，所以每组默认只列最近 8 条、其余折成「还有 N 条（展开）」。闸门 `cargo test` 75 → **87/0**、`verify:tauri` 134 → **140/0**（+6），真机截图确认两组都在、「只能看」贴在组头、「还有 38 条」那行是虚线边框。**待用户做一件事**：重跑 `npm run install:hooks` / `npm run install:hooks:workbuddy`——平台名是安装时烘进命令行的，老装的 hook 会一直报 `claude-code` |

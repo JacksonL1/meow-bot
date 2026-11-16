@@ -14,7 +14,7 @@
 // 能感知"对端掐断"，tiny_http 没有这个事件，所以连接被对端放弃时只能等超时兜底
 // （气泡会晚 2 分钟才消失）。结论不变——仍然是 204，仍然不替用户做决定。
 // ============================================================
-use crate::risk::{assess_risk, Risk};
+use crate::risk::{assess_agent_risk, Risk};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -37,6 +37,7 @@ const MAX_TOOL_NAME: usize = 64;
 const MAX_SESSION_ID: usize = 64;
 const MAX_CWD: usize = 1024;
 const MAX_COMMAND: usize = 600;
+const MAX_AGENT: usize = 32;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Outcome {
@@ -55,6 +56,8 @@ pub struct PendingView {
     #[serde(rename = "sessionId")]
     pub session_id: Option<String>,
     pub cwd: Option<String>,
+    /// 请求来源是安装/桥接时写入的事实，渲染层只负责翻译名字，不猜平台。
+    pub agent: String,
     pub risk: Risk,
     pub queued: usize,
 }
@@ -140,10 +143,11 @@ impl Center {
             .collect();
         let session_id = s(payload.get("session_id"), MAX_SESSION_ID);
         let cwd = s(payload.get("cwd"), MAX_CWD);
+        let agent = s(payload.get("agent"), MAX_AGENT).unwrap_or_else(|| "claude-code".into());
 
         // 风险评级在创建时就算好，和命令一起锁定——渲染层拿到的永远是同一份快照。
         // 它只进 UI，不参与任何决策：下面每一条结局都不受它影响。
-        let risk = assess_risk(&tool_name, &command, cwd.as_deref().unwrap_or(""));
+        let risk = assess_agent_risk(&agent, &tool_name, &command, cwd.as_deref().unwrap_or(""));
 
         let (tx, rx) = channel();
         let view = PendingView {
@@ -152,6 +156,7 @@ impl Center {
             command,
             session_id,
             cwd,
+            agent,
             risk,
             queued: 0,
         };
@@ -275,6 +280,15 @@ mod tests {
         let v = &p.get(&id).unwrap().view;
         assert_eq!(v.risk.label, "极高");
         assert_eq!(v.command, "rm -rf /");
+    }
+
+    #[test]
+    fn request_source_is_snapshotted_with_a_safe_default() {
+        let (c, _) = center();
+        let (old_id, _old_rx) = c.create(&serde_json::json!({ "tool_name": "Read" }));
+        assert_eq!(c.view_of(old_id).unwrap().agent, "claude-code");
+        let (dsh_id, _dsh_rx) = c.create(&serde_json::json!({ "tool_name": "pwsh", "agent": "dsh" }));
+        assert_eq!(c.view_of(dsh_id).unwrap().agent, "dsh");
     }
 
     #[test]

@@ -3,7 +3,8 @@
 // ============================================================
 // S4-2  把 hook 装进 agent 的 settings.json
 //
-// 这是整个项目里唯一会改用户全局配置的地方，所以四条规矩：
+// 这里只改普通 agent 的 settings.json；DSH headless profile 由 install-dsh-approval.js 负责。
+// 两个安装器都守四条规矩：
 //   1. 先备份：settings.json.clawd-backup-<时间戳>
 //   2. 原子写：同目录临时文件 + rename，不留半截 JSON
 //   3. 认出自己：只动带 clawd 标记的条目，别人的一个字节都不碰

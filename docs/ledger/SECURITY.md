@@ -1228,6 +1228,54 @@ Claude Code 在本机没有任何 CLI（2026-11-10 查遍 `PATH` 与 `~/.workbud
 
 ---
 
+## S16 DSH 审批桥：新增一个裁决应答者，不新增一条放行规则（2026-11-16）
+
+用户要求至少把 DeepSeek Harness 的确认反映到桌宠。DSH headless 的真实行为是：
+需要审批时没有应答者就直接报 `no approval channel is available`。因此这次不是给气泡
+多接一种文案，而是**新增一个能回答权限请求的插件**，必须按 S5 的 P0 口径重新核对。
+
+### 阶段检查清单
+
+| 检查 | 落地 | 证据 |
+|---|---|---|
+| 默认不决定，绝不超时自动允许 | 桌宠 204 → `unavailable`；网络失败 / 桌宠不在 → `next()`；DSH 轮次 abort → `cancelled` | `verify:dsh` 覆盖 204、连接失败、预先 abort、等待中 abort |
+| 只允许这一次 | 唯一允许词汇是 `allowed-once`；没有 allow-always、永久规则或自动放行 | 插件全文与真实 DSH 允许验证 |
+| 拒绝必须来自明确点击 | 只有桌宠 200 + `behavior:"deny"` 才翻成 `rejected` | 假桌宠回包测试 + 真实点击后目标文件不存在 |
+| 回包与请求一一绑定 | 沿用 `Center` 自增 id + 内存 pending + `settle()` 唯一出口，没有另写裁决通道 | Rust 97 单测与 UI 162 条回归 |
+| HTTP 边界不放宽 | `/permission` 仍只过 Host / Origin / Content-Type；桥不发送 token，也不改变服务端 | 既有 HTTP 断言全绿；桥测试断言无 `x-clawd-token` |
+| 安装不破坏用户 profile | 只维护带 marker 的 `insert` 段；备份 + 同目录临时文件 rename；重复执行无变化 | 临时 profile 安装 / 二次安装 / 卸载测试，真实配置二次 dry-run 无变化 |
+| 不碰 DSH 凭据 | 插件只读桌宠 port 文件；不读 `.credentials.yaml`，不接收 key | 插件 import 只有 `node:fs` / `node:path`；`npm audit` 0 |
+| 用户看得清来源与风险 | `PendingView.agent` 在创建时快照；DSH 显示全名，`danger-full-access` 标 high | UI +5 条来源、风险、理由、超时文案、allow 回包断言 |
+
+### 两处容易静默接错的协议
+
+1. **新增 Cordis 插件必须用 `insert`**。只写一个新 `id` 是对已有插件的覆盖语义，
+   匹配不到目标就会跳过，表现为“文件在、配置也在、插件从未加载”。
+2. **桌宠回包的决定在 `hookSpecificOutput.decision.behavior`**。若读成 `body.decision`，
+   用户点允许或拒绝都会被翻成 `unavailable`。这不是类型错误，运行时不会抛异常，
+   所以快速闸门直接用真实响应形状钉住它。
+
+### 威胁模型与信息边界
+
+- `/permission` 不校 token 的既有 P3 仍在：本机进程可伪造假气泡诱骗点击。这次没有扩大
+  这个面——DSH 桥只是另一个本机调用方，决定仍绑定在同一个 HTTP 请求/响应上，不能拿
+  一个请求的决定回写给另一个请求。浏览器跨源路径仍被 Origin / Content-Type 挡住。
+- DSH 的 `approval/request` 给桌宠的是 `toolName` / `callId` / `reason`，没有独立的
+  shell `tool_input`。气泡显示的是 DSH 真实理由，**不编造“完整命令原文”**。对
+  `escalate sandbox … danger-full-access` 额外标高风险，是为了避免这段非 shell 文本被
+  关键词评级误显示成低危；评级仍只是提示，不参与自动裁决。
+- 桌宠没开时插件不阻塞、不报错、不假装回答，交给后续应答者；没有后续应答者时 DSH
+  维持原来的 fail closed。这条与“方便使用”相比优先保证**不绕过它原有的安全收尾**。
+
+### 真实闭环证据
+
+用真实 DSH `workspace-write --approval-policy ask`，工作区与目标文件都放在临时目录的不同
+位置。两轮均在决定前确认目标文件不存在：点允许后文件内容正确，宿主日志 `Allow`；
+点拒绝后文件仍不存在，DSH 记录拒绝结局，宿主日志 `Deny`。快速测试 11/11、Rust 97/97、
+UI 162/162、打包 10/10、状态回放 10/10，`npm audit` 0 漏洞。
+
+---
+
 ## 附：值得保留的好设计
 
 审计不是只挑毛病，以下三点是这个骨架最容易在后续开发中被破坏、必须守住的东西：

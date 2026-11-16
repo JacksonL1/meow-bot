@@ -25,9 +25,19 @@ const el = {
 // 这行提示是卡片的一部分，每次 render 都要还原——否则上一轮的错误信息
 // 会一直挂在下一轮的卡片上，看着像这条请求也出错了。
 const NOTE = el.note.textContent;
+const DSH_NOTE = "不点任何按钮会在 2 分钟后交还给 DeepSeek Harness；没有其他审批通道时会停止该操作。按 Esc 立即交还。";
 
 function setNote(text) {
   el.note.textContent = text || NOTE;
+}
+
+function sourceName(agent) {
+  return {
+    dsh: "DeepSeek Harness",
+    "claude-code": "Claude Code",
+    codebuddy: "CodeBuddy",
+    workbuddy: "WorkBuddy",
+  }[agent] || agent || "Claude Code";
 }
 
 // 命令是 agent 送过来的不可信字符串。风险理由是我们自己写的固定文案，
@@ -56,12 +66,12 @@ function render(req) {
   // 否则第二个及以后的权限请求全都点不动，只能等到超时回落。
   el.allow.disabled = false;
   el.deny.disabled = false;
-  setNote("");
+  setNote(req.agent === "dsh" ? DSH_NOTE : "");
   el.tool.textContent = req.toolName || "Unknown";
   // textContent 而不是 innerHTML —— 命令是 agent 给的字符串，绝不能当 HTML 解析
   el.cmd.textContent = req.command || "(没有可显示的参数)";
   renderRisk(req.risk);
-  const parts = [];
+  const parts = [sourceName(req.agent)];
   if (req.cwd) parts.push(req.cwd);
   if (req.sessionId) parts.push(`会话 ${req.sessionId.slice(0, 8)}`);
   el.meta.textContent = parts.join(" · ");
@@ -127,7 +137,7 @@ async function decide(decision) {
 el.allow.addEventListener("click", () => decide("allow"));
 el.deny.addEventListener("click", () => decide("deny"));
 
-// Esc = 我不表态，交还给 Claude Code 原生提示（不是拒绝）
+// Esc = 我不表态，交还给请求来源自己的流程（不是拒绝）
 window.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && currentId !== null) decide("no-decision");
 });
