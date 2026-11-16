@@ -2,10 +2,11 @@
 // ============================================================
 // 输入窗：桌宠的「说一句话」入口（2026-11-05）
 //
-// 这扇窗唯一的职责是把一句话交给宿主，并且**在交出去之前**把两件事说清楚：
+// 这扇窗唯一的职责是把一句话交给宿主，并且**在交出去之前**把三件事说清楚：
 //   1. 这句话会落到哪（新会话 / 某条会话的标题 + 目录）
 //   2. 它能不能落到那儿（桌面端建的会话，一次性 runner 写不进去）
-// 第 2 点必须在打开时就显示，而不是等用户按了回车再报错。
+//   3. 此刻能不能落进去（写锁被桌面端攥着——它放开之后这里会自己变回来）
+// 三条都必须在打开时就显示，而不是等用户按了回车再报错。
 //
 // 安全：这里是全项目唯一处理"用户刚敲进来的原文"的页面。
 //   · 只用 textContent 写 DOM，绝不 innerHTML。
@@ -79,12 +80,52 @@ function renderTarget() {
     setFoot(blockedText(), true);
     el.text.disabled = false;
   }
+  if (target.locked) {
+    const lock = document.createElement("span");
+    lock.textContent = " · 写锁被占着";
+    el.to.append(lock);
+    // 两个原因同时成立时先报"写不进去"：那是**永久**的，锁只是此刻。
+    if (target.can_resume !== false) setFoot(lockedText(), true);
+  }
 }
 
 /** 指定了目标却写不进去时，那一行该说什么。两处用同一句（打开时 + 按回车时）。 */
 function blockedText() {
   const why = (target && target.reason) || "这条会话没法从桌宠往里写";
   return `${why}。要新起一条，用泡泡底部的「说一句」`;
+}
+
+/**
+ * 写锁被别的进程攥着时，那一行该说什么（2026-11-16）。
+ *
+ * 这句话里必须出现"放开之后会自己变回来"：用户要做的事是**去客户端关掉那条会话**，
+ * 而关完之后他一定还站在这扇窗前。不说这一句，他会以为得重新点开一次。
+ */
+function lockedText() {
+  return "这条会话的写锁被 DSH 桌面端占着——它开着这条会话就一直占着。在客户端里关掉它（或退出桌面端）就能发，锁一放开这里会自己变回来";
+}
+
+/**
+ * 锁的状态变了（打开时探一次 + 窗开着时每 2 秒探一次）。
+ *
+ * 为什么值得轮询：锁是唯一"用户在别的窗口里操作一下就会变"的状态。用户看到
+ * "被占着"，去客户端把会话关掉，回到这里还得再猜一次——"它还真占着吗？"
+ * 每 2 秒问一个 bool 的代价可以忽略，换来的是他自己能看见那句话变成"可以发了"。
+ */
+function applyLock(v) {
+  const next = Boolean(v);
+  const was = Boolean(target && target.locked);
+  if (target) target.locked = next;
+  if (was === next) return;
+  renderTarget();
+  if (next) {
+    setFoot(lockedText(), true);
+  } else if (target && target.can_resume === false) {
+    setFoot(blockedText(), true);
+  } else if (!busy && !sentPrompt && el.ans.hidden) {
+    // 别在"已送出 / 它说完了"上面盖一句无关的话：锁变了不代表这一发有了结局。
+    setFoot("写锁放开了，可以发了 · Enter 发送", false);
+  }
 }
 
 function setFoot(text, bad) {
@@ -175,6 +216,14 @@ async function submit() {
   const text = el.text.value.trim();
   if (!text) {
     setFoot("还没写要说什么", true);
+    el.text.focus();
+    return;
+  }
+  // 写锁被占着：这一发必然失败（DSH 一撞就抛 SessionAlreadyOwnedError，它自己不重试），
+  // 与其起一个 node、等两秒、再收一句看不懂的话，不如在这里就停住并说清该做什么。
+  // 判据是上一拍探测的结果；就算这一拍过期了，宿主侧的那条重发+取证也还在兜底。
+  if (target && target.id && target.locked) {
+    setFoot(lockedText(), true);
     el.text.focus();
     return;
   }
@@ -282,6 +331,43 @@ function stopPolling() {
   pollTimer = null;
 }
 
+// ---- 锁的轮询（2026-11-16）----
+//
+// 节奏比目标轮询慢（2s vs 500ms）：目标是"点了别的会话就会变"，要跟手；
+// 锁只有在用户在**别的窗口**里动过之后才会变，快也没有意义。
+// 发送中一律不探：那一小段时间里锁是**我们自己**的 dsh 子进程拿着，
+// 探出来必然是 true，报"被占着"纯属自己吓自己。
+let lockTimer = null;
+
+function refreshLock() {
+  if (!target || !target.id || busy) return;
+  const id = target.id;
+  window.clawd
+    .composeLock()
+    .then((v) => {
+      // 回来的时候目标可能已经换了：这扇窗是复用的，而探的是上一个 id 的锁。
+      // 不比对的话，上一个目标的"被占着"会贴到新目标头上——看着像随机的假警报。
+      if (!target || target.id !== id) return;
+      applyLock(v);
+    })
+    .catch(() => {});
+}
+
+function startLockWatch() {
+  refreshLock();
+  if (lockTimer) return;
+  lockTimer = setInterval(refreshLock, 2000);
+}
+
+function stopLockWatch() {
+  if (!lockTimer) return;
+  clearInterval(lockTimer);
+  lockTimer = null;
+}
+
+window.addEventListener("focus", startLockWatch);
+window.addEventListener("blur", stopLockWatch);
+
 window.addEventListener("focus", startPolling);
 window.addEventListener("blur", stopPolling);
 
@@ -292,7 +378,10 @@ window.clawd
     el.text.focus();
   })
   .catch(() => {});
-if (document.hasFocus()) startPolling();
+if (document.hasFocus()) {
+  startPolling();
+  startLockWatch();
+}
 
 // 一句话的结局：成功时把答案写进这张卡，失败时把原因和原话留下。
 // 两条路都走 handleDone，界面只有一处状态机。
@@ -301,11 +390,18 @@ window.clawd.onSayDone(handleDone);
 // 调试入口：回归脚本用它灌一份目标 / 读回当前状态 / 模拟一次结局
 window.composeDebug = {
   adopt,
+  // 锁也是同一个入口：轮询回来走 applyLock，回归里也走它——不是复制出来的第二条路。
+  // （真机要造一把"被人占着"的锁得先有个活着的持有者，回归里造不出来。）
+  lock: applyLock,
+  // 回归专用：把 2 秒轮询停掉再喂状态。不停的话，喂进去的 true 会在下一拍被
+  // 真实探测（false）盖回去——那不是被测代码有问题，是测试自己在和它赛跑。
+  lockWatch: (on) => (on ? startLockWatch() : stopLockWatch()),
   // 回归里不真的调模型（一次 8 秒 + 花钱），但"答案要落在卡上"必须钉住，
   // 所以把结局入口也露出来——它和 say:done 走的是同一个函数，不是复制品。
   sayDone: (d) => handleDone(d),
   state: () => ({
     target,
+    locked: Boolean(target && target.locked),
     busy,
     text: el.text.value,
     to: el.to.textContent,

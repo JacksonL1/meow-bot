@@ -154,6 +154,9 @@
     // 输入窗自己用：加载完来要一次目标（第一次打开时 compose:open 会赶在
     // 页面就绪之前发出，收不到），以及关掉自己。
     composeContext: () => call("compose_context"),
+    // 写锁还在不在（只回一个 bool）。目标由宿主自己取——这个参数位空着是刻意的，
+    // 页面能传 id 就等于能探任意路径。见 main.rs 的 compose_lock。
+    composeLock: () => call("compose_lock"),
     composeClose: () => send("compose_close"),
     // 答案落地后把窗口长到刚好放得下（h=0 恢复基准高度）。
     composeHeight: (h) => send("compose_height", { h: Number(h) || 0 }),

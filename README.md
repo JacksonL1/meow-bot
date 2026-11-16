@@ -555,8 +555,8 @@ themes/ragdoll/
 
 | 闸门 | 命令 | 现在的数 | 它回答什么 |
 |---|---|---|---|
-| UI | `npm run verify:tauri` | **166 PASS / 0 FAIL** | 二进制跑起来之后，行为对不对 |
-| 单测 | `cd src-tauri && cargo test` | **100 passed** | 状态机 / 风险评级 / 主题校验 / DSH 翻译 / 会话写锁的纯逻辑 |
+| UI | `npm run verify:tauri` | **175 PASS / 0 FAIL** | 二进制跑起来之后，行为对不对 |
+| 单测 | `cd src-tauri && cargo test` | **102 passed** | 状态机 / 风险评级 / 主题校验 / DSH 翻译 / 会话写锁的纯逻辑 |
 | DSH 审批桥 | `npm run verify:dsh` | **11 PASS / 0 FAIL** | 安装是否幂等、用户决定是否被翻成正确的 DSH 词汇 |
 | 打包 | `npm run verify:bundle` | **10 PASS**（`--install` 再 +15） | 用户拿到手的那一包，装得上、卸得干净 |
 | 回放 | `npm run verify:diag` | **10 步全中** | 真实事件序列走一遍，状态有没有掉 |

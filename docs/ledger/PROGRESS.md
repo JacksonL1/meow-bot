@@ -25,8 +25,8 @@ WorkBuddy 仍在自己的 GUI 里处理权限，这个边界没有变。
 
 | 闸门 | 脚本 | 结果 | 断言数 |
 |---|---|---|---|
-| Tauri 2.12.5 + WebView2 | `npm run verify:tauri` | **166 PASS / 0 FAIL** | 166 |
-| Rust 单测 | `cd src-tauri && cargo test` | **100 passed / 0 failed** | 100 |
+| Tauri 2.12.5 + WebView2 | `npm run verify:tauri` | **175 PASS / 0 FAIL** | 175 |
+| Rust 单测 | `cd src-tauri && cargo test` | **102 passed / 0 failed** | 102 |
 | DSH 审批桥 | `npm run verify:dsh` | **11 PASS / 0 FAIL** | 11 |
 | 打包（NSIS 安装包） | `npm run verify:bundle:install` | **25 PASS / 0 FAIL** | 25 |
 | 状态回放（真实事件序列） | `npm run verify:diag` | **10 步全中期望** | 10 |
@@ -1582,6 +1582,7 @@ spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"]);
 
 | 日期 | 类型 | 内容 |
 |---|---|---|
+| 2026-11-16 | 功能 | **输入窗在打字之前就说"这条现在发不进去"**。写锁被占着时以前只能等按了回车，起一个 node、等两秒、再收一句报错——而用户为此还得先打完一屏字。现在 `ComposeTarget` 多一个 `locked`（打开那一刻由 `dshlock::state_for` 填），另加一条 `compose_lock` 命令给窗开着时的 2 秒轮询：目标行写「· 写锁被占着」，提示行说清"去客户端关掉它（或退出桌面端）就能发，锁一放开这里会自己变回来"。三条约束：① 指纹 `id/title/cwd/can_resume/reason` **不含 locked**——它必须能变，放进去会让"用户去关会话"变成"输入框被清空"；② 发送中不探（那一小段是**我们自己的** dsh 子进程拿着锁，探出来必然 true）；③ 探测回来要比对 id（窗是复用的）。命令只对输入窗开放，页面传不了 id（否则等于能探任意路径）。闸门补 9 条：真探测 false、桌宠窗口调它被拒、快照字段名对得上、被占着时目标行/提示行怎么写、**按 Enter 一个进程都不起**、字不被清空、放开后自己变回来。UI 166 → **175**，Rust 100 → **102**（`dshlock` 多一条"自己造锁→Held→Free→Absent"的往返测试） |
 | 2026-11-16 | 修复 | **「另一个 dsh 正开着这条会话」的真因：Windows 上是命名信号量，而且桌面端开着就一直攥着**。用户反馈三条嫌疑全排除（客户端没开那条、桌宠没有在跑、终端没有 dsh）后，前两版判断（"瞬时冲突，退避 1.2s/3s 重发即可"、"查 `session.lock` 文件在不在"）**都被实测推翻**：`session.lock` 在 Windows 上根本不会被创建，文件探测永远是假阴性。新增 `dshlock.rs` 照 DSH 真实判据走——`Local\dsh-session-lock-<sha256(小写化绝对路径)>` 命名信号量，`WaitForSingleObject(0)` 拿到计数即 `Held`（拿到必须 `ReleaseSemaphore` 还回去，否则探测自己吃锁）；三条状态 `Held`/`Free`/`Absent`，查不出来一律当 `Absent`（不编"有人占着"）。真机探针实测：同一条会话 40 分钟内反复探测都是 `Held`，持有者是从 10:08 起一直开着的桌面宿主——**写锁不是"按操作短暂持有"**。发送链路据此改成三步：先重发一次（覆盖真瞬时）→ 还撞就取证，锁仍 `Held` 就**停止盲等**（不再白等 3s 说同一句话）→ 现场（状态 + 目录桶）贴到原因后面并追加到 `%TEMP%\clawd-say-diag.txt`。文案改为"桌面端只要开着这条会话就一直占着，关掉它或退出桌面端后再发"。Rust **100/100**（含 3 条 SHA-256 标准向量、信号量名钉死期望值、真机探针 `#[ignore]`）、UI **166/0** |
 | 2026-11-16 | 功能 | **看板：DSH 的 headless 一次性历史收进折叠分组**。用户问「为什么看板 56 条、DSH 客户端只有 5 条」——看板列的是磁盘全量投影（46 条是 `dsh headless` 一次性残留，多数是我们自己的验证跑出来的），客户端只展示交互会话。主列表改为按 `has_stats === false`（headless 不写 sessionStats，宿主早已序列化）把**非活跃**的 headless 会话归进「历史一次性会话（N 条）」折叠行，点开/收起同步重渲染；活着的会话永远留主列表，折叠组里是完整卡片（headless 恰恰是能续聊的那批）。顶部聚合与组头计数同口径单列「历史 N 条」。闸门补 4 条（默认折叠 / 行文案条数 / 展开见整卡 / 再收撤出 DOM），UI 162 → **166 条**。顺手修掉重构引入的回归：「还有 N 条」不再需要时必须 `remove()`（FILE_MAP 那条教训的又一次验证） |
 | 2026-11-16 | 功能 | **DeepSeek Harness 的确认上桌宠**（S16，见上方「已完成」与 SECURITY「S16」）。新增 headless Cordis 插件接 `approval/request`，复用同一个 `/permission` 气泡；回包按真实 `hookSpecificOutput.decision.behavior` 映射成 `allowed-once` / `rejected` / `unavailable`，中止为 `cancelled`，网络失败委托 `next()`，不自动允许。新增幂等安装器（`install:hooks:dsh` / preview / uninstall），只维护自己的 `insert` 段并备份原子写，已替换固定 rejected 的实验原型。气泡快照 `agent` 来源，DSH 解除沙箱标高风险，说明文字不再错指 Claude Code。快速闸门 **11/0**、Rust **97/0**、UI **162/0**、打包 **10/0**、回放 **10 步全中**。真实 DSH `workspace-write + ask` 验证：允许后文件确实写入，拒绝后文件确实不存在 |

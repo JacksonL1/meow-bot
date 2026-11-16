@@ -436,7 +436,7 @@ async function main() {
     ok(
       "window.clawd 20 个动作齐全",
       (await R.eval(
-        "['onState','onCast','onGaze','dragStart','dragEnd','setIgnoreMouse','setHitRects','hitState','dshState','wake','quit','petMenu','toggleDashboard','getTheme','onTheme','openCompose','saySend','onSayDone','composeContext','composeClose'].every(k=>typeof (window.clawd||{})[k]==='function')"
+        "['onState','onCast','onGaze','dragStart','dragEnd','setIgnoreMouse','setHitRects','hitState','dshState','wake','quit','petMenu','toggleDashboard','getTheme','onTheme','openCompose','saySend','onSayDone','composeContext','composeLock','composeClose'].every(k=>typeof (window.clawd||{})[k]==='function')"
       )) === true
     );
     ok(
@@ -760,6 +760,71 @@ async function main() {
         !/写不进去/.test(st2.to || "") && !/写不进去/.test(st2.msg || ""),
         JSON.stringify(st2.msg)
       );
+
+      // ---- 写锁：这一发此刻能不能落进去（2026-11-16）----
+      //
+      // 前两条走真路径：这条会话是 hook 报上来的活态会话、磁盘上没有目录，
+      // 所以探测必然回 false。真机要造一把"被人占着"的锁得先有一个活着的持有者
+      // （DSH 桌面端），回归里造不出来——所以后半段用 composeDebug.lock() 直接喂状态。
+      // 它和 2 秒轮询走的是**同一个 applyLock**，不是复制出来的第二条渲染路径。
+      const lockNow = String(
+        await W.eval("window.clawd.composeLock().then(v=>'V:'+String(v)).catch(e=>'ERR:'+String(e))")
+      );
+      ok("输入窗能问到写锁状态（这条没被占着）", lockNow === "V:false", lockNow);
+      // 名字对不上（snake/camel）时前端会一直读到 undefined，而这种错最安静：
+      // 界面看着正常，只是永远不报"被占着"。所以字段名本身也要钉住。
+      const ctxHas = String(
+        await W.eval("window.clawd.composeContext().then(t=>'HAS:'+String('locked' in (t||{}))).catch(e=>'ERR:'+String(e))")
+      );
+      ok("目标快照里带上了 locked 字段（序列化名对得上）", ctxHas === "HAS:true", ctxHas);
+      const lockFromPet = String(
+        await R.eval(
+          "window.__TAURI_INTERNALS__.invoke('compose_lock',{}).then(()=>'ALLOWED').catch(e=>'ERR:'+String(e))"
+        )
+      );
+      ok(
+        "桌宠窗口调锁探针 → 被拒（没把它做成公共接口）",
+        /ERR:.*forbidden/.test(lockFromPet),
+        lockFromPet.slice(0, 60)
+      );
+
+      // 先停掉 2 秒轮询，否则喂进去的 true 会在下一拍被真实探测盖回去
+      await W.eval("window.composeDebug.lockWatch(false), 1");
+      await W.eval("window.composeDebug.lock(true), 1");
+      const lockedSt = JSON.parse((await W.eval("JSON.stringify(window.composeDebug.state())")) || "{}");
+      ok(
+        "被占着时目标行就写出来（打开窗那一刻，不是按了回车才知道）",
+        lockedSt.locked === true && /写锁被占着/.test(lockedSt.to || ""),
+        JSON.stringify(lockedSt.to)
+      );
+      ok(
+        "被占着时提示行说清了该做什么，并写明会自己变回来",
+        lockedSt.bad === true && /桌面端占着/.test(lockedSt.msg || "") && /关掉它/.test(lockedSt.msg || "") && /自己变回来/.test(lockedSt.msg || ""),
+        lockedSt.msg
+      );
+
+      // 关键：**一个进程都不许起**。用桩记一次调用，按完 Enter 必须还是 0。
+      await W.eval(
+        "window.__lockSends = 0; window.__realSay3 = window.clawd.saySend; window.clawd.saySend = () => { window.__lockSends++; return Promise.resolve({ok:true}); }; 1"
+      );
+      await W.eval(
+        "(()=>{const t=document.getElementById('text');t.value='这句不该发出去';t.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));return 1})()"
+      );
+      await sleep(300);
+      const blockedSt = JSON.parse((await W.eval("JSON.stringify(window.composeDebug.state())")) || "{}");
+      ok("被占着时按 Enter 一个进程都不起", Number(await W.eval("window.__lockSends")) === 0, String(await W.eval("window.__lockSends")));
+      ok(
+        "被占着时按 Enter 不会把输入框清空（字还在，放开就能发）",
+        /这句不该发出去/.test(blockedSt.text || "") && blockedSt.busy === false,
+        JSON.stringify(blockedSt.text)
+      );
+      await W.eval("window.clawd.saySend = window.__realSay3, 1");
+
+      await W.eval("window.composeDebug.lock(false), 1");
+      const freedSt = JSON.parse((await W.eval("JSON.stringify(window.composeDebug.state())")) || "{}");
+      ok("锁放开后提示行自己变回来（用户不用重开窗）", freedSt.locked === false && /可以发了/.test(freedSt.msg || ""), freedSt.msg);
+      ok("锁放开后目标行不再写「写锁被占着」", !/写锁被占着/.test(freedSt.to || ""), JSON.stringify(freedSt.to));
+      await W.eval("window.composeDebug.lockWatch(true), 1");
 
       // 空文字不许发出去（也不该起进程）
       const empty = String(

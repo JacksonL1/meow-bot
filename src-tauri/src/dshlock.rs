@@ -235,6 +235,54 @@ mod tests {
         assert_eq!(state, LockState::Held);
     }
 
+    /// 查不到就是"没有"，不是"可能有人占着"。
+    /// 这条守的是输入窗：查错一律当 Absent 只会让"发送"亮着（用户按下去最多收一句
+    /// 真错），反过来一律当 Held 会让**所有**历史会话都显示"发不出去"，那是更糟的谎。
+    #[test]
+    fn an_unknown_session_is_absent_not_held() {
+        let (state, dirs) = state_for("session-does-not-exist-verify");
+        assert_eq!(state, LockState::Absent);
+        assert!(dirs.is_empty());
+        let (empty, dirs2) = state_for("");
+        assert_eq!(empty, LockState::Absent);
+        assert!(dirs2.is_empty());
+    }
+
+    /// 自己造一把锁，再让 `state()` 去判——这条守的是整条探测链的前提：
+    /// "别人手里的锁，我们能看见"。前面那条假阴性的根因就是**看见了另一个对象**，
+    /// 所以这里必须真的 `createSemaphoreW` 造出来，而不是 mock 一个状态。
+    #[cfg(windows)]
+    #[test]
+    fn a_lock_we_hold_ourselves_is_seen_as_held_then_absent_after_release() {
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+        use windows_sys::Win32::System::Threading::{
+            CreateSemaphoreW, ReleaseSemaphore, WaitForSingleObject,
+        };
+
+        // 路径不需要真的存在：信号量名只由字符串算出来。用临时目录是防撞名。
+        let p = std::env::temp_dir()
+            .join("clawd-lock-probe-test")
+            .join("session.lock");
+        let name: Vec<u16> = semaphore_name(&p)
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        unsafe {
+            // 初始计数 1、上限 1：和 DSH 的 createSemaphoreW(null, 1, 1, name) 一致。
+            let h = CreateSemaphoreW(std::ptr::null(), 1, 1, name.as_ptr());
+            assert!(!h.is_null(), "造不出信号量");
+            // 自己把它拿走，等价于"另一个进程正持有"。
+            assert_eq!(WaitForSingleObject(h, 0), WAIT_OBJECT_0);
+            assert_eq!(state(&p), LockState::Held, "持有态必须看得见");
+            // 还回去 = 句柄还在、计数已满：DSH 里对应"刚写完还没关句柄"。
+            let _ = ReleaseSemaphore(h, 1, std::ptr::null_mut());
+            assert_eq!(state(&p), LockState::Free);
+            let _ = CloseHandle(h);
+            // 句柄全关掉，对象就没了。
+            assert_eq!(state(&p), LockState::Absent);
+        }
+    }
+
     /// 名字必须和 DSH 自己算出来的一字不差——差一个字符就查的是另一个信号量，
     /// 得到的"空闲"会是一个假阴性。expected 由 DSH 的规则（PowerShell 侧
     /// 用同一路径算出来）核对过。

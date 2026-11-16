@@ -148,6 +148,12 @@ struct ComposeTarget {    /// Some = 接着这条说；None = 新起一条。
     /// 不能续的原因（`can_resume == false` 时给）。界面**原样显示**，
     /// 不自己编理由：桌面端建的会话和"这是另一家 agent 的会话"不是一回事。
     reason: Option<String>,
+    /// 写锁现在是不是被别的进程攥着（2026-11-16）。
+    ///
+    /// 和 `can_resume` 分开：那个是**这条会话天生写不进去**（另一家 agent、preset 墙），
+    /// 这个只是**此刻有人占着**——桌面端关掉那条会话就会放开，所以必须能变。
+    /// 判据见 `dshlock.rs`：Windows 上是命名信号量，`session.lock` 那个文件根本不存在。
+    locked: bool,
     /// 是谁叫出来的：`main`（桌宠）或 `dashboard`（看板）。
     /// 决定了输入窗贴在哪扇窗上方——从看板点「说」，窗口却蹦到屏幕角落的猫头上，
     /// 用户会以为点错了。
@@ -1052,12 +1058,15 @@ fn compose_target_of(
             if !r.known {
                 return Err(r.reason.unwrap_or_else(|| "这条会话已经不在了".to_string()));
             }
+            // 打开这一刻先探一次，让"被占着"在第一帧就写出来（之后由 compose_lock 续）。
+            let locked = crate::dshlock::state_for(&id).0 == crate::dshlock::LockState::Held;
             Ok(ComposeTarget {
                 can_resume: r.can_resume,
                 reason: r.reason,
                 cwd: state::tail_cwd(&r.cwd),
                 id: Some(id),
                 title: r.title,
+                locked,
                 origin: origin.to_string(),
             })
         }
@@ -1068,6 +1077,9 @@ fn compose_target_of(
             // 新会话没有 preset，天然可以（也就是等下一条消息还能接着它）。
             can_resume: true,
             reason: None,
+            // 还没建出来的会话没有既存锁可占——这里不能"顺手"报 true 保守一下：
+            // 那会让「新会话」这个主路径永远发不出去。
+            locked: false,
             origin: origin.to_string(),
         }),
     }
@@ -1121,6 +1133,27 @@ fn compose_context(
 ) -> Result<Option<ComposeTarget>, String> {
     only(&window, W_COMPOSE)?;
     Ok(st.compose_target.lock().unwrap().clone())
+}
+
+/// 目标的写锁现在还在不在（输入窗每 2 秒问一次）。
+///
+/// 为什么不塞进 `compose_context`：那个是"这次发给谁"的完整快照，每 500ms 就轮询一次，
+/// 而 `adopt()` 是按**整份快照的指纹**决定要不要重置输入框的——把锁放进去，
+/// 用户去客户端关掉那条会话时，正在打的字会被当成"换了目标"清空。
+/// 锁是唯一会**在窗开着的时候变**的字段，所以单独一条命令、单独一个轮询节奏。
+///
+/// 目标从宿主自己存的那份里取，不接受页面传 id：页面能传 id 就等于能探任意路径。
+#[tauri::command]
+fn compose_lock(window: WebviewWindow, st: tauri::State<'_, AppState>) -> Result<bool, String> {
+    only(&window, W_COMPOSE)?;
+    let id = st
+        .compose_target
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|t| t.id.clone());
+    let Some(id) = id else { return Ok(false) };
+    Ok(crate::dshlock::state_for(&id).0 == crate::dshlock::LockState::Held)
 }
 
 #[tauri::command]
@@ -1926,6 +1959,7 @@ fn main() {
             agent_sessions,
             compose_open,
             compose_context,
+            compose_lock,
             compose_close,
             compose_height,
             say_send,
