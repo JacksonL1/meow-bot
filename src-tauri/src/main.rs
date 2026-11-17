@@ -774,6 +774,10 @@ struct SessionRow {
     agent_preset: Option<String>,
     reply_from_say: bool,
     model_default: bool,
+    /// 正在限流重试到第几次（0 = 没有）。
+    retries: u32,
+    /// 上一轮问了但没答上来（限流用尽重试后的样子）。
+    unanswered: bool,
     /// 能不能从桌宠往里发消息。
     ///
     /// 这是**事实**不是开关：DSH 有 `headless --session-id` 这个一等公民入口，
@@ -810,6 +814,8 @@ impl From<dsh::RichSession> for SessionRow {
             agent_preset: r.agent_preset,
             reply_from_say: r.reply_from_say,
             model_default: r.model_default,
+            retries: r.retries,
+            unanswered: r.unanswered,
         }
     }
 }
@@ -840,6 +846,8 @@ impl From<agents::Card> for SessionRow {
             agent_preset: None,
             reply_from_say: false,
             model_default: false,
+            retries: 0,
+            unanswered: false,
             can_say: false,
         }
     }

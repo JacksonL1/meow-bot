@@ -228,6 +228,20 @@ pub struct Obs {
     /// 我们**不去绕**这道闸：绕过它等于拿一套不同的工具集写用户那条会话。
     /// 只是把它提前告诉界面，别让用户打了一屏字才被拒。
     pub agent_preset: Option<String>,
+    /// DSH 正在限流重试（429 这类可重试错误）时，已经重试到第几次。0 = 没在重试。
+    ///
+    /// 来源：`llmRetry` 投影行，val 形如 `{ "<provider>/<policy>": { retry, retryId } }`
+    /// （可能同时有多条策略，取最大的那个 N）。DSH 撞上可重试错误会**自己退避重试**，
+    /// `step/start` / `turn/end` 时清空——所以只有重试正在发生时它才非零。
+    /// 为什么要读它：429 在 DSH 客户端里有横幅，在桌宠里却什么都没有——猫照样"发呆"，
+    /// 用户以为消息丢了（2026-11-17 用户原话「DSH中返回了429错误，桌宠没有提示」）。
+    pub retries: u32,
+    /// 上一轮问了但没答上来：`turnOutline` 最后一条 prompt 有、response 空，
+    /// 而且**这一轮已经关了**（`turnBoundary.openTurnStartSeq == null`）。
+    ///
+    /// `retries` 只覆盖"正在重试"，重试次数用尽、轮次收尾后它会被清空——
+    /// 这条兜住"败完了"的情形。正在跑的那轮（turn 还开着）不算：模型还没开口是常态。
+    pub unanswered: bool,
 }
 
 impl Obs {
@@ -326,6 +340,10 @@ pub struct RichSession {
     /// `agent-default-model` 补来的（headless 会话不在投影里写 `modelSelection`）。
     /// 界面要标一句"默认"，否则用户会以为这条会话真的被钉在了这个模型上。
     pub model_default: bool,
+    /// 正在限流重试到第几次（0 = 没有）。来源与语义见 `Obs::retries`。
+    pub retries: u32,
+    /// 上一轮问了但没答上来。来源与语义见 `Obs::unanswered`。
+    pub unanswered: bool,
 }
 
 impl Obs {
@@ -353,6 +371,8 @@ impl Obs {
             agent_preset: self.agent_preset.clone(),
             reply_from_say: false,
             model_default: false,
+            retries: self.retries,
+            unanswered: self.unanswered,
         }
     }
 }
@@ -510,6 +530,28 @@ pub fn parse_session(id: &str, raw: &str, mtime_ms: i64) -> Option<Obs> {
             .and_then(|x| x.as_str())
             .filter(|s| !s.is_empty())
             .map(|x| x.to_string()),
+        retries: row(rows, "llmRetry")
+            .and_then(|x| x.as_object())
+            .map(|m| {
+                m.values()
+                    .filter_map(|e| e.get("retry"))
+                    .filter_map(|n| n.as_i64())
+                    .max()
+                    .unwrap_or(0)
+                    .max(0) as u32
+            })
+            .unwrap_or(0),
+        // turn 开着时模型还没开口是常态，不能算"没答上来"——只认已关的轮。
+        unanswered: row(rows, "turnBoundary")
+            .and_then(|b| b.get("openTurnStartSeq"))
+            .map(|x| x.is_null())
+            .unwrap_or(false)
+            && last_turn_row
+                .map(|t| {
+                    !t.get("prompt").and_then(|x| x.as_str()).unwrap_or("").is_empty()
+                        && t.get("response").and_then(|x| x.as_str()).unwrap_or("").is_empty()
+                })
+                .unwrap_or(false),
     })
 }
 
@@ -952,6 +994,8 @@ mod tests {
             llm_ms: 0,
             tool_ms: 0,
             agent_preset: None,
+            retries: 0,
+            unanswered: false,
         }
     }
 
@@ -1061,6 +1105,60 @@ mod tests {
         assert_eq!(p.chars().count(), MAX_PROMPT_CHARS + 1, "截断后应多出一个省略号");
         assert!(p.ends_with('…'));
         assert!(o.last_reply.is_none(), "空回复不能变成空字符串");
+    }
+
+    // 429 这类可重试错误，DSH 自己会退避重试，客户端里有横幅、投影里有 `llmRetry`
+    // 行——而桌宠以前什么都没有：猫照样"发呆"，用户以为消息丢了
+    // （2026-11-17 用户原话「DSH中返回了429错误，桌宠没有提示」）。
+    #[test]
+    fn a_retrying_session_reports_which_attempt_it_is_on() {
+        // 多条策略并存时取最大的那个 N——用户只关心"第几次"。
+        let raw = r#"{"version":7,"record":{"identity":{},"rows":{
+          "sessionListMetadata":{"ver":1,"seq":1,"val":{"blank":false,"lastPromptAt":1}},
+          "llmRetry":{"ver":1,"seq":2,"val":{
+            "deepseek-official/normal":{"retry":2,"retryId":"r1"},
+            "deepseek-official/unbounded":{"retry":5,"retryId":"r2"}}}}}}"#;
+        let o = parse_session("s", &raw, 0).unwrap();
+        assert_eq!(o.retries, 5, "取的是最大值，不是条数也不是第一个");
+        assert!(!o.unanswered);
+    }
+
+    #[test]
+    fn a_session_that_is_not_retrying_reports_zero() {
+        let raw = r#"{"version":7,"record":{"identity":{},"rows":{
+          "sessionListMetadata":{"ver":1,"seq":1,"val":{"blank":false,"lastPromptAt":1}},
+          "llmRetry":{"ver":1,"seq":2,"val":{}}}}}"#;
+        let o = parse_session("s", &raw, 0).unwrap();
+        assert_eq!(o.retries, 0, "重试结束（step/start / turn/end）后 val 清空");
+        assert!(!o.unanswered, "没有 turnOutline 时不能凭空说'没答上来'");
+    }
+
+    // "问了但没答上来"必须是**已关的轮**：turn 还开着时模型没开口是常态，
+    // 把它算成失败就是假警报。判定 = turnOutline 最后一项 prompt 有、response 空，
+    // 且 turnBoundary.openTurnStartSeq 已经是 null。
+    #[test]
+    fn an_unanswered_closed_turn_is_visible_but_an_open_one_is_not() {
+        let turn = r#"{"turn":3,"seq":9,"prompt":"归档 sessions 如何隐藏？","response":""}"#;
+        let closed = format!(
+            r#"{{"version":7,"record":{{"identity":{{}},"rows":{{
+              "sessionListMetadata":{{"ver":1,"seq":1,"val":{{"blank":false,"lastPromptAt":1}}}},
+              "turnOutline":{{"ver":2,"seq":9,"val":{{"turns":[{turn}]}}}},
+              "turnBoundary":{{"ver":2,"seq":9,"val":{{"openTurnStartSeq":null,"lastTurn":3}}}}}}}}}}"#
+        );
+        let o = parse_session("s", &closed, 0).unwrap();
+        assert!(o.unanswered, "轮已关、有问无答 → 这就是 429 败完之后的样子");
+
+        let open = closed.replace(r#""openTurnStartSeq":null"#, r#""openTurnStartSeq":7"#);
+        let o = parse_session("s", &open, 0).unwrap();
+        assert!(!o.unanswered, "轮还开着，模型没开口不算失败");
+
+        // 用普通转义字符串而不是 raw string：raw 的 `"#` / `"##` 定界符会吃掉
+        // 紧贴它的引号，"response":"" 里最后一个引号悄悄变成定界符的一部分，
+        // 替换结果多出一个悬空引号，整个 JSON 直接解析失败——这种错肉眼很难看出来。
+        let answered =
+            closed.replace("\"response\":\"\"", "\"response\":\"先说结论\"");
+        let o = parse_session("s", &answered, 0).unwrap();
+        assert!(!o.unanswered, "答了就不算");
     }
 
     // 旧版单文件那条路已经废弃了，但"喂错形状"必须安静地什么都不产出，

@@ -49,7 +49,7 @@ process.env.CLAWD_PORT_FILE = PORT_FILE;
 const DSH_FIXTURE = path.join(TMP_ROOT, "dsh-home");
 const DSH_FIXTURE_ID = "session-dsh-verify";
 
-function writeDshFixture(phase, promptAt, id = DSH_FIXTURE_ID, cwd = "E:\\JacksonLee\\project\\clawd-starter") {
+function writeDshFixture(phase, promptAt, id = DSH_FIXTURE_ID, cwd = "E:\\JacksonLee\\project\\clawd-starter", opts = {}) {
   const dir = path.join(DSH_FIXTURE, "storages", "session_projcache", "sessions");
   fs.mkdirSync(dir, { recursive: true });
   const openStep =
@@ -66,45 +66,62 @@ function writeDshFixture(phase, promptAt, id = DSH_FIXTURE_ID, cwd = "E:\\Jackso
     version: 7,
     record: {
       identity: { createdAt: Date.now(), cwd },
-      rows: {
-        sessionStats: {
-          ver: 1,
-          seq: 9,
-          val: { turns: 1, steps: 1, lastTurn: 1, llmMs: 10, toolMs: 0, openStep, pendingCalls: {} },
-        },
-        title: { ver: 1, seq: 9, val: "DSH 验证会话" },
-        sessionListMetadata: { ver: 1, seq: 9, val: { blank: false, lastPromptAt: promptAt } },
-        plan: { ver: 2, seq: 9, val: { active: false } },
-        permissions: { ver: 1, seq: 9, val: { preset: "read-only" } },
-        // 2026-11-05：看板开始显示"这条会话在干什么"，夹具要带上这些行，
-        // 否则"卡片里有最后一轮对话"这条断言永远只能靠真机碰运气。
-        modelSelection: {
-          ver: 1,
-          seq: 9,
-          val: { lastUsed: { provider: "fixture-provider", model: "fixture-model" }, pending: null },
-        },
-        tokenUsage: {
-          ver: 2,
-          seq: 9,
-          val: {
-            totals: { uncachedInputTokens: 1200, outputTokens: 340, cacheReadTokens: 0, cacheWriteTokens: 0 },
-            last: null,
+      rows: (function build() {
+        const rows = {
+          sessionStats: {
+            ver: 1,
+            seq: 9,
+            val: { turns: 1, steps: 1, lastTurn: 1, llmMs: 10, toolMs: 0, openStep, pendingCalls: {} },
           },
-        },
-        contextPressure: {
-          ver: 5,
-          seq: 9,
-          val: { surfaceTokens: 230, contextWindow: 200000, pressureTokens: 1200 },
-        },
-        turnOutline: {
-          ver: 2,
-          seq: 9,
-          val: {
-            turns: [{ turn: 1, seq: 8, prompt: "验证看板的最后一轮", response: "这一行来自夹具的 turnOutline" }],
-            draft: "",
+          title: { ver: 1, seq: 9, val: "DSH 验证会话" },
+          sessionListMetadata: { ver: 1, seq: 9, val: { blank: false, lastPromptAt: promptAt } },
+          plan: { ver: 2, seq: 9, val: { active: false } },
+          permissions: { ver: 1, seq: 9, val: { preset: "read-only" } },
+          // 2026-11-05：看板开始显示"这条会话在干什么"，夹具要带上这些行，
+          // 否则"卡片里有最后一轮对话"这条断言永远只能靠真机碰运气。
+          modelSelection: {
+            ver: 1,
+            seq: 9,
+            val: { lastUsed: { provider: "fixture-provider", model: "fixture-model" }, pending: null },
           },
-        },
-      },
+          tokenUsage: {
+            ver: 2,
+            seq: 9,
+            val: {
+              totals: { uncachedInputTokens: 1200, outputTokens: 340, cacheReadTokens: 0, cacheWriteTokens: 0 },
+              last: null,
+            },
+          },
+          contextPressure: {
+            ver: 5,
+            seq: 9,
+            val: { surfaceTokens: 230, contextWindow: 200000, pressureTokens: 1200 },
+          },
+          turnOutline: {
+            ver: 2,
+            seq: 9,
+            val: {
+              turns: [{ turn: 1, seq: 8, prompt: "验证看板的最后一轮", response: "这一行来自夹具的 turnOutline" }],
+              draft: "",
+            },
+          },
+        };
+        // 2026-11-17：限流要看得见。retries = DSH 正在退避重试（llmRetry 行）；
+        // unanswered = 重试败完后留下的"有问无答"已关轮（要配 openTurnStartSeq:null，
+        // turn 还开着时模型没开口是常态，不能算失败）。
+        if (opts.retries) {
+          rows.llmRetry = {
+            ver: 1,
+            seq: 9,
+            val: { "fixture-provider/normal": { retry: opts.retries, retryId: "r1" } },
+          };
+        }
+        if (opts.unanswered) {
+          rows.turnOutline.val.turns = [{ turn: 1, seq: 8, prompt: "验证看板的最后一轮", response: "" }];
+          rows.turnBoundary = { ver: 2, seq: 9, val: { openTurnStartSeq: null, lastTurn: 1 } };
+        }
+        return rows;
+      })(),
     },
   };
   fs.writeFileSync(path.join(dir, id + ".json"), JSON.stringify(record));
@@ -1297,6 +1314,46 @@ async function main() {
         JSON.stringify(demoText.slice(0, 60))
       );
       await D.eval("document.getElementById('demo').click(), 1");
+
+      // ---- 9.1.5 限流要看得见（2026-11-17 用户报「DSH 中返回了 429，桌宠没有提示」）----
+      //
+      // 429 在 DSH 客户端里有横幅、投影里有 llmRetry 行，可桌宠以前什么都没有：
+      // 猫照样"发呆"，用户以为消息丢了。两个可观测面都得说出来：
+      //   · 正在重试 —— llmRetry 非零（step/start / turn/end 会清空）；
+      //   · 重试败完 —— turnOutline 留下"有问无答"的已关轮。
+      // 各造一条夹具，走的是**真实探测管道**（不是往渲染层里灌假数据），
+      // 因为要钉的恰恰是"投影 → SessionRow → 卡片"这一整段。
+      writeDshFixture("idle", Date.now(), "session-dsh-retrying", "E:\\JacksonLee\\project\\clawd-starter", { retries: 3 });
+      writeDshFixture("idle", Date.now(), "session-dsh-unanswered", "E:\\JacksonLee\\project\\clawd-starter", { unanswered: true });
+      await sleep(2400);
+      const rich2 = JSON.parse((await D.eval("window.dashboard.agentSessions().then(r=>JSON.stringify(r))")) || "null");
+      const rRow = (Array.isArray(rich2) ? rich2 : []).find((r) => r.id === "session-dsh-retrying");
+      const uRow = (Array.isArray(rich2) ? rich2 : []).find((r) => r.id === "session-dsh-unanswered");
+      ok("探测把 llmRetry 翻译成了 retries", !!rRow && rRow.retries === 3, rRow ? JSON.stringify({ retries: rRow.retries }) : "没有夹具那条");
+      ok(
+        "探测把'有问无答的已关轮'翻译成了 unanswered",
+        !!uRow && uRow.unanswered === true && !!rRow && rRow.unanswered === false,
+        JSON.stringify({ u: uRow && uRow.unanswered, r: rRow && rRow.unanswered })
+      );
+      const badText = String(await D.eval("document.getElementById('groups').textContent"));
+      ok(
+        "卡片写明正在第几次限流重试，并劝住重发的手",
+        /限流重试中（第 3 次）/.test(badText) && /别重发/.test(badText),
+        JSON.stringify(badText.slice(0, 120))
+      );
+      ok("败完的会话直说'问了没答上来'", /上一轮问了没答上来/.test(badText), JSON.stringify(badText.slice(0, 120)));
+      ok("顶部聚合给出在限流重试的条数", /1 条在限流重试/.test(String(await D.eval("document.getElementById('sum').textContent"))), "");
+      ok(
+        "两种提示各只出现在该出现的那一张卡上（正常会话不被冤枉）",
+        (badText.match(/限流重试中/g) || []).length === 1 && (badText.match(/没答上来/g) || []).length === 1,
+        JSON.stringify([(badText.match(/限流重试中/g) || []).length, (badText.match(/没答上来/g) || []).length])
+      );
+      // 夹具用完就撤，别让 9.2 的分组计数多出两条
+      fs.rmSync(path.join(DSH_FIXTURE, "storages", "session_projcache", "sessions", "session-dsh-retrying.json"), { force: true });
+      fs.rmSync(path.join(DSH_FIXTURE, "storages", "session_projcache", "sessions", "session-dsh-unanswered.json"), { force: true });
+      await sleep(2000);
+      const cleanText = String(await D.eval("document.getElementById('groups').textContent"));
+      ok("撤掉夹具后提示也跟着消失（不是残影）", !/限流重试中/.test(cleanText) && !/没答上来/.test(cleanText), JSON.stringify(cleanText.slice(0, 80)));
 
       // ---- 9.2 「平台 → 会话」两级（2026-11-10 用户报「会话太乱了」）----
       //

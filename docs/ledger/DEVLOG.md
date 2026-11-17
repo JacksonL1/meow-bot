@@ -4,6 +4,43 @@
 
 ---
 
+## 2026-11-17 · 上游没报 error 事件，不等于没出错——报错要去投影里找可观测面
+
+**场景**：用户报告「DSH 中返回了 429 错误，桌宠没有提示」。第一反应是去发送链路找
+错误处理——但取证发现链路是通的：桌宠进程健康、token 正常、端口文件在、快照能读。
+问题根本不在"发送"，在**看见**：DSH 撞 429 后自己在退避重试、重试败完，全程
+桌宠这边一个字都看不见，卡片照常显示"没事"。
+
+**为什么看不见**：翻了 asar 里的 `dsh-headless/lib/json-stream-*.js` 和 `index.js`，
+headless JSON 流只有 `status/thinking/text/tool_call/tool_result/session/final`
+七种事件——**没有 error 类型**。轮次失败走 exit code + stderr；`fail()` 写的
+error 事件只是"直接驱动错误"（比如没传 prompt），不是轮次失败。我们常驻盯的是流，
+"监听报错"这条路从设计上就不存在。想等 exit code 也不行：桌宠不是一次性的
+`spawn` 等退出，是常驻的流式消费方。
+
+**出路**：429 的真信号藏在投影里，有两个面——
+① `llmRetry` 行（`{ "<provider>/<policy>": { retry: N } }`，`turn/end` 清空）：
+正在退避重试，取各策略最大 N；
+② `turnOutline` 里"有 prompt 没 response 且轮已关"（`turnBoundary.openTurnStartSeq`
+为 null 且末轮 prompt 非空 response 为空）：重试败完了。
+翻真实会话 cee61cfd 的投影，turn 4/5 正是这个形状——实锤。
+
+**两个坑**：
+- `unanswered` 不能只看"有 prompt 没 response"——**开着的轮只是"还没答"**，
+  必须同时要求轮已关，否则会把正在生成中的轮报成失败。
+- Rust raw string：`r#""response":""#` 里紧贴 `"#` 的那个引号会被当定界符吃掉，
+  pattern 实际变成 `"response":"`，替换后多出悬空引号，JSON 解析失败、
+  `parse_session` 返回 None，测试 unwrap 直接 panic。换 `r##"…"##` 没用（同样语义），
+  最终用普通转义字符串 `""response\":\"\""` 才对。教训：**测试里替换 JSON 片段，
+  别用 raw string**。
+
+**规矩**：① 只报不拦——DSH 自己在退避，桌宠抢着重发只会火上浇油；
+② 文案说人话：「限流重试中（第 N 次）——DSH 在自己退避，别重发」
+「上一轮问了没答上来（多半是限流），等会儿再问」；
+③ 夹具走真实探测管道，不许绕过翻译层直查卡片。
+
+---
+
 ## 2026-11-16 · 「能变的状态」不能塞进那份用来判断"换没换目标"的快照里
 
 **场景**：写锁的真因查清后，下一步是让输入窗在**打字之前**就说出"这条现在发不进去"，

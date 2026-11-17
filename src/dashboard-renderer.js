@@ -420,9 +420,18 @@ function fillCard(card, s, agent, dominantVisual) {
   //    `sayErrors` 按**裸 session id** 存：那个事件只可能来自 DSH 的发送，
   //    和卡片 key（`agent/id`）不是一回事。
   const err = sayErrors.get(String(s.id));
-  card.note.classList.toggle("bad", Boolean(err));
+  // 限流（429 这类）：DSH 在客户端里有横幅、投影里有 llmRetry 行，
+  // 但以前桌宠什么都没有——猫照样"发呆"，用户以为消息丢了。
+  // retries 只在重试**正在进行**时非零（step/start / turn/end 清空）；
+  // 重试次数用尽后 llmRetry 清空，但 turnOutline 会留下"有问无答"的一轮。
+  const retrying = Number(r.retries) > 0;
+  card.note.classList.toggle("bad", Boolean(err) || retrying || Boolean(r.unanswered));
   if (err) {
     card.note.textContent = err;
+  } else if (retrying) {
+    card.note.textContent = `限流重试中（第 ${r.retries} 次）——DSH 在自己退避，别重发`;
+  } else if (r.unanswered) {
+    card.note.textContent = "上一轮问了没答上来（多半是限流），等会儿再问";
   } else if (r.agent_preset) {
     // 桌面端 / 网页端建的会话：一次性 runner 写不进去（原因见 say.rs）。
     // 与其等用户点了「说一句」再被拒，不如现在就说清楚。
@@ -453,12 +462,14 @@ function render(snapshot, rich) {
   const archivedTotal = rows.filter(isArchivedHeadless).length;
   const mainTotal = rows.length - archivedTotal;
   const tok = rows.reduce((a, r) => a + ((r.rich && r.rich.tokens_out) || 0), 0);
+  const retrying = rows.filter((r) => Number(r.rich && r.rich.retries) > 0).length;
   el.sum.replaceChildren();
   const n = document.createElement("b");
   n.textContent = String(mainTotal);
   el.sum.append(n, document.createTextNode(" 条"));
   if (archivedTotal) el.sum.append(document.createTextNode(` · 历史 ${archivedTotal} 条`));
   if (running) el.sum.append(document.createTextNode(` · ${running} 条在跑`));
+  if (retrying) el.sum.append(document.createTextNode(` · ${retrying} 条在限流重试`));
   if (tok) el.sum.append(document.createTextNode(` · 累计出 ${fmtTok(tok)} token`));
 
   el.empty.hidden = rows.length > 0;
