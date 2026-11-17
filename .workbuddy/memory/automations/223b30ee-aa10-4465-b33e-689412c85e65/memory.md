@@ -128,3 +128,33 @@
 - 交叉核实：`git log --since 2026-11-06` 仍只有 11-06 的 4 次提交；`find src hooks scripts docs -newermt "2026-11-09 09:30"` 只命中 `.last-check.json`。工作区脏文件为 11-06 已入账的 3 个台账文件 + 本 memory。
 - FILE_MAP 漏记 7500+ 仍全为 `src-tauri/target/**` 构建物，非缺口。
 - 处理：**未修改任何台账文件**，无新安全发现。
+
+## 2026-11-13 09:20
+- daily-check 首跑退出码 2（「有实质变化」）：HEAD `d3b4f39`、工作区干净、audit 0/0/0、依赖 0，2 个新提交 `9d70a5f`（11-12 10:02 S14 指定 session 发送）与 `d3b4f39`（11-12 14:28 S15 提示不抢焦点）。二跑又「无实质变化」——基线前移老问题，以首跑为准。
+- 交叉核实：两次提交**都自带完整台账更新**（DEVLOG / FILE_MAP / PROGRESS / PROJECT）。PROGRESS 时间线第 1557/1558 行已有 S15、S14 两条 2026-11-12 记录（含 `cargo test` 95/0、`verify:tauri` 157 等真实读数），安全状态表已有 S14、S15 两行（均 0/0/0/0，无新 SEC 编号），且 S13/S12-x 各行齐全；两轮均只改窗口激活行为与查找逻辑，无新命令/窗口/权限/数据源（表内说明与提交正文一致）。
+- 体积行复核一致：PROJECT.md 与 FILE_MAP 表头都记 39 文件 / 17024 行（11-12 14:26），逐项 `wc -l` 实测 3956+1147+8227+3+56+37+13+7+668+2910 = 17024，**完全吻合**，无需订正。
+- FILE_MAP 漏记 7522 全为 `src-tauri/target/**` 构建物（已 gitignore）；`check-filemap.js` 为 **[ok]（78 实际 / 47 条）**。
+- 处理：**未修改任何台账文件**，未动 src/、scripts/，未 commit。无新安全发现（SEC-18 仍为最大编号）。
+- 备注：11-12 那天的两次体检没有留下记录（memory 里 11-11 之后直接跳到今天），但台账本身在提交里已同步，故不缺口。
+
+## 2026-11-13 16:50（当天第二次，与 09:20 那轮同日）
+- daily-check 退出码 2 报「有实质变化」，但**假阳性**：唯一「新增未提交」是脚本自己所在的 `.workbuddy/memory/automations/.../memory.md`（本自动化写的），FILE_MAP 漏记 7522 全是 `src-tauri/target/**` 构建物。
+- 交叉核实：HEAD 仍 `d3b4f39`（与 09:20 那轮完全一致）、11-12 之后无新提交、`find src src-tauri/src hooks scripts docs -newermt "2026-11-12 15:00"` 只命中 `.last-check.json`；audit 0/0/0、依赖 0；`check-filemap.js` [ok]（78 实际 / 47 条）。
+- 处理：**未修改任何台账文件**，未动 src/、scripts/，未 commit。无新安全发现。
+- 新经验：**本自动化的 memory.md 每次运行都会被脚本算作「新增未提交文件」**，从而把「无实质变化」顶成「有实质变化」。以后见到「新增未提交」只有这一条，可直接判为假阳性，不必再查其他。
+
+## 2026-11-16 09:16
+- daily-check.js 结论「无实质变化，无需更新台账」（退出码仍为 2，但结论行为空变化；exit code 与结论不一致属脚本常态，以结论行为准）。
+- 交叉核实一致：HEAD 仍 `d3b4f39`（11-12 14:28，与 11-13 两轮完全相同）、11-12 之后零新提交；`find src src-tauri/src hooks scripts docs -newermt "2026-11-12 15:00"` 只命中 `.last-check.json`；唯一未提交文件是本自动化 memory.md（已知假阳性）；audit 0/0/0、依赖 0；FILE_MAP 漏记 7522 全为 `src-tauri/target/**` 构建物。
+- 处理：**未修改任何台账文件**，未动 src/、scripts/，未 commit。无新安全发现（SEC-18 仍最大编号）。
+- 备注：11-14、11-15 落在周末，无提交无改动，与本次结论自洽。
+
+## 2026-11-16 16:50（当天第二次，与 09:16 那轮同日）
+- daily-check 首跑结论「有实质变化」：HEAD 由 `d3b4f39` 推到 `9dd69f7`，**当日 6 个提交**（S16 DSH 审批气泡 `18e3084`、看板 headless 折叠 `27571a8`、写锁重试三连 `dc0fc5c`/`89f0def`/`a2cf58b`、输入窗「发不进去」`9dd69f7`），工作区仅本 memory.md 脏（已知假阳性），audit 0/0/0，依赖 0（package.json 只加 scripts），`check-filemap.js` **[ok]（82 实际 / 51 条）**。
+- 交叉核实：6 个提交**全部自带台账更新**，时间线已有 4 行 2026-11-16、安全状态表已有 S16 行、DEVLOG 有 4 篇、SECURITY 有「S16」全节（含威胁模型与真实闭环证据），FILE_MAP 已含 4 个新文件（`dshlock.rs` / `dsh-approval-bridge.mjs` / `install-dsh-approval.js` / `verify-dsh-approval.js`）。故**无需新增时间线行**。
+- 实修 2 个文件（均可核实）：
+  1. `PROJECT.md` 三处过期：状态 S1–S12 → **S1–S16**（补 S13–S16 摘要）；体积 39/17024（11-12）→ **43/18325**（16:53 逐项 `wc -l`：src 7js 4145 + 4html 1150 / 12rs 8760 + build.rs 3 + Cargo.toml 56 + tauri.conf 37 + capabilities 13+7 / hooks 4 个 904 / scripts 11 个 3250；+4 文件 = dshlock 299 + 111 + 124 + 191，其余 576 行按目录拆得开）；回归闸门 128 → **175**（逐轮 S13 140 / S14 156 / S15 157 / S16 审批 162 / 看板折叠 166 / 写锁 175）。
+  2. `PROGRESS.md`：安全状态表补 **2 行**（看板 headless 折叠、写锁探测+输入窗预判，均 0/0/0/0 无新 SEC 编号，写明 `compose_lock` 只给 W_COMPOSE、id 从宿主侧取、只回 bool、探测拿到计数必须 ReleaseSemaphore 还回去）；4 条 2026-11-16 时间线行补提交号；「进行中」两处过期（UI 162/Rust 97 → **175/102**；「待用户决策：端口 23333 冲突」→ **已结 11-06 挪到 27333**，`DEFAULT_PORT` 已核）；「S1–S10 全部完成」补注 S11–S16 位置。
+- 未动 src/、scripts/，未 commit。**无新安全发现**（SEC-18 仍最大编号）。
+- 经验：今天 6 个提交都自带台账，**真正的缺口全在 PROJECT.md 的汇总行**（状态/体积/闸门三处停在 11-12）。以后先查这三处，比逐条翻时间线便宜。
+
